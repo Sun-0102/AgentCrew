@@ -21,7 +21,7 @@ impl Store {
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if matches!(previous, 1..=4) {
+        if matches!(previous, 1..=5) {
             let backup = store
                 .path
                 .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
@@ -39,6 +39,7 @@ impl Store {
             include_str!("../../migrations/003_conversations.sql"),
             include_str!("../../migrations/004_groups.sql"),
             include_str!("../../migrations/005_deepseek.sql"),
+            include_str!("../../migrations/006_deepseek_groups.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
@@ -327,7 +328,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 
@@ -532,7 +533,7 @@ mod tests {
             store
                 .connect()
                 .unwrap()
-                .query_row("SELECT COUNT(*) FROM deepseek_session", [], |r| r
+                .query_row("SELECT COUNT(*) FROM deepseek_sessions", [], |r| r
                     .get::<_, u32>(0))
                 .unwrap(),
             0

@@ -664,8 +664,8 @@ impl Runtime {
 
     pub fn snapshot(&self, store: &Store, conversation_id: &str) -> Reply {
         let connection = store.connect()?;
-        let mut statement = connection.prepare("SELECT item_id,role,text,created_at FROM codex_messages WHERE conversation_id=?1 ORDER BY sequence").map_err(|e| e.to_string())?;
-        let messages = statement.query_map([conversation_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"role":row.get::<_,String>(1)?,"text":row.get::<_,String>(2)?,"created_at":row.get::<_,Option<String>>(3)?}))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+        let mut statement = connection.prepare("SELECT item_id,role,text,created_at,agent FROM codex_messages WHERE conversation_id=?1 ORDER BY sequence").map_err(|e| e.to_string())?;
+        let messages = statement.query_map([conversation_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"role":row.get::<_,String>(1)?,"text":row.get::<_,String>(2)?,"created_at":row.get::<_,Option<String>>(3)?,"agent":row.get::<_,String>(4)?}))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
         let s = session(store, conversation_id)?;
         let mut approvals = Vec::new();
         if let Some(client) = self.client.lock().unwrap().as_ref() {
@@ -718,7 +718,7 @@ fn session(store: &Store, conversation_id: &str) -> Result<Option<Value>, String
     store.connect()?.query_row("SELECT thread_id,model,runtime_version,status,turn_id,error,provider FROM codex_sessions WHERE conversation_id=?1", [conversation_id], |row| Ok(json!({"thread_id":row.get::<_,String>(0)?,"model":row.get::<_,String>(1)?,"runtime_version":row.get::<_,String>(2)?,"status":row.get::<_,String>(3)?,"turn_id":row.get::<_,Option<String>>(4)?,"error":row.get::<_,Option<String>>(5)?,"provider":row.get::<_,String>(6)?}))).optional().map_err(|e| e.to_string())
 }
 
-fn active(status: &str) -> bool {
+pub(crate) fn active(status: &str) -> bool {
     matches!(
         status,
         "starting" | "running" | "waiting_approval" | "cancel_requested" | "stopping"

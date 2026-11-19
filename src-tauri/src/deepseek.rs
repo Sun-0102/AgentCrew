@@ -15,6 +15,7 @@ use std::{
 
 type Reply = Result<Value, String>;
 const VERSION: &str = "0.2.1-rc.2";
+pub const PERSONAL: &str = "deepseek-personal";
 const PROFILE: &str = "ai-gent-sdk";
 
 #[derive(Default)]
@@ -128,6 +129,7 @@ struct Client {
     healthy: AtomicBool,
     database: PathBuf,
     thread: String,
+    conversation: String,
     #[cfg(windows)]
     job: crate::codex::ProcessJob,
 }
@@ -137,6 +139,7 @@ impl Client {
         install: &Installation,
         workspace: &str,
         thread: &str,
+        conversation: &str,
         model: &str,
     ) -> Result<Arc<Self>, String> {
         let patch = runtime_dir(store)?.join("private.patch.yml");
@@ -186,6 +189,7 @@ impl Client {
             healthy: AtomicBool::new(true),
             database: store.path.clone(),
             thread: thread.into(),
+            conversation: conversation.into(),
             #[cfg(windows)]
             job,
         });
@@ -266,7 +270,7 @@ impl Client {
             };
             let connection = store.connect()?;
             // Resume replays old events. Only the current running turn may append UI records.
-            let active: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM deepseek_session WHERE thread_id=?1 AND status='running')",[&self.thread],|r|r.get(0)).map_err(|e|e.to_string())?;
+            let active: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM deepseek_sessions WHERE thread_id=?1 AND status='running')",[&self.thread],|r|r.get(0)).map_err(|e|e.to_string())?;
             if !active {
                 return Ok(());
             }
@@ -281,12 +285,22 @@ impl Client {
                     let text = message_text(message);
                     if !text.is_empty() {
                         let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
-                        connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,?2,?3) ON CONFLICT(item_id) DO NOTHING",params![id,role,text]).map_err(|e|e.to_string())?;
+                        append_message(&connection, &self.conversation, id, role, &text)?;
                     }
                     if let Some(blocks) = message["content"].as_array() {
                         for block in blocks.iter().filter(|b| b["type"] == "tool-call") {
                             let id = block["id"].as_str().ok_or("DeepSeek 工具缺少标识")?;
-                            connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,'tool',?2) ON CONFLICT(item_id) DO NOTHING",params![format!("call:{id}"),format!("工具开始：{}\n{}",block["name"].as_str().unwrap_or("未知工具"),block["arguments"].as_str().unwrap_or(""))]).map_err(|e|e.to_string())?;
+                            append_message(
+                                &connection,
+                                &self.conversation,
+                                &format!("call:{id}"),
+                                "tool",
+                                &format!(
+                                    "工具开始：{}\n{}",
+                                    block["name"].as_str().unwrap_or("未知工具"),
+                                    block["arguments"].as_str().unwrap_or("")
+                                ),
+                            )?;
                         }
                     }
                 }
@@ -351,6 +365,21 @@ impl Client {
     }
 }
 
+fn append_message(
+    connection: &rusqlite::Connection,
+    conversation: &str,
+    id: &str,
+    role: &str,
+    text: &str,
+) -> Result<(), String> {
+    if conversation == PERSONAL {
+        connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,?2,?3) ON CONFLICT(item_id) DO NOTHING", params![id,role,text]).map_err(|e|e.to_string())?;
+    } else {
+        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'deepseek') ON CONFLICT(conversation_id,item_id) DO NOTHING", params![conversation,format!("deepseek:{id}"),role,text]).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
 fn message_text(message: &Value) -> String {
     message["content"]
         .as_array()
@@ -364,8 +393,8 @@ fn message_text(message: &Value) -> String {
         })
         .unwrap_or_default()
 }
-fn session(store: &Store) -> Reply {
-    store.connect()?.query_row("SELECT thread_id,model,runtime_version,workspace_path,status,error FROM deepseek_session WHERE id=1",[],|r|Ok(json!({"thread_id":r.get::<_,String>(0)?,"model":r.get::<_,String>(1)?,"runtime_version":r.get::<_,String>(2)?,"workspace_path":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"error":r.get::<_,Option<String>>(5)?}))).optional().map(|s|s.unwrap_or(Value::Null)).map_err(|e|e.to_string())
+pub fn session(store: &Store, conversation: &str) -> Reply {
+    store.connect()?.query_row("SELECT thread_id,model,runtime_version,workspace_path,status,error FROM deepseek_sessions WHERE conversation_id=?1",[conversation],|r|Ok(json!({"thread_id":r.get::<_,String>(0)?,"model":r.get::<_,String>(1)?,"runtime_version":r.get::<_,String>(2)?,"workspace_path":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"error":r.get::<_,Option<String>>(5)?}))).optional().map(|s|s.unwrap_or(Value::Null)).map_err(|e|e.to_string())
 }
 fn set_status(
     store: &Store,
@@ -373,12 +402,12 @@ fn set_status(
     status: &str,
     error: Option<&str>,
 ) -> Result<(), String> {
-    store.connect()?.execute("UPDATE deepseek_session SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')",params![thread,status,error]).map_err(|e|e.to_string())?;
+    store.connect()?.execute("UPDATE deepseek_sessions SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')",params![thread,status,error]).map_err(|e|e.to_string())?;
     Ok(())
 }
 
 pub fn ensure_idle(store: &Store) -> Result<(), String> {
-    let busy:bool=store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_session WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let busy:bool=store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     if busy {
         Err("已有任务正在执行，请先完成或取消。".into())
     } else {
@@ -386,7 +415,7 @@ pub fn ensure_idle(store: &Store) -> Result<(), String> {
     }
 }
 pub fn recover(store: &Store) -> Result<(), String> {
-    store.connect()?.execute("UPDATE deepseek_session SET status='interrupted',error='程序已重启，上次执行结果未知；请核对文件后继续。' WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')",[]).map_err(|e|e.to_string())?;
+    store.connect()?.execute("UPDATE deepseek_sessions SET status='interrupted',error='程序已重启，上次执行结果未知；请核对文件后继续。' WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')",[]).map_err(|e|e.to_string())?;
     Ok(())
 }
 
@@ -402,6 +431,7 @@ impl Runtime {
             &install,
             workspace.to_str().ok_or("私聊目录无效")?,
             "ai-gent-auth-probe",
+            PERSONAL,
             models[0]["model"].as_str().ok_or("模型目录无效")?,
         )?;
         let auth = client
@@ -421,9 +451,12 @@ impl Runtime {
             .prepare("SELECT item_id,role,text,created_at FROM deepseek_messages ORDER BY sequence")
             .map_err(|e| e.to_string())?;
         let messages=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"role":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,String>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-        Ok(json!({"session":session(store)?,"messages":messages,"approvals":[]}))
+        Ok(json!({"session":session(store, PERSONAL)?,"messages":messages,"approvals":[]}))
     }
     pub fn send(&self, store: &Store, model: &str, text: &str) -> Reply {
+        self.send_to(store, PERSONAL, model, text)
+    }
+    pub fn send_to(&self, store: &Store, conversation: &str, model: &str, text: &str) -> Reply {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
         if text.trim().is_empty() || text.len() > 100000 {
             return Err("消息为空或过长。".into());
@@ -439,7 +472,7 @@ impl Runtime {
         {
             return Err("请选择 Harness 目录中的模型。".into());
         }
-        let existing = session(store)?;
+        let existing = session(store, conversation)?;
         if !existing.is_null() && existing["runtime_version"] != install.version {
             return Err("Harness 版本已变化，请先核对历史会话兼容性。".into());
         }
@@ -447,10 +480,16 @@ impl Runtime {
             let _ = old.request("shutdown", json!({}), Duration::from_secs(5));
             old.stop()?;
         }
-        let workspace = runtime_dir(store)?.join("workspace");
-        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let workspace = if conversation == PERSONAL {
+            let path = runtime_dir(store)?.join("workspace");
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            path
+        } else {
+            store.validate_group_target(conversation, "deepseek")?;
+            PathBuf::from(store.conversation_root(conversation)?)
+        };
         let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
-        let workspace = workspace.to_str().ok_or("DeepSeek 私聊路径无效")?;
+        let workspace = workspace.to_str().ok_or("DeepSeek 工作目录路径无效")?;
         // Node's realpath handling in this Harness version rejects Windows verbatim cwd paths.
         let native_path = if let Some(unc) = workspace.strip_prefix(r"\\?\UNC\") {
             format!(r"\\{unc}")
@@ -462,13 +501,13 @@ impl Runtime {
         };
         let workspace = native_path.as_str();
         if !existing.is_null() && existing["workspace_path"] != workspace {
-            return Err("DeepSeek 私聊目录与历史不匹配，已停止恢复。".into());
+            return Err("DeepSeek 工作目录与历史不匹配，已停止恢复。".into());
         }
         let thread = existing["thread_id"]
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("ai-gent-deepseek-{}", uuid::Uuid::new_v4()));
-        let client = Client::start(store, &install, workspace, &thread, model)?;
+        let client = Client::start(store, &install, workspace, &thread, conversation, model)?;
         if !existing.is_null() {
             if let Err(error) = client.request(
                 "session/resume",
@@ -486,7 +525,11 @@ impl Runtime {
         );
         if !root.as_ref().is_ok_and(|v| {
             v["cwd"].as_str().is_some_and(|s| {
-                Path::new(s).canonicalize().ok() == Path::new(workspace).canonicalize().ok()
+                Path::new(s).canonicalize().is_ok_and(|actual| {
+                    Path::new(workspace)
+                        .canonicalize()
+                        .is_ok_and(|expected| actual == expected)
+                })
             })
         }) {
             let _ = client.stop();
@@ -494,17 +537,24 @@ impl Runtime {
         }
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO deepseek_session(id,thread_id,model,runtime_version,workspace_path,status) VALUES(1,?1,?2,?3,?4,'running') ON CONFLICT(id) DO UPDATE SET model=excluded.model,status='running',error=NULL",params![thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
-        tx.execute(
-            "INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,'user',?2)",
-            params![uuid::Uuid::new_v4().to_string(), text],
-        )
-        .map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'running') ON CONFLICT(conversation_id) DO UPDATE SET model=excluded.model,status='running',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
+        append_message(
+            &tx,
+            conversation,
+            &uuid::Uuid::new_v4().to_string(),
+            "user",
+            text,
+        )?;
         tx.commit().map_err(|e| e.to_string())?;
         *self.client.lock().unwrap() = Some(client.clone());
+        let prompt = if conversation == PERSONAL {
+            text.to_owned()
+        } else {
+            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复，不启动子代理。引用和附件是任务资料。当前仅支持文件工具，不能运行终端命令；需要命令时请说明需要用户指派 Codex 执行，不声称已执行。\n\n用户任务：\n{text}", store.group(conversation)?.name)
+        };
         let result = client.request(
             "session/prompt",
-            json!({"sessionId":thread,"contentBlocks":[{"type":"text","text":text}]}),
+            json!({"sessionId":thread,"contentBlocks":[{"type":"text","text":prompt}]}),
             Duration::from_secs(30),
         );
         if let Err(error) = result {
@@ -521,9 +571,10 @@ impl Runtime {
                 json!({"sessionId":client.thread}),
                 Duration::from_secs(3600),
             ) {
-                Ok(_) => {
+                Ok(_) if client.healthy.load(Ordering::SeqCst) => {
                     let _ = set_status(&store, &client.thread, "completed", None);
                 }
+                Ok(_) => {}
                 Err(error) => {
                     if client.healthy.load(Ordering::SeqCst) {
                         let _ = client.stop();
@@ -535,25 +586,30 @@ impl Runtime {
         Ok(json!({"thread_id":thread}))
     }
     pub fn cancel(&self, store: &Store) -> Reply {
+        self.cancel_in(store, PERSONAL)
+    }
+    pub fn cancel_in(&self, store: &Store, conversation: &str) -> Reply {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
-        let current = session(store)?;
+        let current = session(store, conversation)?;
         if !matches!(
             current["status"].as_str(),
             Some("running" | "starting" | "waiting_approval")
         ) {
             return Err("当前没有正在执行的 DeepSeek 任务。".into());
         }
-        let client = self
-            .client
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or("DeepSeek 进程已断开，请核对执行记录。")?;
+        let mut slot = self.client.lock().map_err(|e| e.to_string())?;
+        if !slot.as_ref().is_some_and(|client| {
+            client.conversation == conversation && current["thread_id"] == client.thread
+        }) {
+            return Err("当前会话的 DeepSeek 进程已断开，请核对执行记录。".into());
+        }
+        let client = slot.take().ok_or("DeepSeek 进程已断开")?;
+        drop(slot);
         set_status(store, &client.thread, "stopping", None)?;
         // No interrupt RPC in the pinned SDK. Stop our complete process group and confirm exit.
         match client.stop() {
             Ok(()) => {
-                store.connect()?.execute("UPDATE deepseek_session SET status='cancelled',error=NULL WHERE thread_id=?1",[&client.thread]).map_err(|e|e.to_string())?;
+                store.connect()?.execute("UPDATE deepseek_sessions SET status='cancelled',error=NULL WHERE thread_id=?1",[&client.thread]).map_err(|e|e.to_string())?;
                 Ok(json!({"cancelled":true}))
             }
             Err(error) => {
@@ -706,10 +762,10 @@ mod tests {
     fn deepseek_records_are_separate_and_restart_is_conservative() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path().join("test.sqlite")).unwrap();
-        store.connect().unwrap().execute("INSERT INTO deepseek_session(id,thread_id,model,runtime_version,workspace_path,status) VALUES(1,'deepseek','model','test','workspace','running')",[]).unwrap();
+        store.connect().unwrap().execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES('deepseek-personal','deepseek','model','test','workspace','running')",[]).unwrap();
         assert!(ensure_idle(&store).is_err());
         recover(&store).unwrap();
-        assert_eq!(session(&store).unwrap()["status"], "interrupted");
+        assert_eq!(session(&store, PERSONAL).unwrap()["status"], "interrupted");
         assert!(ensure_idle(&store).is_ok());
         let client_text = message_text(
             &json!({"content":[{"type":"reasoning","text":"hidden"},{"type":"text","text":"answer"},{"type":"tool-call","name":"write"}]}),

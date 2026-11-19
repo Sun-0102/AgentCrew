@@ -3,15 +3,16 @@ export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
-export interface Message { id: string; role: string; text: string; created_at: string | null }
+export interface Message { agent?: "codex" | "deepseek"; id: string; role: string; text: string; created_at: string | null }
 export interface Snapshot {
-  session: { thread_id: string; status: string; model: string; error: string | null } | null;
+  agent?: "codex" | "deepseek";
+  session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;
   messages: Message[];
   approvals: { id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
 }
 export interface Scope { projectId: string | null; groupId: string | null; agent?: "codex" | "deepseek" }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
-export const agents = [{ id: "codex", name: "Codex", description: "写代码、执行任务、整理交付", available: true }, { id: "deepseek", name: "DeepSeek", description: "独立私聊、讨论思路、执行任务", available: true }];
+export const agents = [{ id: "codex", name: "Codex", description: "写代码、执行任务、整理交付", available: true }, { id: "deepseek", name: "DeepSeek", description: "私聊与群聊、讨论思路、文件任务", available: true }];
 const previewKey = "ai-gent.preview.groups.v1";
 const previewMessagesKey = "ai-gent.preview.messages.v1";
 function readPreview<T>(key: string, fallback: T): T { const raw = localStorage.getItem(key); if (!raw) return fallback; try { return JSON.parse(raw) as T; } catch { throw new Error("本机预览记录无法读取，请检查浏览器存储。"); } }

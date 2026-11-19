@@ -35,7 +35,7 @@ fn validate(name: &str, members: &[String]) -> Result<Vec<String>, String> {
 impl Store {
     pub fn groups(&self) -> Result<Vec<Group>, String> {
         let connection = self.connect()?;
-        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),s.status FROM chat_groups g LEFT JOIN codex_sessions s ON s.conversation_id=g.conversation_id ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=g.conversation_id),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),CASE WHEN d.status IN ('starting','running','waiting_approval','cancel_requested','stopping') THEN d.status ELSE COALESCE(s.status,d.status) END FROM chat_groups g LEFT JOIN codex_sessions s ON s.conversation_id=g.conversation_id LEFT JOIN deepseek_sessions d ON d.conversation_id=g.conversation_id ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=g.conversation_id),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -143,7 +143,7 @@ impl Store {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
         if running {
             return Err("请先完成或取消当前任务，再调整群成员。".into());
         }
@@ -178,9 +178,6 @@ impl Store {
         let group = self.group(id)?;
         if !group.members.iter().any(|m| m == target) {
             return Err("该 Agent 不在当前群内。".into());
-        }
-        if target != "codex" {
-            return Err("DeepSeek 目前仅支持独立私聊，群聊执行暂未开放。请先选择 Codex。".into());
         }
         Ok(())
     }
@@ -233,7 +230,7 @@ mod tests {
                 vec!["codex".into(), "deepseek".into()],
             )
             .unwrap();
-        assert!(store.validate_group_target(&one.id, "deepseek").is_err());
+        assert!(store.validate_group_target(&one.id, "deepseek").is_ok());
         assert!(store.validate_group_target(&one.id, "codex").is_ok());
         let store = Store::open(path).unwrap();
         assert_eq!(store.groups().unwrap().len(), 2);
