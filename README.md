@@ -2,7 +2,44 @@
 
 面向个人用户的本地 AI 协作工作台。用户只打开 AI-gent，后台由 Codex 和 DeepSeek 执行任务。项目、私聊、协作、Git 和工作证据由 AI-gent 统一管理。
 
-文档日期：2026-11-19。状态：开发前设计，尚未实现或完成运行验证。AI-gent 为暂定项目名。
+文档日期：2026-11-19。状态：最小桌面框架已建立，Agent 尚未接入。AI-gent 为暂定项目名。
+
+## 本地开发
+
+需要 Node.js 22.12+、npm、Rust 1.90+，以及 [Tauri Windows 开发依赖](https://v2.tauri.app/start/prerequisites/#windows)（MSVC C++ 工具链和 WebView2）。
+
+```powershell
+npm ci
+npm run desktop
+```
+
+第一次构建需要下载并编译 Rust 依赖。开发版使用 `local.ai-gent.desktop.dev` 应用标识，数据库写入 Tauri 解析的应用数据目录；界面右侧可查看实际位置。项目源码留在用户选择的原目录。
+
+当前可用：桌面三栏界面、原生目录选择、项目切换、Rust IPC、SQLite 初始化和项目持久化。重复选择同一目录会选中已有项目。Codex、DeepSeek、会话、协作、Git 管理及托盘仍待实现；界面不会发送 Agent 请求。当前关闭窗口会退出程序。
+
+```powershell
+npm run build          # TypeScript 检查与前端生产构建
+npm run check:rust     # Rust 编译检查
+npm run test:rust      # 项目持久化、路径校验、数据库版本保护测试
+npm run desktop:build # Windows 安装包构建（开发版标识）
+```
+
+`npm run dev` 仅用于浏览器预览，目录选择和 SQLite 需要桌面运行环境。正式发布前需配置独立应用标识、图标及发布验收。
+
+Windows 构建前请先关闭正在运行的 AI-gent 窗口，避免可执行文件被占用。
+
+## 当前代码结构
+
+```text
+src/                         React 界面
+  features/projects/api.ts   项目与应用状态 IPC
+src-tauri/
+  src/commands/              Rust 业务命令
+  src/storage/               SQLite 与路径校验
+  migrations/                数据库迁移
+  capabilities/              窗口插件权限
+docs/                        需求、设计与验收
+```
 
 ## 已确认的决定
 
