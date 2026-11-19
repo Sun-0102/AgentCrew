@@ -53,13 +53,21 @@ mod tests {
     fn version_nine_upgrade_preserves_reasoning_and_backs_up() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test.sqlite");
-        let store = Store::open(path.clone()).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for migration in [
+            include_str!("../migrations/001_projects.sql"),
+            include_str!("../migrations/002_codex.sql"),
+            include_str!("../migrations/003_conversations.sql"),
+            include_str!("../migrations/004_groups.sql"),
+            include_str!("../migrations/005_deepseek.sql"),
+            include_str!("../migrations/006_deepseek_groups.sql"),
+            include_str!("../migrations/007_group_tasks.sql"),
+            include_str!("../migrations/008_group_inputs.sql"),
+            include_str!("../migrations/009_reasoning.sql"),
+        ] { connection.execute_batch(migration).unwrap(); }
+        drop(connection);
+        let store = Store { path: path.clone() };
         crate::reasoning::save(&store, "chat", "codex", "model", Some("high")).unwrap();
-        store
-            .connect()
-            .unwrap()
-            .execute_batch("DROP TABLE speed_preferences; PRAGMA user_version=9;")
-            .unwrap();
         let store = Store::open(path).unwrap();
         assert_eq!(
             crate::reasoning::read(&store, "chat", "codex", "model")

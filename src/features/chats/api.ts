@@ -8,6 +8,7 @@ export interface GroupTask {
   id: string; conversation_id: string; objective: string; status: string;
   current_agent: "codex" | "deepseek"; codex_model: string; deepseek_model: string;
   turn_count: number; queued_count: number; error: string | null;
+  members?: { agent: "codex" | "deepseek"; status: string; queued_count: number; error: string | null }[];
 }
 export interface TaskSummary { id: string; objective: string; status: string; created_at: string }
 export interface FileEvidence { path: string; state: "captured" | "truncated" | "unavailable"; bytes: number | null; text: string | null; note: string | null }
@@ -26,6 +27,7 @@ export interface TaskResult {
 }
 export const taskLabels: Record<string, string> = { idle: "等待新消息", running: "正在处理", paused: "已暂停接力", cancelling: "正在取消", cancelled: "已取消", interrupted: "协作已中断", blocked: "需要你处理", awaiting_review: "待你验收", completed: "已验收", manual: "已转手动指派" };
 export interface Snapshot {
+  sessions?: Partial<Record<"codex" | "deepseek", Snapshot["session"]>>;
   agent?: "codex" | "deepseek";
   task?: GroupTask | null;
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;

@@ -238,6 +238,14 @@ button { -webkit-tap-highlight-color: transparent; }
 .chat-status { display: flex; align-items: center; gap: 8px; min-height: 26px; margin-bottom: 7px; color: var(--muted); font-size: 13px; }
 .chat-status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-status.needs-attention { color: #8e432f; }
+.group-member-statuses { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.member-execution { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 10px; border: 1px solid #e4d9cb; border-radius: 9px; background: #fbf7f1; color: var(--muted); font-size: 12px; }
+.member-execution .avatar { width: 23px; height: 23px; }
+.member-execution strong { color: #594332; font-size: 12px; }
+.member-execution.active { border-color: #ccb18e; background: #f5ebdd; }
+.member-execution.has-error { border-color: #cc9a84; color: #8e432f; }
+.member-execution small { font-size: 11px; }
+.member-execution-error { flex-basis: 100%; max-width: 400px; overflow-wrap: anywhere; line-height: 1.5; }
 .status-detail-button { flex-shrink: 0; border: 0; background: transparent; color: var(--accent); padding: 4px 0 4px 8px; font-size: 13px; cursor: pointer; }
 .status-detail-button:hover { text-decoration: underline; }
 .collaboration-card { padding: 12px 0 16px; margin-bottom: 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: #795a3f; }

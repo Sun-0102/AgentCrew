@@ -224,6 +224,7 @@ async fn group_snapshot(
         store.group(&id)?;
         let mut snapshot = runtime.snapshot(store, &id)?;
         let deepseek = crate::deepseek::session(store, &id)?;
+        snapshot["sessions"] = serde_json::json!({"codex":snapshot["session"],"deepseek":deepseek});
         let last_agent: Option<String> = store.connect()?.query_row(
             "SELECT agent FROM codex_messages WHERE conversation_id=?1 AND role IN ('user','assignment') ORDER BY sequence DESC LIMIT 1",
             [&id], |row| row.get(0),
@@ -232,7 +233,6 @@ async fn group_snapshot(
         let deepseek_active = deepseek["status"].as_str().is_some_and(crate::codex::active);
         if deepseek_active || (!codex_active && last_agent.as_deref().unwrap_or(selected) == "deepseek") {
             snapshot["session"] = deepseek;
-            snapshot["approvals"] = serde_json::json!([]);
             snapshot["agent"] = serde_json::json!("deepseek");
         } else {
             snapshot["agent"] = serde_json::json!("codex");

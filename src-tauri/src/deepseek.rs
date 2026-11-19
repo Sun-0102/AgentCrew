@@ -473,7 +473,15 @@ impl Runtime {
         if text.trim().is_empty() || text.len() > 100000 {
             return Err("消息为空或过长。".into());
         }
-        ensure_idle(store)?;
+        // Group assignments have one slot per provider; private sends retain global admission.
+        if role == "assignment" {
+            let busy: bool = store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            if busy {
+                return Err("DeepSeek 已有任务正在执行。".into());
+            }
+        } else {
+            ensure_idle(store)?;
+        }
         let install = Installation::find()?;
         let models = install.models(store)?;
         if !models

@@ -270,7 +270,7 @@ pub fn begin(
 pub fn finish(store: &Store, task: &Task, status: &str) -> Result<(), String> {
     let mut connection = store.connect()?;
     let open: Option<(i64,i64,String,String)> = connection.query_row(
-        "SELECT id,sequence_start,agent,before_snapshot FROM group_task_steps WHERE task_id=?1 AND status='running' ORDER BY ordinal DESC LIMIT 1", [&task.id],
+        "SELECT id,sequence_start,agent,before_snapshot FROM group_task_steps WHERE task_id=?1 AND agent=?2 AND status='running' ORDER BY ordinal DESC LIMIT 1", params![task.id,task.current_agent],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((step, start, agent, before)) = open else {
@@ -334,7 +334,7 @@ pub fn result(store: &Store, group: &str, id: &str) -> Result<Value, String> {
         steps
     };
     let inputs = {
-        let mut statement = connection.prepare("SELECT message_id,target_agent,text,status,created_at FROM group_task_inputs WHERE task_id=?1 ORDER BY id").map_err(|e|e.to_string())?;
+        let mut statement = connection.prepare("SELECT message_id,target_agent,text,status,created_at FROM group_task_inputs WHERE task_id=?1 AND source_agent='user' ORDER BY id").map_err(|e|e.to_string())?;
         let rows = statement.query_map([id], |r| Ok(json!({"message_id":r.get::<_,String>(0)?,"target_agent":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?}))).map_err(|e|e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?
@@ -343,7 +343,7 @@ pub fn result(store: &Store, group: &str, id: &str) -> Result<Value, String> {
         json!({"format_version":1,"task":task,"inputs":inputs,"steps":steps,"limitations":[
             "这是可读工作记录，不是完整项目备份或厂商会话恢复包。未采集的文件和早期任务依据不会事后补造。",
             "运行中的轮次仅有执行前依据；回复及工具记录在本轮结束后归档。重启中断的轮次可能没有结束快照。",
-            "快照可能包含原有修改及项目敏感信息。敏感文件名过滤不能保证内容脱敏，请检查后分享。",
+            "并行成员共用工作目录，快照差异可能包含另一位成员和原有修改，不能据此归属单个成员。快照可能包含项目敏感信息。敏感文件名过滤不能保证内容脱敏，请检查后分享。",
             "未自动判定复核通过、问题已修正或测试成功；已验收仅表示用户点击确认。"
         ]}),
     )
