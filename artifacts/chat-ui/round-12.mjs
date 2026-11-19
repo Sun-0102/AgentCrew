@@ -1,0 +1,16 @@
+const task = await taskSpace(6);
+const page = task.page("p1");
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1360, height: 880, deviceScaleFactor: 1, mobile: false });
+await page.click("loc=role:button[name='邀请']");
+await page.click("loc=role:button[name='保存成员']");
+await page.waitForFunction(() => !document.querySelector("dialog"));
+await page.click("loc=role:button[name='查看聊天成员']");
+await page.waitForFunction(() => !!document.querySelector(".detail-panel"));
+await page.evaluate(() => { document.querySelector(".message-feed").scrollTop = 0; });
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/group-desktop.png" }));
+await page.click("loc=role:button[name='邀请']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/invite-dialog.png" }));
+await page.keyboard.press("Escape");
+console.log({ escapeClosesDialog: await page.evaluate(() => !document.querySelector("dialog")) });

@@ -1,0 +1,16 @@
+const task = await taskSpace(6);
+const page = task.page("p1");
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 680, height: 440, deviceScaleFactor: 2, mobile: false });
+await page.click("loc=role:button[name='邀请']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/invite-200.png" }));
+console.log(await page.evaluate(() => ({ dialogScrolls: document.querySelector("dialog").scrollHeight > document.querySelector("dialog").clientHeight, horizontalOverflow: document.documentElement.scrollWidth > innerWidth })));
+await page.keyboard.press("Escape");
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+await page.click("loc=role:button[name='邀请']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/invite-900.png" }));
+await page.keyboard.press("Escape");
+await page.click("loc=role:button[name='关闭详情']");
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/group-900.png" }));
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1360, height: 880, deviceScaleFactor: 1, mobile: false });

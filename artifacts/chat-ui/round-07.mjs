@@ -1,0 +1,15 @@
+const task = await taskSpace(6);
+const page = task.page("p1");
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1360, height: 880, deviceScaleFactor: 1, mobile: false });
+await page.click("loc=css:.mention-menu button:has-text('Codex')");
+await page.setInputFiles("input[type=file]", ["D:/work/AI-gent/artifacts/chat-ui/brief.md"]);
+await page.waitForSelector("loc=css:.attachment-chip");
+await page.click("loc=role:button[name='查看聊天成员']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/group-desktop.png" }));
+console.log(await page.evaluate(() => ({ attachment: document.querySelector(".attachment-chip")?.textContent, target: document.querySelector("textarea")?.value, members: document.querySelector(".detail-panel")?.textContent, horizontalOverflow: document.documentElement.scrollWidth > innerWidth })));
+await page.click("loc=role:button[name='关闭详情']");
+await page.fill("loc=role:textbox[name='搜索会话']", "没有这个群");
+await page.waitForSelector("text=没有找到匹配的群聊");
+await page.fill("loc=role:textbox[name='搜索会话']", "");
+console.log({ searchEmptyAndReset: true, attachmentQueued: true, mentionTarget: true });

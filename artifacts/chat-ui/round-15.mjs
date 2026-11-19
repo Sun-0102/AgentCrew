@@ -1,0 +1,14 @@
+const task = await taskSpace(6);
+const page = task.page("p1");
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+await page.click("loc=role:button[name='关闭详情']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+const dimensions = await page.evaluate(() => ({ horizontalOverflow: document.documentElement.scrollWidth > innerWidth, composerBottom: document.querySelector(".composer-area").getBoundingClientRect().bottom, height: innerHeight }));
+if (dimensions.horizontalOverflow || dimensions.composerBottom > dimensions.height) throw new Error(JSON.stringify(dimensions));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/group-900.png" }));
+await page.click("loc=role:button[name='邀请']");
+await page.waitForFunction(() => document.getAnimations().every(a => a.effect?.getTiming().iterations === Infinity || a.playState !== "running"));
+console.log(await page.screenshot({ path: "D:/work/AI-gent/artifacts/chat-ui/invite-900.png" }));
+await page.keyboard.press("Escape");
+console.log({ ...dimensions, focusReturned: await page.evaluate(() => document.activeElement?.textContent === "邀请") });
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1360, height: 880, deviceScaleFactor: 1, mobile: false });

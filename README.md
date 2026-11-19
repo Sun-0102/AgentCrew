@@ -2,7 +2,7 @@
 
 面向个人用户的本地 AI 协作工作台。用户只打开 AI-gent，后台由 Codex 和 DeepSeek 执行任务。项目、私聊、协作、Git 和工作证据由 AI-gent 统一管理。
 
-文档日期：2026-11-19。状态：最小桌面框架已建立，Agent 尚未接入。AI-gent 为暂定项目名。
+文档日期：2026-11-19。状态：暖色聊天工作台、Codex 私聊与本机群聊已实现。DeepSeek 和自动协作工作流待接入。AI-gent 为暂定项目名。
 
 ## 本地开发
 
@@ -15,13 +15,42 @@ npm run desktop
 
 第一次构建需要下载并编译 Rust 依赖。开发版使用 `local.ai-gent.desktop.dev` 应用标识，数据库写入 Tauri 解析的应用数据目录；界面右侧可查看实际位置。项目源码留在用户选择的原目录。
 
-当前可用：桌面三栏界面、原生目录选择、项目切换、Rust IPC、SQLite 初始化和项目持久化。重复选择同一目录会选中已有项目。Codex、DeepSeek、会话、协作、Git 管理及托盘仍待实现；界面不会发送 Agent 请求。当前关闭窗口会退出程序。
+当前可用：Agent 导航、聊天/通讯录、搜索、创建本机群聊、邀请和管理自己的 Agent、引用回复、复制消息、@ 选择、文本附件、原生目录选择、项目切换与 SQLite 持久化。重复选择同一目录会选中已有项目。Codex 支持本机登录检测、真实模型目录、流式回复、工具记录、审批、取消和恢复。DeepSeek、自动多 Agent 工作流、Git 管理及托盘待实现。关闭窗口会退出程序并停止本软件管理的 Codex 进程组。
+
+群聊可不关联项目，每群有独立上下文。邀请只处理自己的本机 Agent，没有外部邀请。DeepSeek 可先加入群，但不能回复或执行。群内可指定 Codex 执行；不会自动唤醒所有成员。文本附件最多三个，合计 60 KB，内容随消息发送。文字草稿可跨刷新恢复；引用和待发附件只在当前运行期间保留。界面及验证见 [设计说明](docs/06-界面设计.md) 和 [聊天工作台验收](docs/verification/2026-11-19-chat-ui.md)。
+
+## Codex 私聊
+
+1. 使用 Codex 桌面客户端已安装的运行组件，或安装 Codex CLI 并加入 PATH。AI-gent 检查 Windows 客户端的 `%LOCALAPPDATA%\OpenAI\Codex\bin` 和 PATH 中的运行文件，按实际版本选择较新版。使用 `codex login` 完成登录，或自行配置 Codex 支持的模型服务。
+2. 打开软件默认进入 Codex 私聊并检测本机连接，无需添加项目。左侧 Codex 可随时返回；需要处理项目文件时，在“工作空间”添加并选择目录。“连接与设置”显示版本、实际路径和模型数量，不读取或复制登录密钥。
+3. 选择模型并发送任务。模型更改从下一轮生效。回复和工具开始/完成记录在当前私聊显示。
+4. 请求审批时，检查命令、目录或工具变更记录，再批准本次或拒绝。不支持的服务端请求返回明确错误，不自动批准。
+5. 取消会请求 `turn/interrupt`，再清理 Windows Job Object 管理的整个后台进程组。只有收到中断终态并完成清理，才显示“已取消”；未确认结果显示“中断”。已产生的文件不会自动回退。
+
+当前保留一段不绑定项目的 Codex 私聊，以及每个项目各自的一段会话。独立私聊使用 `~/Documents/Codex/AI-gent/<应用数据目录名>/codex-personal` 作为文件工作目录，不在项目列表中创建虚拟项目。旧版应用数据目录中的私聊文件会复制迁移，原目录保留，会话 ID 和消息不变。会话上下文和记录分别保存，整个应用一次执行一个任务。会话 ID、模型服务、运行版本、消息和工具记录保存在应用 SQLite 中。重启后可查看本地记录，下一条消息通过 `thread/resume` 恢复；版本或工作目录不匹配时停止恢复并报告错误。Codex 原生会话文件仍由 Codex 管理，因此恢复也依赖其本机历史。
+
+已加入当前 Windows 官方客户端的“最近”兼容同步。它同时依赖无项目工作目录范围和会话来源筛选：独立 App Server 固定写入 `vscode` 来源，而本机官方客户端 26.1111 的侧栏扫描仅接收 `cli`。AI-gent 在启动恢复和每轮结束后，为自己创建的会话备份并修正索引分类与最近活动时间；真实创建方 `originator=ai_gent`、消息和执行权限均保留。原索引元数据备份在应用数据目录的 `sidebar-index-backups/<thread-id>.json`。这使用客户端内部 SQLite 索引兼容，不是稳定的官方同步 API；客户端升级、索引重建或用户自定义无项目目录后需重新验证。同步失败单独报告，不阻止普通私聊。
+
+任务启动时请求 `workspace-write` 沙箱与 `on-request` 用户审批，并核对服务端返回配置。工作目录本身不是沙箱；不承诺限制全部读取范围。数据库现为版本 4，升级前自动生成 `*.v<旧版本>-<UUID>.sqlite` 备份，并保留原项目会话与消息。当前保存可读消息与部分工具事件，不是完整原始协议日志或离线证据包。
+
+初次验证使用 PATH 中的旧版 `codex-cli 0.147.0-alpha.6.6`，仅返回 3 个普通模型。现已修正运行文件选择，本机选择客户端管理的 `codex-cli 0.169.0-alpha.11.1`，返回与客户端一致的 10 个普通模型。真实测试与未验收项见 [Codex 接入记录](docs/verification/2026-11-19-codex.md)。
 
 ```powershell
 npm run build          # TypeScript 检查与前端生产构建
 npm run check:rust     # Rust 编译检查
 npm run test:rust      # 项目持久化、路径校验、数据库版本保护测试
 npm run desktop:build # Windows 安装包构建（开发版标识）
+```
+
+普通 Rust 测试不调用模型。需要明确执行的真实探针：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_probe -- --ignored --nocapture
+# 以下各项使用当前登录账号的模型额度，在临时目录内运行：
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_conversation_and_resume -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_cancel_tool -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_personal_chat_and_resume -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_group_chat -- --ignored --nocapture
 ```
 
 `npm run dev` 仅用于浏览器预览，目录选择和 SQLite 需要桌面运行环境。正式发布前需配置独立应用标识、图标及发布验收。
@@ -33,8 +62,12 @@ Windows 构建前请先关闭正在运行的 AI-gent 窗口，避免可执行文
 ```text
 src/                         React 界面
   features/projects/api.ts   项目与应用状态 IPC
+  Workbench.tsx              聊天工作台、会话与项目导航
+  features/chats/            群聊、成员、消息、模型、审批和状态
 src-tauri/
   src/commands/              Rust 业务命令
+  src/codex.rs               App Server stdio、进程组与会话恢复
+  src/groups.rs              本机群、成员校验与会话隔离
   src/storage/               SQLite 与路径校验
   migrations/                数据库迁移
   capabilities/              窗口插件权限

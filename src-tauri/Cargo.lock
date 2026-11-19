@@ -22,12 +22,15 @@ name = "ai-gent"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "semver",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -18,27 +18,46 @@ impl Store {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let store = Self { path };
         let mut connection = store.connect()?;
+        let previous: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if matches!(previous, 1..=3) {
+            let backup = store
+                .path
+                .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
+            connection
+                .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                .map_err(|e| format!("迁移前备份失败：{e}"))?;
+        }
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         let version: u32 = transaction
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        match version {
-            0 => transaction
-                .execute_batch(include_str!("../../migrations/001_projects.sql"))
-                .map_err(|e| e.to_string())?,
-            1 => (),
-            _ => {
-                return Err(format!(
-                    "数据库版本 {version} 高于当前软件支持的版本，请使用匹配版本。"
-                ))
-            }
+        let migrations = [
+            include_str!("../../migrations/001_projects.sql"),
+            include_str!("../../migrations/002_codex.sql"),
+            include_str!("../../migrations/003_conversations.sql"),
+            include_str!("../../migrations/004_groups.sql"),
+        ];
+        if version > migrations.len() as u32 {
+            return Err(format!(
+                "数据库版本 {version} 高于当前软件支持的版本，请使用匹配版本。"
+            ));
+        }
+        for migration in migrations.iter().skip(version as usize) {
+            transaction
+                .execute_batch(migration)
+                .map_err(|e| e.to_string())?;
         }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(store)
     }
 
-    fn connect(&self) -> Result<Connection, String> {
+    pub(crate) fn connect(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.path).map_err(|e| e.to_string())?;
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .map_err(|e| e.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
@@ -88,6 +107,7 @@ impl Store {
                 params![uuid::Uuid::new_v4().to_string(), name, path],
             )
             .map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO conversations(id,project_id,workspace_path) SELECT id,id,primary_root FROM projects WHERE primary_root=?1 ON CONFLICT(id) DO NOTHING",[path]).map_err(|e|e.to_string())?;
         connection
             .query_row(
                 "SELECT id, name, primary_root, created_at FROM projects WHERE primary_root = ?1",
@@ -103,6 +123,126 @@ impl Store {
             )
             .map_err(|e| e.to_string())
     }
+
+    pub fn conversation_id(&self, project_id: Option<&str>) -> Result<String, String> {
+        if let Some(id) = project_id {
+            self.conversation_root(id)?;
+            return Ok(id.to_owned());
+        }
+        self.personal_conversation_id(&self.chat_workspace_parent()?)
+    }
+
+    pub(crate) fn chat_workspace_parent(&self) -> Result<PathBuf, String> {
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .ok_or("无法定位用户主目录")?;
+        let app_name = self
+            .path
+            .parent()
+            .and_then(Path::file_name)
+            .ok_or("本地数据目录不存在")?;
+        // shortcut: Codex Desktop 0.169 discovers projectless chats under ~/Documents/Codex; recheck on client layout changes.
+        let parent = PathBuf::from(home)
+            .join("Documents")
+            .join("Codex")
+            .join("AI-gent")
+            .join(app_name);
+        Ok(parent)
+    }
+
+    pub(crate) fn personal_conversation_id(&self, parent: &Path) -> Result<String, String> {
+        use rusqlite::OptionalExtension;
+        let id = "codex-personal";
+        std::fs::create_dir_all(parent).map_err(|e| format!("无法建立私聊目录：{e}"))?;
+        let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+        let directory = parent.join(id);
+        let mut connection = self.connect()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT workspace_path FROM conversations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(old) = existing {
+            let old = PathBuf::from(old);
+            if old != directory {
+                let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[id],|row|row.get(0)).map_err(|e|e.to_string())?;
+                if active {
+                    return Err("私聊正在执行，请完成或取消后再迁移目录。".into());
+                }
+                let expected = self
+                    .path
+                    .parent()
+                    .ok_or("本地数据目录不存在")?
+                    .join("workspaces")
+                    .join(id)
+                    .canonicalize()
+                    .map_err(|e| format!("无法核对旧私聊目录：{e}"))?;
+                if old.canonicalize().map_err(|e| e.to_string())? != expected {
+                    return Err("旧私聊目录不是应用管理的目录，迁移已停止。".into());
+                }
+                if directory.exists() {
+                    return Err("新的私聊目录已存在，迁移已停止，原记录和文件均保留。".into());
+                }
+                let staging = parent.join(format!(".codex-personal-{}", uuid::Uuid::new_v4()));
+                copy_workspace(&old, &staging)
+                    .map_err(|e| format!("复制私聊文件失败，旧目录已保留：{e}"))?;
+                if !staging.starts_with(&parent) || !directory.starts_with(&parent) {
+                    return Err("私聊迁移目标超出预期目录".into());
+                }
+                std::fs::rename(&staging, &directory)
+                    .map_err(|e| format!("私聊目录迁移失败，旧目录已保留：{e}"))?;
+            }
+        } else {
+            std::fs::create_dir(&directory)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        let root = directory.canonicalize().map_err(|e| e.to_string())?;
+        let root = root.to_str().ok_or("私聊工作目录不是有效 Unicode 路径")?;
+        tx.execute("INSERT INTO conversations(id,project_id,workspace_path) VALUES(?1,NULL,?2) ON CONFLICT(id) DO UPDATE SET workspace_path=excluded.workspace_path",params![id,root]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id.to_owned())
+    }
+
+    pub fn conversation_root(&self, id: &str) -> Result<String, String> {
+        self.connect()?
+            .query_row(
+                "SELECT workspace_path FROM conversations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "会话不存在，请选择有效项目或打开 Codex 私聊。".into())
+    }
+}
+
+fn copy_workspace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "私聊目录包含链接，请先人工迁移该链接",
+        ));
+    }
+    if metadata.is_dir() {
+        std::fs::create_dir(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_workspace(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(source, destination)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -148,6 +288,213 @@ mod tests {
             .add_project(temp.path().join("missing").to_str().unwrap())
             .is_err());
         assert!(store.list_projects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_database_upgrade_keeps_a_readable_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("upgrade.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/001_projects.sql"))
+            .unwrap();
+        connection.execute("INSERT INTO projects(id,name,primary_root) VALUES('old','existing','existing-root')",[]).unwrap();
+        drop(connection);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.list_projects().unwrap()[0].id, "old");
+        let backup = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().contains("v1-"))
+            .unwrap();
+        let backup = Connection::open(backup).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT id FROM projects", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "old"
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn personal_conversation_persists_without_creating_a_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("personal.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        let id = store
+            .personal_conversation_id(&temp.path().join("Documents/Codex/AI-gent"))
+            .unwrap();
+        let root = store.conversation_root(&id).unwrap();
+        assert!(Path::new(&root).is_dir());
+        assert!(store.list_projects().unwrap().is_empty());
+        let project_dir = temp.path().join("project");
+        std::fs::create_dir(&project_dir).unwrap();
+        let project = store.add_project(project_dir.to_str().unwrap()).unwrap();
+        assert_ne!(id, project.id);
+        assert_ne!(root, store.conversation_root(&project.id).unwrap());
+        store.connect().unwrap().execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,'personal-item','user','private')",[&id]).unwrap();
+        let store = Store::open(path).unwrap();
+        assert_eq!(
+            store
+                .personal_conversation_id(&temp.path().join("Documents/Codex/AI-gent"))
+                .unwrap(),
+            id
+        );
+        assert_eq!(store.conversation_root(&id).unwrap(), root);
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM codex_messages WHERE conversation_id=?1",
+                    [&project.id],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(store.conversation_id(Some("missing-project")).is_err());
+    }
+
+    #[test]
+    fn personal_workspace_migration_keeps_files_history_and_original_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let id = store
+            .personal_conversation_id(&temp.path().join("workspaces"))
+            .unwrap();
+        let old = PathBuf::from(store.conversation_root(&id).unwrap());
+        std::fs::create_dir(old.join("nested")).unwrap();
+        std::fs::write(old.join("nested/artifact.txt"), "keep me").unwrap();
+        store.connect().unwrap().execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status) VALUES(?1,'same-thread','model','version','provider','running')",[&id]).unwrap();
+        let official = temp.path().join("Documents/Codex/AI-gent");
+        assert!(store.personal_conversation_id(&official).is_err());
+        assert_eq!(store.conversation_root(&id).unwrap(), old.to_str().unwrap());
+        store
+            .connect()
+            .unwrap()
+            .execute("UPDATE codex_sessions SET status='completed'", [])
+            .unwrap();
+        store.personal_conversation_id(&official).unwrap();
+        let new = PathBuf::from(store.conversation_root(&id).unwrap());
+        assert!(new.starts_with(official.canonicalize().unwrap()));
+        assert_eq!(
+            std::fs::read_to_string(new.join("nested/artifact.txt")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join("nested/artifact.txt")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT thread_id FROM codex_sessions WHERE conversation_id=?1",
+                    [&id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "same-thread"
+        );
+        assert_eq!(store.personal_conversation_id(&official).unwrap(), id);
+    }
+
+    #[test]
+    fn personal_workspace_migration_does_not_overwrite_a_conflicting_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let id = store
+            .personal_conversation_id(&temp.path().join("workspaces"))
+            .unwrap();
+        let old = store.conversation_root(&id).unwrap();
+        let official = temp.path().join("Documents/Codex/AI-gent");
+        std::fs::create_dir_all(official.join("codex-personal")).unwrap();
+        std::fs::write(official.join("codex-personal/existing.txt"), "existing").unwrap();
+        assert!(store.personal_conversation_id(&official).is_err());
+        assert_eq!(store.conversation_root(&id).unwrap(), old);
+        assert_eq!(
+            std::fs::read_to_string(official.join("codex-personal/existing.txt")).unwrap(),
+            "existing"
+        );
+    }
+
+    #[test]
+    fn version_two_upgrade_preserves_project_sessions_and_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("old.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/001_projects.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/002_codex.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id,name,primary_root) VALUES('project','existing','root')",
+                [],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO codex_sessions(project_id,thread_id,model,runtime_version,provider,status) VALUES('project','thread','model','version','provider','completed')",[]).unwrap();
+        connection.execute("INSERT INTO codex_messages(project_id,item_id,role,text) VALUES('project','message','assistant','saved reply')",[]).unwrap();
+        drop(connection);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.conversation_id(Some("project")).unwrap(), "project");
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT thread_id FROM codex_sessions WHERE conversation_id='project'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "thread"
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT text FROM codex_messages WHERE conversation_id='project'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "saved reply"
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert!(std::fs::read_dir(temp.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("v2-")));
     }
 
     #[test]
