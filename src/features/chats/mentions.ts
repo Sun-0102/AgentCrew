@@ -14,6 +14,8 @@ export function messageRecipients(text: string, members: string[]) {
   const named: string[] = [];
   let fence: { marker: string; length: number } | null = null;
   let inline: number | null = null;
+  const quotes: string[] = [];
+  const closingQuotes: Record<string, string> = { "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"', "'": "'" };
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trimStart();
     const marker = line.match(/^(`{3,}|~{3,})/);
@@ -24,6 +26,13 @@ export function messageRecipients(text: string, members: string[]) {
     }
     if (fence || line.startsWith("文本附件：") || line.startsWith(">") || raw.startsWith("    ") || raw.startsWith("\t")) continue;
     for (let cursor = 0; cursor < line.length; cursor++) {
+      if (inline === null) {
+        const character = line[cursor];
+        if (quotes.at(-1) === character) { quotes.pop(); continue; }
+        const closing = closingQuotes[character];
+        if (closing && (character !== "'" || !/[a-z0-9]/i.test(line[cursor - 1] ?? ""))) quotes.push(closing);
+        if (quotes.length) continue;
+      }
       if (line[cursor] === "`") {
         const width = line.slice(cursor).match(/^`+/)![0].length;
         if (inline === width) inline = null;

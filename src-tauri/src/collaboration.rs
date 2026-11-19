@@ -639,6 +639,7 @@ fn mentions(text: &str) -> Vec<&'static str> {
     let mut result = Vec::new();
     let mut fence: Option<(u8, usize)> = None;
     let mut inline: Option<usize> = None;
+    let mut quotes: Vec<char> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_start();
         if let Some(marker @ (b'`' | b'~')) = line.as_bytes().first().copied() {
@@ -667,6 +668,25 @@ fn mentions(text: &str) -> Vec<&'static str> {
         let mut cursor = 0;
         while cursor < line.len() {
             let rest = &line[cursor..];
+            let character = rest.chars().next().unwrap();
+            if inline.is_none() {
+                if quotes.last() == Some(&character) {
+                    quotes.pop();
+                    cursor += character.len_utf8();
+                    continue;
+                }
+                let closing = match character {
+                    '「' => Some('」'), '『' => Some('』'), '“' => Some('”'), '‘' => Some('’'),
+                    '"' => Some('"'),
+                    '\'' if !line[..cursor].chars().next_back().is_some_and(|c|c.is_ascii_alphanumeric()) => Some('\''),
+                    _ => None,
+                };
+                if let Some(closing) = closing { quotes.push(closing); }
+                if !quotes.is_empty() {
+                    cursor += character.len_utf8();
+                    continue;
+                }
+            }
             if rest.starts_with('`') {
                 let width = rest.bytes().take_while(|byte| *byte == b'`').count();
                 if inline == Some(width) {

@@ -163,6 +163,21 @@ fn handoff_waits_only_for_its_recipient_and_does_not_duplicate() {
     assert!(prompt.contains("不预设哪位只能写文件"));
 }
 
+#[test]
+fn quoted_history_does_not_dispatch_a_second_reply() {
+    let (_dir,store,group) = fixture();
+    let providers = Providers::default();
+    providers.tick(&store);
+    providers.finish(&store,&group,"deepseek","最初那句「@Codex @DeepSeek 你们俩在不？」是打招呼，没有新任务。");
+    providers.finish(&store,&group,"codex","你刚才说了两次「你们好」。");
+    assert!(!providers.tick(&store));
+    assert_eq!(*providers.starts.borrow(),["codex","deepseek"]);
+    assert_eq!(latest(&store,&group).unwrap().unwrap().queued_count,0);
+    for text in ["「@Codex」", "『@Codex』", "“@Codex”", "‘@Codex’", "\"@Codex\"", "'@Codex'", "`@Codex`"] {
+        assert!(mentions(text).is_empty(),"{text}");
+    }
+    assert_eq!(mentions("历史「@DeepSeek 你好」。@Codex 请检查实际文件。"),["codex"]);
+}
 
 #[test]
 fn pause_allows_completion_but_delays_new_starts_and_stop_cancels_both() {

@@ -8,5 +8,9 @@
   { "text": "> @DeepSeek 引用\n请@cOdEx检查", "members": ["codex", "deepseek"], "expected": ["codex"] },
   { "text": "一起处理", "members": ["deepseek"], "expected": ["deepseek"] },
   { "text": "@DeepSeek 处理", "members": ["codex"], "expected": ["deepseek"] },
-  { "text": "@CodexExtra 不是成员名", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] }
+  { "text": "@CodexExtra 不是成员名", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] },
+  { "text": "最初那句「@Codex @DeepSeek 你们俩在不？」是历史消息。", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] },
+  { "text": "引用『@DeepSeek』和“@DeepSeek”、‘@DeepSeek’、\"@DeepSeek\"、'@DeepSeek'。请 @Codex 继续。", "members": ["codex", "deepseek"], "expected": ["codex"] },
+  { "text": "引用「外层『@Codex』与“@Codex”」。请 @DeepSeek 核对。", "members": ["codex", "deepseek"], "expected": ["deepseek"] },
+  { "text": "don't repeat old messages; @Codex review", "members": ["codex", "deepseek"], "expected": ["codex"] }
 ]
