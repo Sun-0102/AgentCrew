@@ -146,7 +146,14 @@ impl Client {
     ) -> Result<Arc<Self>, String> {
         let patch = runtime_dir(store)?.join("private.patch.yml");
         // Keep this application's logs local. Required approvals fail closed in this SDK version.
-        std::fs::write(&patch, RUNTIME_PATCH).map_err(|e| e.to_string())?;
+        let runtime_patch = if cfg!(windows) {
+            let dir = runtime_dir(store)?;
+            let plugin = dir.join("console-plugin.cjs");
+            std::fs::write(dir.join("console.cjs"), include_str!("deepseek_console.cjs")).map_err(|e| e.to_string())?;
+            std::fs::write(&plugin, include_str!("deepseek_console_plugin.cjs")).map_err(|e| e.to_string())?;
+            format!("{RUNTIME_PATCH}- insert:\n    - id: ai-gent-windows-console\n      name: {}\n",serde_json::to_string(&plugin.to_string_lossy()).map_err(|e|e.to_string())?)
+        } else { RUNTIME_PATCH.to_owned() };
+        std::fs::write(&patch, runtime_patch).map_err(|e| e.to_string())?;
         let home = std::env::var_os("DSH_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".dsh")))
@@ -663,8 +670,71 @@ impl Runtime {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn confined_shell(temp: &Path, script: &str) -> (Command, PathBuf) {
+        let install = Installation::find().unwrap();
+        let workspace = temp.join("中文 工作区");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let bootstrap = temp.join("console.cjs");
+        std::fs::write(&bootstrap, include_str!("deepseek_console.cjs")).unwrap();
+        let runner = install.executable.parent().unwrap().join("resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js");
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut cmd = command(&install.executable);
+        cmd.env("ELECTRON_RUN_AS_NODE","1")
+            .args(["--expose-internals","--require"]).arg(bootstrap).arg(runner)
+            .arg("--workspace").arg(&workspace).arg("--temp").arg(temp)
+            .args(["--mode","workspace-write","--"]).arg(shell)
+            .args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script])
+            .current_dir(&workspace).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        (cmd,workspace)
+    }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Runs the installed Windows sandbox without a model; verifies workspace writes and outside-write denial"]
+    fn installed_deepseek_terminal_sandbox_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside-denied.txt");
+        let escaped = outside.to_string_lossy().replace('\'',"''");
+        let script = format!("$ErrorActionPreference='Stop'; Set-Content -LiteralPath 'inside.txt' -Value '中文写入成功' -Encoding UTF8; Write-Output 'INSIDE_OK'; try {{ Set-Content -LiteralPath '{escaped}' -Value 'denied' -ErrorAction Stop; Write-Output 'OUTSIDE_ALLOWED' }} catch [System.UnauthorizedAccessException] {{ Write-Output 'OUTSIDE_DENIED' }}");
+        let (mut cmd,workspace) = confined_shell(temp.path(),&script);
+        let output = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(),"{} / {}",stdout,String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("INSIDE_OK") && stdout.contains("OUTSIDE_DENIED"),"{stdout}");
+        assert!(!outside.exists());
+        let content = std::fs::read_to_string(workspace.join("inside.txt")).unwrap();
+        assert_eq!(content.trim_start_matches('\u{feff}').trim(),"中文写入成功");
+        println!("Confined shell: Chinese workspace write succeeded; outside write was denied.");
+    }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Runs and cancels a confined PowerShell process tree in a temporary workspace; no model calls"]
+    fn installed_deepseek_terminal_process_group_cancel() {
+        use windows_sys::Win32::{Foundation::CloseHandle,System::Threading::{OpenProcess,WaitForSingleObject}};
+        let temp = tempfile::tempdir().unwrap();
+        let (mut cmd,workspace) = confined_shell(temp.path(),"Set-Content -LiteralPath 'shell.pid' -Value $PID; Start-Sleep -Seconds 30");
+        let mut child = cmd.spawn().unwrap();
+        let job = crate::codex::ProcessJob::attach(&child).unwrap();
+        let deadline = std::time::Instant::now()+Duration::from_secs(10);
+        let pid_path = workspace.join("shell.pid");
+        while !pid_path.exists() {
+            assert!(child.try_wait().unwrap().is_none(),"shell stopped before starting");
+            assert!(std::time::Instant::now()<deadline,"shell did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let pid: u32 = std::fs::read_to_string(pid_path).unwrap().trim().parse().unwrap();
+        // SYNCHRONIZE lets the test wait for this exact process, even after its PID is reused.
+        let handle = unsafe {OpenProcess(0x00100000,0,pid)};
+        assert!(!handle.is_null());
+        job.terminate().unwrap();
+        let exited = unsafe {WaitForSingleObject(handle,3000)};
+        unsafe {CloseHandle(handle)};
+        assert_eq!(exited,0,"PowerShell survived cancellation");
+        assert!(!child.wait().unwrap().success());
+        println!("Cancelling the owned process group terminated the confined PowerShell child.");
+    }
 
     #[test]
     fn runtime_patch_keeps_default_tools_and_preserves_workspace_permissions() {
