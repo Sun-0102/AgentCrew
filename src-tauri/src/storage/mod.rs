@@ -21,7 +21,7 @@ impl Store {
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if matches!(previous, 1..=3) {
+        if matches!(previous, 1..=4) {
             let backup = store
                 .path
                 .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
@@ -38,6 +38,7 @@ impl Store {
             include_str!("../../migrations/002_codex.sql"),
             include_str!("../../migrations/003_conversations.sql"),
             include_str!("../../migrations/004_groups.sql"),
+            include_str!("../../migrations/005_deepseek.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
@@ -326,7 +327,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 
@@ -495,6 +496,59 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("v2-")));
+    }
+
+    #[test]
+    fn version_four_upgrade_backs_up_and_preserves_codex_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("old.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        for migration in [
+            include_str!("../../migrations/001_projects.sql"),
+            include_str!("../../migrations/002_codex.sql"),
+            include_str!("../../migrations/003_conversations.sql"),
+            include_str!("../../migrations/004_groups.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.execute("INSERT INTO conversations(id,project_id,workspace_path) VALUES('codex-personal',NULL,'workspace')",[]).unwrap();
+        connection.execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider) VALUES('codex-personal','keep-thread','model','version','provider')",[]).unwrap();
+        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES('codex-personal','keep-message','assistant','keep history')",[]).unwrap();
+        drop(connection);
+        let store = Store::open(path).unwrap();
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT text FROM codex_messages WHERE item_id='keep-message'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "keep history"
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM deepseek_session", [], |r| r
+                    .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        let backup = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().contains("v4-"))
+            .unwrap();
+        assert_eq!(
+            Connection::open(backup)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
     }
 
     #[test]

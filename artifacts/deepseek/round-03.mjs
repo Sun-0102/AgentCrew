@@ -1,0 +1,11 @@
+const task=await taskSpace(8);const page=task.page('p1');
+await page.fill('textarea','DeepSeek 私聊草稿验证');
+await page.click('button[title="Codex 私聊"]');
+await page.waitForFunction(()=>document.querySelector('h1')?.textContent==='Codex');
+const codexDraft=await page.evaluate(()=>document.querySelector('textarea').value);
+if(codexDraft==='DeepSeek 私聊草稿验证')throw Error('Drafts leaked across agents');
+await page.click('button[title="DeepSeek 私聊"]');
+await page.waitForFunction(()=>document.querySelector('textarea')?.value==='DeepSeek 私聊草稿验证');
+await page.fill('textarea','');
+await page.click('button[aria-label="连接与设置"]');
+console.log(await page.snapshot());

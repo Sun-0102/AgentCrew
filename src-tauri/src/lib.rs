@@ -1,6 +1,7 @@
 mod codex;
 mod codex_sidebar;
 mod commands;
+mod deepseek;
 mod groups;
 mod storage;
 
@@ -14,8 +15,11 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let store = storage::Store::open(data_dir.join("ai-gent.sqlite"))?;
             codex::recover(&store)?;
+            deepseek::recover(&store)?;
             app.manage(store);
             app.manage(codex::Runtime::default());
+            app.manage(deepseek::Runtime::default());
+            app.manage(deepseek::ExecutionGate::default());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let store = handle.state::<storage::Store>();
@@ -36,6 +40,10 @@ pub fn run() {
             commands::codex_snapshot,
             commands::codex_cancel,
             commands::codex_approve,
+            commands::deepseek_probe,
+            commands::deepseek_snapshot,
+            commands::deepseek_send,
+            commands::deepseek_cancel,
             commands::group_list,
             commands::group_create,
             commands::group_update
@@ -45,6 +53,7 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<codex::Runtime>().shutdown();
+                app.state::<deepseek::Runtime>().shutdown();
             }
         });
 }

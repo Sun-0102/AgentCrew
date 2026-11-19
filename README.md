@@ -2,7 +2,7 @@
 
 面向个人用户的本地 AI 协作工作台。用户只打开 AI-gent，后台由 Codex 和 DeepSeek 执行任务。项目、私聊、协作、Git 和工作证据由 AI-gent 统一管理。
 
-文档日期：2026-11-19。状态：暖色聊天工作台、Codex 私聊与本机群聊已实现。DeepSeek 和自动协作工作流待接入。AI-gent 为暂定项目名。
+文档日期：2026-11-19。状态：暖色聊天工作台、Codex/DeepSeek 独立私聊与本机群聊已实现。DeepSeek 终端执行暂不可用；双 Agent 协作工作流尚未开始。AI-gent 为暂定项目名。
 
 ## 本地开发
 
@@ -15,9 +15,19 @@ npm run desktop
 
 第一次构建需要下载并编译 Rust 依赖。开发版使用 `local.ai-gent.desktop.dev` 应用标识，数据库写入 Tauri 解析的应用数据目录；界面右侧可查看实际位置。项目源码留在用户选择的原目录。
 
-当前可用：Agent 导航、聊天/通讯录、搜索、创建本机群聊、邀请和管理自己的 Agent、引用回复、复制消息、@ 选择、文本附件、原生目录选择、项目切换与 SQLite 持久化。重复选择同一目录会选中已有项目。Codex 支持本机登录检测、真实模型目录、流式回复、工具记录、审批、取消和恢复。DeepSeek、自动多 Agent 工作流、Git 管理及托盘待实现。关闭窗口会退出程序并停止本软件管理的 Codex 进程组。
+当前可用：Agent 导航、聊天/通讯录、搜索、创建本机群聊、邀请和管理自己的 Agent、引用回复、复制消息、@ 选择、文本附件、原生目录选择、项目切换与 SQLite 持久化。重复选择同一目录会选中已有项目。Codex 支持本机登录检测、真实模型目录、流式回复、工具记录、审批、取消和恢复。DeepSeek 支持独立私聊、消息及文件工具记录、取消和恢复；当前不开放终端和群聊执行。自动多 Agent 工作流、Git 管理及托盘待实现。关闭窗口会退出程序并停止本软件管理的 Codex 进程组。
 
-群聊可不关联项目，每群有独立上下文。邀请只处理自己的本机 Agent，没有外部邀请。DeepSeek 可先加入群，但不能回复或执行。群内可指定 Codex 执行；不会自动唤醒所有成员。文本附件最多三个，合计 60 KB，内容随消息发送。文字草稿可跨刷新恢复；引用和待发附件只在当前运行期间保留。界面及验证见 [设计说明](docs/06-界面设计.md) 和 [聊天工作台验收](docs/verification/2026-11-19-chat-ui.md)。
+群聊可不关联项目，每群有独立上下文。邀请只处理自己的本机 Agent，没有外部邀请。DeepSeek 可先加入群，但群内不能回复或执行；请使用其独立私聊。群内可指定 Codex 执行；不会自动唤醒所有成员。文本附件最多三个，合计 60 KB，内容随消息发送。文字草稿可跨刷新恢复；引用和待发附件只在当前运行期间保留。界面及验证见 [设计说明](docs/06-界面设计.md) 和 [聊天工作台验收](docs/verification/2026-11-19-chat-ui.md)。
+
+## DeepSeek 私聊
+
+1. 安装已验证的 DeepSeek Harness `0.2.1-rc.2`，在 Harness 中配置 API 凭证，或提供它支持的环境配置。无需打开 Harness 图形窗口。应用不读取或复制密钥。
+2. 在左侧选择 DeepSeek，点击“连接 DeepSeek”，从已安装 Harness 内置目录选择模型并发送。连接检查验证运行组件和 SDK 初始化；认证及额度在真实发送时验证。
+3. 私聊、文件工具记录及模型选择独立保存。重启或取消后，下一条消息恢复同一 Harness 会话。整个应用一次执行一个任务。
+
+当前回复按消息显示。Windows PowerShell 沙箱返回 `0xC0000142`，因此本版关闭终端工具；不放宽沙箱。需要额外审批的操作会被拒绝。取消会终止本软件启动的完整 Harness 进程组，已写文件保留。双 Agent 协作和 DeepSeek 群聊执行暂不开放。
+
+模型目录读取、真实回复、中文目录文件写入、重启恢复、两模型切换、生成中取消与取消后恢复已验证。完整桌面点击仍受自动化工具限制，见 [DeepSeek 验收记录](docs/verification/2026-11-19-deepseek.md)。
 
 ## Codex 私聊
 
@@ -31,7 +41,7 @@ npm run desktop
 
 已加入当前 Windows 官方客户端的“最近”兼容同步。它同时依赖无项目工作目录范围和会话来源筛选：独立 App Server 固定写入 `vscode` 来源，而本机官方客户端 26.1111 的侧栏扫描仅接收 `cli`。AI-gent 在启动恢复和每轮结束后，为自己创建的会话备份并修正索引分类与最近活动时间；真实创建方 `originator=ai_gent`、消息和执行权限均保留。原索引元数据备份在应用数据目录的 `sidebar-index-backups/<thread-id>.json`。这使用客户端内部 SQLite 索引兼容，不是稳定的官方同步 API；客户端升级、索引重建或用户自定义无项目目录后需重新验证。同步失败单独报告，不阻止普通私聊。
 
-任务启动时请求 `workspace-write` 沙箱与 `on-request` 用户审批，并核对服务端返回配置。工作目录本身不是沙箱；不承诺限制全部读取范围。数据库现为版本 4，升级前自动生成 `*.v<旧版本>-<UUID>.sqlite` 备份，并保留原项目会话与消息。当前保存可读消息与部分工具事件，不是完整原始协议日志或离线证据包。
+任务启动时请求 `workspace-write` 沙箱与 `on-request` 用户审批，并核对服务端返回配置。工作目录本身不是沙箱；不承诺限制全部读取范围。数据库现为版本 5，升级前自动生成 `*.v<旧版本>-<UUID>.sqlite` 备份，并保留原项目会话与消息。当前保存可读消息与部分工具事件，不是完整原始协议日志或离线证据包。
 
 初次验证使用 PATH 中的旧版 `codex-cli 0.147.0-alpha.6.6`，仅返回 3 个普通模型。现已修正运行文件选择，本机选择客户端管理的 `codex-cli 0.169.0-alpha.11.1`，返回与客户端一致的 10 个普通模型。真实测试与未验收项见 [Codex 接入记录](docs/verification/2026-11-19-codex.md)。
 
@@ -51,6 +61,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_conversati
 cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_cancel_tool -- --ignored --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_personal_chat_and_resume -- --ignored --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --lib installed_codex_group_chat -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --lib installed_deepseek_private_resume_and_cancel -- --ignored --nocapture
 ```
 
 `npm run dev` 仅用于浏览器预览，目录选择和 SQLite 需要桌面运行环境。正式发布前需配置独立应用标识、图标及发布验收。
@@ -67,6 +78,7 @@ src/                         React 界面
 src-tauri/
   src/commands/              Rust 业务命令
   src/codex.rs               App Server stdio、进程组与会话恢复
+  src/deepseek.rs            Harness SDK stdio、独立私聊与恢复
   src/groups.rs              本机群、成员校验与会话隔离
   src/storage/               SQLite 与路径校验
   migrations/                数据库迁移

@@ -180,7 +180,7 @@ impl Store {
             return Err("该 Agent 不在当前群内。".into());
         }
         if target != "codex" {
-            return Err("DeepSeek 尚未接入，暂时不能执行任务。请先选择 Codex。".into());
+            return Err("DeepSeek 目前仅支持独立私聊，群聊执行暂未开放。请先选择 Codex。".into());
         }
         Ok(())
     }

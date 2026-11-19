@@ -37,11 +37,11 @@ struct Client {
 }
 
 #[cfg(windows)]
-struct ProcessJob(usize);
+pub(crate) struct ProcessJob(usize);
 
 #[cfg(windows)]
 impl ProcessJob {
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::*;
         unsafe {
@@ -72,7 +72,7 @@ impl ProcessJob {
         }
     }
 
-    fn terminate(&self) -> Result<(), String> {
+    pub(crate) fn terminate(&self) -> Result<(), String> {
         if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0 as _, 1) }
             == 0
         {

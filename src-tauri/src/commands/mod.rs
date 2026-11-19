@@ -60,7 +60,11 @@ pub async fn codex_send(
     model: String,
     text: String,
 ) -> Result<Value, String> {
+    let admission = app.clone();
     codex_call(app, move |runtime, store| {
+        let gate = admission.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        crate::deepseek::ensure_idle(store)?;
         if let Some(id) = group_id.as_deref() {
             store.validate_group_target(id, target_agent.as_deref().unwrap_or("codex"))?;
         }
@@ -72,6 +76,50 @@ pub async fn codex_send(
         )
     })
     .await
+}
+
+async fn deepseek_call(
+    app: tauri::AppHandle,
+    action: impl FnOnce(&crate::deepseek::Runtime, &Store) -> Result<Value, String> + Send + 'static,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        action(
+            &app.state::<crate::deepseek::Runtime>(),
+            &app.state::<Store>(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn deepseek_probe(app: tauri::AppHandle) -> Result<Value, String> {
+    deepseek_call(app, |runtime, store| runtime.probe(store)).await
+}
+
+#[tauri::command]
+pub async fn deepseek_snapshot(app: tauri::AppHandle) -> Result<Value, String> {
+    deepseek_call(app, |runtime, store| runtime.snapshot(store)).await
+}
+
+#[tauri::command]
+pub async fn deepseek_send(
+    app: tauri::AppHandle,
+    model: String,
+    text: String,
+) -> Result<Value, String> {
+    let admission = app.clone();
+    deepseek_call(app, move |runtime, store| {
+        let gate = admission.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        runtime.send(store, &model, &text)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn deepseek_cancel(app: tauri::AppHandle) -> Result<Value, String> {
+    deepseek_call(app, |runtime, store| runtime.cancel(store)).await
 }
 
 #[tauri::command]
