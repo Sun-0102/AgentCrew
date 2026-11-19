@@ -529,6 +529,17 @@ impl Runtime {
     }
 
     pub fn send(&self, store: &Store, conversation_id: &str, model: &str, text: &str) -> Reply {
+        self.send_recorded(store, conversation_id, model, text, "user")
+    }
+
+    pub(crate) fn send_recorded(
+        &self,
+        store: &Store,
+        conversation_id: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+    ) -> Reply {
         if text.trim().is_empty() || text.len() > 100_000 {
             return Err("消息必须为 1–100000 字节。".into());
         }
@@ -594,8 +605,8 @@ impl Runtime {
             .map_err(|e| e.to_string())?;
         transaction
             .execute(
-                "INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'user',?3)",
-                params![conversation_id, item_id, text],
+                "INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,?3,?4)",
+                params![conversation_id, item_id, role, text],
             )
             .map_err(|e| e.to_string())?;
         transaction.execute("UPDATE codex_sessions SET status='starting',model=?2,turn_id=NULL,error=NULL WHERE conversation_id=?1", params![conversation_id, model]).map_err(|e| e.to_string())?;

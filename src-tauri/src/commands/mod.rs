@@ -65,7 +65,6 @@ pub async fn codex_send(
     codex_call(app, move |runtime, store| {
         let gate = admission.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        crate::deepseek::ensure_idle(store)?;
         if target_agent
             .as_deref()
             .is_some_and(|target| target != "codex")
@@ -73,8 +72,24 @@ pub async fn codex_send(
             return Err("Codex 接口只能执行 Codex 任务。".into());
         }
         if let Some(id) = group_id.as_deref() {
-            store.validate_group_target(id, target_agent.as_deref().unwrap_or("codex"))?;
+            let other = crate::collaboration::latest(store, id)?
+                .map(|task| task.deepseek_model)
+                .filter(|model| !model.is_empty())
+                .unwrap_or_else(|| String::new());
+            let other = if other.is_empty() {
+                crate::deepseek::session(store, id)?["model"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            } else {
+                other
+            };
+            return crate::collaboration::start(
+                &admission, store, id, "codex", &model, &other, &text,
+            );
         }
+        crate::deepseek::ensure_idle(store)?;
+        crate::collaboration::manual_send(store, &model, &text)?;
         runtime.send(
             store,
             &store.resolve_chat(project_id.as_deref(), group_id.as_deref())?,
@@ -134,9 +149,22 @@ pub async fn deepseek_send(
             return Err("DeepSeek 接口只能执行 DeepSeek 任务。".into());
         }
         if let Some(id) = group_id {
-            store.validate_group_target(&id, "deepseek")?;
-            runtime.send_to(store, &id, &model, &text)
+            let other = crate::collaboration::latest(store, &id)?
+                .map(|task| task.codex_model)
+                .filter(|model| !model.is_empty())
+                .unwrap_or_else(|| String::new());
+            let other = if other.is_empty() {
+                admission.state::<Runtime>().snapshot(store, &id)?["session"]["model"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            } else {
+                other
+            };
+            crate::collaboration::start(&admission, store, &id, "deepseek", &other, &model, &text)
         } else {
+            crate::deepseek::ensure_idle(store)?;
+            crate::collaboration::manual_send(store, &model, &text)?;
             runtime.send(store, &model, &text)
         }
     })
@@ -148,8 +176,16 @@ pub async fn deepseek_cancel(
     app: tauri::AppHandle,
     group_id: Option<String>,
 ) -> Result<Value, String> {
+    let handle = app.clone();
     deepseek_call(app, move |runtime, store| {
         if let Some(id) = group_id {
+            let gate = handle.state::<crate::deepseek::ExecutionGate>();
+            let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+            if let Some(task) = crate::collaboration::latest(store, &id)? {
+                if matches!(task.status.as_str(), "running" | "paused" | "cancelling") {
+                    return crate::collaboration::control(&handle, store, &id, &task.id, "cancel");
+                }
+            }
             store.group(&id)?;
             runtime.cancel_in(store, &id)
         } else {
@@ -169,7 +205,7 @@ async fn group_snapshot(
         let mut snapshot = runtime.snapshot(store, &id)?;
         let deepseek = crate::deepseek::session(store, &id)?;
         let last_agent: Option<String> = store.connect()?.query_row(
-            "SELECT agent FROM codex_messages WHERE conversation_id=?1 AND role='user' ORDER BY sequence DESC LIMIT 1",
+            "SELECT agent FROM codex_messages WHERE conversation_id=?1 AND role IN ('user','assignment') ORDER BY sequence DESC LIMIT 1",
             [&id], |row| row.get(0),
         ).optional().map_err(|e| e.to_string())?;
         let codex_active = snapshot["session"]["status"].as_str().is_some_and(crate::codex::active);
@@ -184,6 +220,7 @@ async fn group_snapshot(
         if snapshot["session"].is_object() {
             snapshot["session"]["workspace_path"] = serde_json::json!(store.conversation_root(&id)?);
         }
+        snapshot["task"] = serde_json::to_value(crate::collaboration::latest(store, &id)?).map_err(|e| e.to_string())?;
         Ok(snapshot)
     }).await
 }
@@ -209,7 +246,17 @@ pub async fn codex_cancel(
     project_id: Option<String>,
     group_id: Option<String>,
 ) -> Result<Value, String> {
+    let handle = app.clone();
     codex_call(app, move |runtime, store| {
+        if let Some(id) = group_id.as_deref() {
+            let gate = handle.state::<crate::deepseek::ExecutionGate>();
+            let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+            if let Some(task) = crate::collaboration::latest(store, id)? {
+                if matches!(task.status.as_str(), "running" | "paused" | "cancelling") {
+                    return crate::collaboration::control(&handle, store, id, &task.id, "cancel");
+                }
+            }
+        }
         runtime.cancel(
             store,
             &store.resolve_chat(project_id.as_deref(), group_id.as_deref())?,
@@ -265,12 +312,56 @@ pub async fn group_update(
     id: String,
     name: String,
     members: Vec<String>,
+    project_id: Option<String>,
 ) -> Result<Value, String> {
     let admission = app.clone();
     codex_call(app, move |_, store| {
         let gate = admission.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        serde_json::to_value(store.update_group(&id, &name, members)?).map_err(|e| e.to_string())
+        serde_json::to_value(store.update_group(&id, &name, members, project_id)?)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn group_task_start(
+    app: tauri::AppHandle,
+    group_id: String,
+    target_agent: String,
+    codex_model: String,
+    deepseek_model: String,
+    text: String,
+) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        crate::collaboration::start(
+            &handle,
+            store,
+            &group_id,
+            &target_agent,
+            &codex_model,
+            &deepseek_model,
+            &text,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn group_task_control(
+    app: tauri::AppHandle,
+    group_id: String,
+    task_id: String,
+    action: String,
+) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        crate::collaboration::control(&handle, store, &group_id, &task_id, &action)
     })
     .await
 }

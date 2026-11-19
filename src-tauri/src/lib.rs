@@ -1,5 +1,6 @@
 mod codex;
 mod codex_sidebar;
+mod collaboration;
 mod commands;
 mod deepseek;
 mod groups;
@@ -16,6 +17,7 @@ pub fn run() {
             let store = storage::Store::open(data_dir.join("ai-gent.sqlite"))?;
             codex::recover(&store)?;
             deepseek::recover(&store)?;
+            collaboration::recover(&store)?;
             app.manage(store);
             app.manage(codex::Runtime::default());
             app.manage(deepseek::Runtime::default());
@@ -46,12 +48,17 @@ pub fn run() {
             commands::deepseek_cancel,
             commands::group_list,
             commands::group_create,
-            commands::group_update
+            commands::group_update,
+            commands::group_task_start,
+            commands::group_task_control
         ])
         .build(tauri::generate_context!())
         .expect("AI-gent 启动失败，请检查本地数据目录和桌面运行环境")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                let gate = app.state::<deepseek::ExecutionGate>();
+                let _guard = gate.0.lock().unwrap_or_else(|error| error.into_inner());
+                let _ = collaboration::recover(&app.state::<storage::Store>());
                 app.state::<codex::Runtime>().shutdown();
                 app.state::<deepseek::Runtime>().shutdown();
             }

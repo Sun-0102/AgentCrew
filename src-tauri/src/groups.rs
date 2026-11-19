@@ -35,7 +35,7 @@ fn validate(name: &str, members: &[String]) -> Result<Vec<String>, String> {
 impl Store {
     pub fn groups(&self) -> Result<Vec<Group>, String> {
         let connection = self.connect()?;
-        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),CASE WHEN d.status IN ('starting','running','waiting_approval','cancel_requested','stopping') THEN d.status ELSE COALESCE(s.status,d.status) END FROM chat_groups g LEFT JOIN codex_sessions s ON s.conversation_id=g.conversation_id LEFT JOIN deepseek_sessions d ON d.conversation_id=g.conversation_id ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=g.conversation_id),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),CASE WHEN d.status IN ('starting','running','waiting_approval','cancel_requested','stopping') THEN d.status WHEN EXISTS(SELECT 1 FROM group_tasks t WHERE t.conversation_id=g.conversation_id AND t.status IN ('running','cancelling')) THEN 'running' ELSE COALESCE(s.status,d.status) END FROM chat_groups g LEFT JOIN codex_sessions s ON s.conversation_id=g.conversation_id LEFT JOIN deepseek_sessions d ON d.conversation_id=g.conversation_id ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=g.conversation_id),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -136,6 +136,7 @@ impl Store {
         id: &str,
         name: &str,
         members: Vec<String>,
+        project_id: Option<String>,
     ) -> Result<Group, String> {
         let members = validate(name, &members)?;
         let old = self.group(id)?;
@@ -143,16 +144,84 @@ impl Store {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id=?1 AND status IN ('running','paused','cancelling'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
         if running {
-            return Err("请先完成或取消当前任务，再调整群成员。".into());
+            return Err(
+                "请先完成或取消当前任务（含暂停的自动协作），再修改群成员或关联项目。".into(),
+            );
+        }
+        if old.project_id != project_id {
+            let previous_root: String = tx
+                .query_row(
+                    "SELECT workspace_path FROM conversations WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let (root, project_label) = if let Some(project) = project_id.as_deref() {
+                let project: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT primary_root,name FROM projects WHERE id=?1",
+                        [project],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let (path, label) = project.ok_or("所选项目不存在，请重新选择。")?;
+                (std::path::PathBuf::from(path), label)
+            } else {
+                let path = self.chat_workspace_parent()?.join("groups").join(id);
+                std::fs::create_dir_all(&path).map_err(|e| format!("无法建立群专用目录：{e}"))?;
+                (path, "未关联，使用群专用目录".to_owned())
+            };
+            let root = root
+                .canonicalize()
+                .map_err(|e| format!("关联目录不可访问：{e}"))?;
+            std::fs::read_dir(&root).map_err(|e| format!("关联目录不可读：{e}"))?;
+            let root = root.to_str().ok_or("关联目录不是有效 Unicode 路径")?;
+            let codex_thread: Option<String> = tx
+                .query_row(
+                    "SELECT thread_id FROM codex_sessions WHERE conversation_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let deepseek_thread: Option<String> = tx
+                .query_row(
+                    "SELECT thread_id FROM deepseek_sessions WHERE conversation_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            // A loaded provider session can retain its old cwd; only reset its binding, never its transcript.
+            tx.execute("DELETE FROM codex_sessions WHERE conversation_id=?1", [id])
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM deepseek_sessions WHERE conversation_id=?1",
+                [id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE conversations SET workspace_path=?2 WHERE id=?1",
+                params![id, root],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute("UPDATE group_tasks SET status='interrupted',error='群关联项目已变更，旧目录的验收结论不再适用；请重新指派。',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE conversation_id=?1 AND status IN ('awaiting_review','idle')",[id]).map_err(|e| e.to_string())?;
+            let sessions = serde_json::json!({"codex":codex_thread,"deepseek":deepseek_thread});
+            let summary = format!("群关联项目已更新 · {project_label} · 聊天记录保留，旧文件未搬移，后续使用新的执行会话。");
+            tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'system',?3)",params![id,uuid::Uuid::new_v4().to_string(),summary]).map_err(|e| e.to_string())?;
+            let details = format!("原目录：{previous_root}\n当前目录：{root}\n原执行会话索引：{sessions}\n原厂会话文件保留。后续在新目录创建执行会话；需要旧任务内容时请引用群消息。");
+            tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'workspace',?3)",params![id,uuid::Uuid::new_v4().to_string(),details]).map_err(|e| e.to_string())?;
         }
         tx.execute(
-            "UPDATE chat_groups SET name=?2,members=?3 WHERE conversation_id=?1",
+            "UPDATE chat_groups SET name=?2,members=?3,project_id=?4 WHERE conversation_id=?1",
             params![
                 id,
                 name.trim(),
-                serde_json::to_string(&members).map_err(|e| e.to_string())?
+                serde_json::to_string(&members).map_err(|e| e.to_string())?,
+                project_id
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -228,6 +297,7 @@ mod tests {
                 &one.id,
                 "产品协作群",
                 vec!["codex".into(), "deepseek".into()],
+                None,
             )
             .unwrap();
         assert!(store.validate_group_target(&one.id, "deepseek").is_ok());

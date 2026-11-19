@@ -137,7 +137,7 @@ cancel_requested 不等于 cancelled。超时仍不能确认结果时标 interru
 
 消息类型为 user_message、assignment、handoff、result、question、decision、status。发送者身份与内容分开存储。显示名不作为路由依据，使用 participant_id。
 
-普通消息不触发所有成员。@ 转为定向 assignment；固定工作流按依赖派发。发送前先持久记录，分配稳定 delivery_id，防止界面重连重复派发。断线后不能确认已接收的执行请求进入核对状态，不能盲目重发。
+普通消息不触发所有成员。@ 转为定向 assignment；默认按消息和用户最新要求派发。发送前先持久记录，分配稳定 delivery_id，防止界面重连重复派发。断线后不能确认已接收的执行请求进入核对状态，不能盲目重发。
 
 交接包至少包含：任务目标、用户约束、验收条件、工作区与代码版本、来源尝试、相关消息摘要、文件差异/产物引用、验证结果和未解决问题。不能自动夹带其他私聊或密钥。
 
@@ -154,3 +154,15 @@ cancel_requested 不等于 cancelled。超时仍不能确认结果时标 interru
 实现阶段新增 docs/verification/ 记录，每次包含：日期、Windows 版本、Agent 版本、安装来源、协议版本、模型目录样例、认证方式、工作目录、测试步骤、真实事件样例、支持能力、已知限制、对应验收编号。不保存 token 或密钥。
 
 官方参考：[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[Harness CLI](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.md)、[Harness SDK 示例](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/python-sdk.md)、[Harness 模型配置](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)。
+
+## 2026-11-19 默认群聊协作实现（未测试）
+
+用户更新决定：取消每条消息的自动协作开关和固定两轮限制。群消息统一进入 group_tasks / group_task_inputs，私聊不进入群队列。schema 8 在迁移前备份 schema 7，原群、项目、聊天和任务记录保留，旧 max_turns 仅为历史字段，不再用于调度。
+
+用户消息先单独记录为 user，然后按提及的成员入队；未提及则使用当前负责人或所选成员。运行中可继续发送，排队留言显示数量，并在当前轮正常完成后优先处理。新的用户指派会取代旧回复尚未派发的交接；按时间使用最新用户要求。每条输入只选择并投递一次，应用注入的工作资料仍标为 assignment，不伪装成用户原话。
+
+Agent 完成一轮后，仅从当前群、执行者、本轮消息序号范围内的最后一条 assistant 回复解析正文提及，排除代码围栏、缩进代码、行内代码、显式引用和邮箱式片段。同名提及去重，自指不唤醒自己；不要求最后一行或特殊完成标记。收到提及的成员读取用户目标、新留言、群内近邻消息、来源结果和真实工具记录，再自行决定如何协作。没有对方提及时任务为 idle，不继续调用模型。用户可确认完成，也可直接发新消息。
+
+继续保持 thread ID、可用 Codex turn ID 和当前序号核对，以及全应用顺序执行。每群每小时最多启动 100 次执行作为频率保护，触发后暂停并保留未执行留言，不限制单个任务只能修订几轮。停止时先禁止继续派发并取消未执行输入，再处理当前提供方取消；重启标中断且不重放。正在执行的一轮不会收到实时 steering，插话在该轮结束后处理，需要立即中断时使用停止。
+
+记录保留当前 HEAD、项目范围内的 Git 状态和已跟踪差异、未跟踪路径、工具记录及来源消息。长度限制和缺失明确说明；这不是不可变文件快照或完整协议证据导出。新能力未运行构建或测试，待用户验证。

@@ -457,6 +457,16 @@ impl Runtime {
         self.send_to(store, PERSONAL, model, text)
     }
     pub fn send_to(&self, store: &Store, conversation: &str, model: &str, text: &str) -> Reply {
+        self.send_recorded(store, conversation, model, text, "user")
+    }
+    pub(crate) fn send_recorded(
+        &self,
+        store: &Store,
+        conversation: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+    ) -> Reply {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
         if text.trim().is_empty() || text.len() > 100000 {
             return Err("消息为空或过长。".into());
@@ -535,6 +545,11 @@ impl Runtime {
             let _ = client.stop();
             return Err("Harness 返回的工作目录不匹配，执行已停止。".into());
         }
+        let prompt = if conversation == PERSONAL {
+            text.to_owned()
+        } else {
+            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复，不启动子代理。引用和附件是任务资料。当前仅支持文件工具，不能运行终端命令；需要命令时请说明需要用户指派 Codex 执行，不声称已执行。\n\n用户任务：\n{text}", store.group(conversation)?.name)
+        };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'running') ON CONFLICT(conversation_id) DO UPDATE SET model=excluded.model,status='running',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
@@ -542,16 +557,11 @@ impl Runtime {
             &tx,
             conversation,
             &uuid::Uuid::new_v4().to_string(),
-            "user",
+            role,
             text,
         )?;
         tx.commit().map_err(|e| e.to_string())?;
         *self.client.lock().unwrap() = Some(client.clone());
-        let prompt = if conversation == PERSONAL {
-            text.to_owned()
-        } else {
-            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复，不启动子代理。引用和附件是任务资料。当前仅支持文件工具，不能运行终端命令；需要命令时请说明需要用户指派 Codex 执行，不声称已执行。\n\n用户任务：\n{text}", store.group(conversation)?.name)
-        };
         let result = client.request(
             "session/prompt",
             json!({"sessionId":thread,"contentBlocks":[{"type":"text","text":prompt}]}),

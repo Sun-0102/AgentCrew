@@ -4,8 +4,15 @@ export interface Group { id: string; name: string; members: string[]; project_id
 export interface Model { model: string; displayName: string; isDefault: boolean }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: "codex" | "deepseek"; id: string; role: string; text: string; created_at: string | null }
+export interface GroupTask {
+  id: string; conversation_id: string; objective: string; status: string;
+  current_agent: "codex" | "deepseek"; codex_model: string; deepseek_model: string;
+  turn_count: number; queued_count: number; error: string | null;
+}
+export const taskLabels: Record<string, string> = { idle: "等待新消息", running: "正在处理", paused: "已暂停接力", cancelling: "正在取消", cancelled: "已取消", interrupted: "协作已中断", blocked: "需要你处理", awaiting_review: "待你验收", completed: "已验收", manual: "已转手动指派" };
 export interface Snapshot {
   agent?: "codex" | "deepseek";
+  task?: GroupTask | null;
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;
   messages: Message[];
   approvals: { id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
@@ -18,12 +25,12 @@ const previewMessagesKey = "ai-gent.preview.messages.v1";
 function readPreview<T>(key: string, fallback: T): T { const raw = localStorage.getItem(key); if (!raw) return fallback; try { return JSON.parse(raw) as T; } catch { throw new Error("本机预览记录无法读取，请检查浏览器存储。"); } }
 export const getGroups = async () => desktop ? invoke<Group[]>("group_list") : readPreview<Group[]>(previewKey, []);
 export async function saveGroup(name: string, members: string[], projectId: string | null, existingId?: string) {
-  if (desktop) return existingId ? invoke<Group>("group_update", { id: existingId, name, members }) : invoke<Group>("group_create", { name, members, projectId });
+  if (desktop) return existingId ? invoke<Group>("group_update", { id: existingId, name, members, projectId }) : invoke<Group>("group_create", { name, members, projectId });
   const groups = await getGroups();
   const existing = groups.find(g => g.id === existingId);
-  const group: Group = { id: existingId ?? crypto.randomUUID(), name: name.trim(), members, project_id: existing?.project_id ?? projectId, created_at: existing?.created_at ?? new Date().toISOString(), preview: existing ? "群成员已更新" : "群聊已创建", updated_at: new Date().toISOString(), status: null };
+  const group: Group = { id: existingId ?? crypto.randomUUID(), name: name.trim(), members, project_id: projectId, created_at: existing?.created_at ?? new Date().toISOString(), preview: existing ? "群设置已更新" : "群聊已创建", updated_at: new Date().toISOString(), status: null };
   const messages = readPreview<Record<string, Message[]>>(previewMessagesKey, {});
-  messages[group.id] = [...messages[group.id] ?? [], { id: crypto.randomUUID(), role: "system", text: existing ? "群成员已更新" : "群聊已创建", created_at: new Date().toISOString() }];
+  messages[group.id] = [...messages[group.id] ?? [], { id: crypto.randomUUID(), role: "system", text: existing ? "群设置已更新" : "群聊已创建", created_at: new Date().toISOString() }];
   localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
   localStorage.setItem(previewKey, JSON.stringify([group, ...groups.filter(g => g.id !== group.id)]));
   return group;
