@@ -6,6 +6,7 @@ import MessageBody from "./MessageBody";
 import TaskResults from "./TaskResults";
 import { speedChoices } from "./speed";
 import ReasoningPicker from "./ReasoningPicker";
+import { activeMention, insertMention } from "./mentions";
 import { agents, clock, desktop, running, statusLabels, taskLabels, type Group, type Message, type Probe, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -127,16 +128,17 @@ export default function ChatStage(p: Props) {
   function editText(event: ChangeEvent<HTMLTextAreaElement>) {
     const field = event.currentTarget;
     setText(field.value);
-    setMentions(/^\s*@[a-z]*$/i.test(field.value.slice(0, field.selectionStart)));
+    setMentions(!!activeMention(field.value, field.selectionStart));
   }
   function chooseMention(id: string) {
     const name = id === "deepseek" ? "DeepSeek" : "Codex";
-    onAgent(id === "deepseek" ? "deepseek" : "codex");
-    setText(current => `@${name} ${current.replace(/^\s*@\w*\s*/, "")}`);
+    const field = input.current;
+    const next = insertMention(text, field?.selectionStart ?? text.length, field?.selectionEnd ?? text.length, name);
+    setText(next.text);
     setMentions(false);
     requestAnimationFrame(() => {
       input.current?.focus();
-      input.current?.setSelectionRange(name.length + 2, name.length + 2);
+      input.current?.setSelectionRange(next.cursor, next.cursor);
     });
   }
   return <section className="chat-stage" aria-label={title}>
@@ -155,13 +157,13 @@ export default function ChatStage(p: Props) {
         <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
           {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
           {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}><Icon name="file" size={18} /><span>{file.name}<small>{(file.size / 1024).toFixed(1)} KB · 文本</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
-          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} placeholder={group ? "说说你的想法，输入 @ 指定一位成员…" : "把想法写下来，我们一起往前推进…"} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
+          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onSelect={event => setMentions(!!activeMention(event.currentTarget.value, event.currentTarget.selectionStart))} placeholder={group ? "说说你的想法，输入 @ 指定一位成员…" : "把想法写下来，我们一起往前推进…"} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
             if (mentions && event.key === "Escape") { event.preventDefault(); setMentions(false); return; }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               if (mentions) {
-                const query = text.slice(0, event.currentTarget.selectionStart).match(/^\s*@([a-z]*)$/i)?.[1].toLowerCase() ?? "";
+                const query = activeMention(text, event.currentTarget.selectionStart)?.query ?? "";
                 chooseMention(members.find(id => query ? id.startsWith(query) : id === target) ?? members[0]);
               } else void send();
             }
