@@ -1,0 +1,12 @@
+[
+  { "text": "我这里有一个任务，你们协调完成。", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] },
+  { "text": "@Codex 只由你处理", "members": ["codex", "deepseek"], "expected": ["codex"] },
+  { "text": "这件事请 @DeepSeek 处理", "members": ["codex", "deepseek"], "expected": ["deepseek"] },
+  { "text": "@DeepSeek @Codex 一起处理 @Codex", "members": ["codex", "deepseek"], "expected": ["deepseek", "codex"] },
+  { "text": "> @Codex 引用\n你们协调完成，示例是 `@DeepSeek`", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] },
+  { "text": "```text\n@Codex\n```\n    @DeepSeek\n文本附件：@Codex.txt\nuser@Codex.com", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] },
+  { "text": "> @DeepSeek 引用\n请@cOdEx检查", "members": ["codex", "deepseek"], "expected": ["codex"] },
+  { "text": "一起处理", "members": ["deepseek"], "expected": ["deepseek"] },
+  { "text": "@DeepSeek 处理", "members": ["codex"], "expected": ["deepseek"] },
+  { "text": "@CodexExtra 不是成员名", "members": ["codex", "deepseek"], "expected": ["codex", "deepseek"] }
+]

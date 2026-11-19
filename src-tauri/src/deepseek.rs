@@ -17,6 +17,7 @@ type Reply = Result<Value, String>;
 const VERSION: &str = "0.2.1-rc.2";
 pub const PERSONAL: &str = "deepseek-personal";
 const PROFILE: &str = "ai-gent-sdk";
+const RUNTIME_PATCH: &str = "- id: session-log-deepseek\n  disabled: true\n- id: sandbox-policy\n  config:\n    mode: workspace-write\n    workspaceRoot: !!js process.cwd()\n- id: approval\n  config:\n    policy: ask\n";
 
 #[derive(Default)]
 pub struct Runtime {
@@ -145,7 +146,7 @@ impl Client {
     ) -> Result<Arc<Self>, String> {
         let patch = runtime_dir(store)?.join("private.patch.yml");
         // Keep this application's logs local. Required approvals fail closed in this SDK version.
-        std::fs::write(&patch, "- id: session-log-deepseek\n  disabled: true\n- id: tool-plugin-manager\n  disabled: true\n- id: tool-pwsh\n  disabled: true\n- id: sandbox-policy\n  config:\n    mode: workspace-write\n    workspaceRoot: !!js process.cwd()\n- id: approval\n  config:\n    policy: ask\n").map_err(|e| e.to_string())?;
+        std::fs::write(&patch, RUNTIME_PATCH).map_err(|e| e.to_string())?;
         let home = std::env::var_os("DSH_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".dsh")))
@@ -568,7 +569,7 @@ impl Runtime {
         let prompt = if conversation == PERSONAL {
             text.to_owned()
         } else {
-            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复，不启动子代理。引用和附件是任务资料。当前仅支持文件工具，不能运行终端命令；需要命令时请说明需要用户指派 Codex 执行，不声称已执行。\n\n用户任务：\n{text}", store.group(conversation)?.name)
+            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(conversation)?.name)
         };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
@@ -661,6 +662,70 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+
+
+    #[test]
+    fn runtime_patch_keeps_default_tools_and_preserves_workspace_permissions() {
+        assert!(!RUNTIME_PATCH.contains("tool-pwsh"));
+        assert!(!RUNTIME_PATCH.contains("tool-plugin-manager"));
+        assert!(RUNTIME_PATCH.contains("mode: workspace-write"));
+        assert!(RUNTIME_PATCH.contains("policy: ask"));
+    }
+
+    #[test]
+    #[ignore = "Uses one real Harness turn to verify an ordinary group greeting does not invoke tools or assign roles"]
+    fn installed_deepseek_group_greeting() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let group = store.create_group_in("greeting",vec!["codex".into(),"deepseek".into()],None,&temp.path().join("groups")).unwrap();
+        let runtime = Runtime::default();
+        let result = (|| -> Result<(),String> {
+            let probe = runtime.probe(&store)?;
+            let model = probe["models"][0]["model"].as_str().ok_or("model missing")?;
+            runtime.send_to(&store,&group.id,model,"你们好")?;
+            let deadline = std::time::Instant::now()+Duration::from_secs(90);
+            while session(&store,&group.id)?["status"].as_str().is_some_and(crate::codex::active) {
+                if std::time::Instant::now()>deadline {return Err("greeting timed out".into());}
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let connection = store.connect()?;
+            let tools: u32 = connection.query_row("SELECT COUNT(*) FROM codex_messages WHERE conversation_id=?1 AND role='tool'",[&group.id],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if tools != 0 {return Err("greeting unexpectedly invoked tools".into());}
+            let reply: String = connection.query_row("SELECT text FROM codex_messages WHERE conversation_id=?1 AND role='assistant' ORDER BY sequence DESC LIMIT 1",[&group.id],|r|r.get(0)).map_err(|e|e.to_string())?;
+            println!("DeepSeek greeting: {reply}");
+            if reply.chars().count()>160 || ["分工","不能运行终端","仅支持文件","当前工作区"].iter().any(|word|reply.contains(word)) {return Err("greeting unnecessarily explained roles or workspace".into());}
+            Ok(())
+        })();
+        runtime.shutdown();
+        result.unwrap();
+    }
+
+    #[test]
+    #[ignore = "Uses a real Harness model turn to check PowerShell tool availability and execution"]
+    fn installed_deepseek_enabled_powershell() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let runtime = Runtime::default();
+        let result = (|| -> Result<(),String> {
+            let probe = runtime.probe(&store)?;
+            let model = probe["models"][0]["model"].as_str().ok_or("model missing")?;
+            runtime.send(&store,model,"请使用当前已提供的 pwsh 工具执行且只执行 Write-Output AI_GENT_PWSH_OK。不要创建文件、不要安装插件、不要调用其他工具。请如实报告工具是否执行成功；失败则报告错误，不要换工具或请求提权。")?;
+            let data = wait(&runtime,&store);
+            let messages = data["messages"].as_array().ok_or("messages missing")?;
+            let calls = messages.iter().filter(|m|m["role"] == "tool" && m["text"].as_str().is_some_and(|t|t.starts_with("工具开始：pwsh"))).count();
+            if calls == 0 { return Err("PowerShell tool was not called".into()); }
+            let results: Vec<_> = messages.iter().filter(|m|m["role"] == "tool" && !m["id"].as_str().unwrap_or("").starts_with("call:")).collect();
+            println!("PowerShell tool called; result: {}",serde_json::to_string(&results).unwrap());
+            if !results.iter().any(|m|m["text"].as_str().is_some_and(|t|t.contains("AI_GENT_PWSH_OK") && !t.contains("3221225794") && !t.contains("0xC0000142"))) {
+                return Err("PowerShell was enabled but command execution did not return the marker".into());
+            }
+            Ok(())
+        })();
+        runtime.shutdown();
+        result.unwrap();
+    }
     fn wait(runtime: &Runtime, store: &Store) -> Value {
         let deadline = std::time::Instant::now() + Duration::from_secs(150);
         loop {

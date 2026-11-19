@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { createServer } from "vite";
+import { readFile } from "node:fs/promises";
 
 const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
 after(() => server.close());
-const { activeMention, insertMention } = await server.ssrLoadModule("/src/features/chats/mentions.ts");
+const { activeMention, insertMention, messageRecipients } = await server.ssrLoadModule("/src/features/chats/mentions.ts");
+
+test("broadcasts unaddressed messages and limits explicit mentions using the backend routing cases", async () => {
+  const cases = JSON.parse(await readFile(new URL("./fixtures/group-routing.json", import.meta.url), "utf8"));
+  for (const { text, members, expected } of cases) assert.deepEqual(messageRecipients(text, members), expected, text);
+});
 
 test("opens mentions after a previous member, body text and a newline", () => {
   for (const text of ["@", "@Codex @", "@Codex 检查后交给 @De", "正文\n@de", "请检查，@De"]) {

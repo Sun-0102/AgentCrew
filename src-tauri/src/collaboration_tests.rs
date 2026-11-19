@@ -49,7 +49,39 @@ fn enqueue(store: &Store, agent: &str, message: &str) {
     store.connect().unwrap().execute("INSERT INTO group_task_inputs(task_id,message_id,target_agent,model,text) VALUES('task',?1,?2,'model','user request')",params![message,agent]).unwrap();
 }
 
+#[test]
+fn recipient_selection_broadcasts_by_default_and_respects_explicit_mentions() {
+    let cases: Value = serde_json::from_str(include_str!("../../tests/fixtures/group-routing.json")).unwrap();
+    for case in cases.as_array().unwrap() {
+        let members: Vec<String> = serde_json::from_value(case["members"].clone()).unwrap();
+        assert_eq!(json!(message_recipients(case["text"].as_str().unwrap(),&members)),case["expected"],"{}",case["text"]);
+    }
+}
 
+#[test]
+fn unaddressed_request_starts_both_and_single_mention_cannot_wake_the_other() {
+    for text in ["你们协调完成这个任务", "请 @DeepSeek 独立处理"] {
+        let (_dir,store,group) = fixture();
+        store.connect().unwrap().execute("DELETE FROM group_task_inputs",[]).unwrap();
+        let recipients = message_recipients(text,&store.group(&group).unwrap().members);
+        for agent in &recipients { enqueue(&store,agent,"request"); }
+        store.connect().unwrap().execute("UPDATE group_task_inputs SET text=?1",[text]).unwrap();
+        let providers = Providers::default();
+        assert!(providers.tick(&store));
+        assert_eq!(*providers.starts.borrow(),recipients);
+        let current = member_task(&store,"task","deepseek").unwrap();
+        if recipients.len() == 1 {
+            assert!(current.pending_prompt.contains("不转交或唤醒其他成员"));
+            providers.finish(&store,&group,"deepseek","@Codex 请继续");
+            assert!(!providers.tick(&store));
+            assert_eq!(*providers.starts.borrow(),["deepseek"]);
+            assert_eq!(latest(&store,&group).unwrap().unwrap().queued_count,0);
+        } else {
+            assert!(current.pending_prompt.contains("已同时投递给群内所有成员"));
+            assert!(latest(&store,&group).unwrap().unwrap().members.iter().all(|member|member.status == "running"));
+        }
+    }
+}
 
 #[test]
 fn both_members_launch_before_either_finishes_and_archive_independently() {
@@ -126,6 +158,9 @@ fn handoff_waits_only_for_its_recipient_and_does_not_duplicate() {
     let prompt = build_prompt(&store,&current,&task_results::capture(&store.conversation_root(&group).unwrap())).unwrap();
     let owner_section = prompt.split("本次用户亲自发送的新消息").nth(1).unwrap().split("本轮投递内容").next().unwrap();
     assert!(!owner_section.contains("please review"));
+    assert!(!prompt.contains("DeepSeek 当前不能用终端"));
+    assert!(prompt.contains("问候、闲聊、询问是否在线时只简短回应"));
+    assert!(prompt.contains("不预设哪位只能写文件"));
 }
 
 
