@@ -1,13 +1,28 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
-export interface Model { model: string; displayName: string; isDefault: boolean }
+export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: "codex" | "deepseek"; id: string; role: string; text: string; created_at: string | null }
 export interface GroupTask {
   id: string; conversation_id: string; objective: string; status: string;
   current_agent: "codex" | "deepseek"; codex_model: string; deepseek_model: string;
   turn_count: number; queued_count: number; error: string | null;
+}
+export interface TaskSummary { id: string; objective: string; status: string; created_at: string }
+export interface FileEvidence { path: string; state: "captured" | "truncated" | "unavailable"; bytes: number | null; text: string | null; note: string | null }
+export interface WorkspaceEvidence { root: string; captured_at_ms: number; head: string; git_status: string; diff: string; files: FileEvidence[]; limitations: string[] }
+export interface TaskStep {
+  id: number; ordinal: number; agent: string; source_agent: string; source_message: string | null;
+  instruction: string; status: string; created_at: string; finished_at: string | null;
+  before: WorkspaceEvidence; after: WorkspaceEvidence | null;
+  messages: { id: string; role: string; text: string; created_at: string }[];
+}
+export interface TaskResult {
+  format_version: number;
+  task: TaskSummary & { conversation_id: string; current_agent: string; turn_count: number; note: string | null; workspace_path: string | null; updated_at: string };
+  inputs: { message_id: string; target_agent: string; text: string; status: string; created_at: string }[];
+  steps: TaskStep[]; limitations: string[];
 }
 export const taskLabels: Record<string, string> = { idle: "等待新消息", running: "正在处理", paused: "已暂停接力", cancelling: "正在取消", cancelled: "已取消", interrupted: "协作已中断", blocked: "需要你处理", awaiting_review: "待你验收", completed: "已验收", manual: "已转手动指派" };
 export interface Snapshot {

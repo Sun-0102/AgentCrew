@@ -447,6 +447,33 @@ impl Drop for Client {
     }
 }
 
+fn model_catalog(client: &Client) -> Result<Vec<Value>, String> {
+    let mut models = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let page = client.request(
+            "model/list",
+            json!({"cursor":cursor,"limit":100,"includeHidden":false}),
+        )?;
+        models.extend(
+            page["data"]
+                .as_array()
+                .ok_or("模型目录格式不兼容")?
+                .iter()
+                .cloned(),
+        );
+        let next = page["nextCursor"].clone();
+        if next.is_null() {
+            break;
+        }
+        if next == cursor {
+            return Err("模型目录分页游标重复".into());
+        }
+        cursor = next;
+    }
+    Ok(models)
+}
+
 impl Runtime {
     fn client(&self, store: &Store) -> Result<Arc<Client>, String> {
         let mut slot = self.client.lock().map_err(|e| e.to_string())?;
@@ -494,29 +521,7 @@ impl Runtime {
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         let client = self.client(store)?;
         let account = client.request("account/read", json!({"refreshToken":false}))?;
-        let mut models = Vec::new();
-        let mut cursor = Value::Null;
-        loop {
-            let page = client.request(
-                "model/list",
-                json!({"cursor":cursor,"limit":100,"includeHidden":false}),
-            )?;
-            models.extend(
-                page["data"]
-                    .as_array()
-                    .ok_or("模型目录格式不兼容")?
-                    .iter()
-                    .cloned(),
-            );
-            let next = page["nextCursor"].clone();
-            if next.is_null() {
-                break;
-            }
-            if next == cursor {
-                return Err("模型目录分页游标重复".into());
-            }
-            cursor = next;
-        }
+        let models = model_catalog(&client)?;
         let mut sidebar_warning = None;
         if let Some(existing) = session(store, "codex-personal")? {
             if !active(existing["status"].as_str().unwrap_or("")) {
@@ -553,6 +558,13 @@ impl Runtime {
             return Err("会话工作目录已不存在".into());
         }
         let client = self.client(store)?;
+        let effort = crate::reasoning::read(store, conversation_id, "codex", model)?;
+        let tier = crate::speed::read(store, conversation_id, model)?;
+        if effort.is_some() || tier.is_some() {
+            let models = json!(model_catalog(&client)?);
+            crate::reasoning::validate(&models, model, effort.as_deref())?;
+            crate::speed::validate(&models, model, tier.as_deref())?;
+        }
         let existing = session(store, conversation_id)?;
         let any_running: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|row|row.get(0)).map_err(|e|e.to_string())?;
         if any_running {
@@ -611,7 +623,7 @@ impl Runtime {
             .map_err(|e| e.to_string())?;
         transaction.execute("UPDATE codex_sessions SET status='starting',model=?2,turn_id=NULL,error=NULL WHERE conversation_id=?1", params![conversation_id, model]).map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
-        let result = client.request("turn/start", json!({"threadId":thread,"model":model,"input":[{"type":"text","text":text,"text_elements":[]}]}));
+        let result = client.request("turn/start", json!({"threadId":thread,"model":model,"effort":effort,"serviceTierForTurn":tier,"input":[{"type":"text","text":text,"text_elements":[]}]}));
         if let Err(error) = &result {
             client.update_status(&thread, "interrupted", Some(error))?;
         }
@@ -803,6 +815,108 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Uses two short model turns to verify explicit reasoning selection and resume"]
+    fn installed_codex_reasoning_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let project = store.add_project(temp.path().to_str().unwrap()).unwrap();
+        let runtime = Runtime::default();
+        let probe = runtime.probe(&store).unwrap();
+        let model = &probe["models"][0];
+        let id = model["model"].as_str().unwrap();
+        let choices = model["supportedReasoningEfforts"].as_array().unwrap();
+        assert!(choices.len() >= 2);
+        let mut thread = Value::Null;
+        for choice in [choices.first().unwrap(), choices.last().unwrap()] {
+            let effort = choice["reasoningEffort"].as_str().unwrap();
+            crate::reasoning::save(&store, &project.id, "codex", id, Some(effort)).unwrap();
+            runtime
+                .send(
+                    &store,
+                    &project.id,
+                    id,
+                    "不要用工具或子代理。只回复 REASONING_OK。",
+                )
+                .unwrap();
+            let result = wait(&runtime, &store, &project.id);
+            if !thread.is_null() {
+                assert_eq!(result["session"]["thread_id"], thread);
+            }
+            thread = result["session"]["thread_id"].clone();
+            assert!(result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "assistant")
+                .unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("REASONING_OK"));
+            println!("Codex explicit effort {effort} completed");
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
+    #[ignore = "Uses two short model turns to verify fast/standard speed with unchanged reasoning"]
+    fn installed_codex_speed_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let project = store.add_project(temp.path().to_str().unwrap()).unwrap();
+        let runtime = Runtime::default();
+        let probe = runtime.probe(&store).unwrap();
+        let model = probe["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| {
+                m["serviceTiers"]
+                    .as_array()
+                    .is_some_and(|tiers| tiers.iter().any(|t| t["id"] == "priority"))
+            })
+            .expect("account must advertise Fast");
+        let id = model["model"].as_str().unwrap();
+        let effort = model["defaultReasoningEffort"].as_str().unwrap();
+        crate::reasoning::save(&store, &project.id, "codex", id, Some(effort)).unwrap();
+        let mut thread = Value::Null;
+        for tier in ["priority", "default"] {
+            crate::speed::save(&store, &project.id, id, Some(tier)).unwrap();
+            runtime
+                .send(
+                    &store,
+                    &project.id,
+                    id,
+                    "不要用工具或子代理。只回复 SPEED_OK。",
+                )
+                .unwrap();
+            let result = wait(&runtime, &store, &project.id);
+            if !thread.is_null() {
+                assert_eq!(result["session"]["thread_id"], thread);
+            }
+            thread = result["session"]["thread_id"].clone();
+            assert!(result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "assistant")
+                .unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("SPEED_OK"));
+            assert_eq!(
+                crate::reasoning::read(&store, &project.id, "codex", id)
+                    .unwrap()
+                    .as_deref(),
+                Some(effort)
+            );
+            println!("Codex speed {tier} completed; reasoning stays {effort}");
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
     fn newer_desktop_runtime_wins_over_old_path_and_invalid_versions() {
         let candidates = vec![
             (PathBuf::from("invalid"), "unrelated tool".into()),
@@ -910,7 +1024,10 @@ mod tests {
             result["models"].as_array().unwrap().len()
         );
         for model in result["models"].as_array().unwrap() {
-            println!("model={} default={}", model["model"], model["isDefault"]);
+            println!(
+                "model={} default={} speed={}",
+                model["model"], model["isDefault"], model["serviceTiers"]
+            );
         }
         runtime.shutdown();
     }

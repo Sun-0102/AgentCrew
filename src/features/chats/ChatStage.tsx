@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
 import Avatar from "../../components/Avatar";
 import MessageBody from "./MessageBody";
+import TaskResults from "./TaskResults";
+import { speedChoices } from "./speed";
+import ReasoningPicker from "./ReasoningPicker";
 import { agents, clock, desktop, running, statusLabels, taskLabels, type Group, type Message, type Probe, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -11,6 +14,9 @@ interface Props {
   snapshot: Snapshot; probe: Probe | null; model: string; connecting: boolean;
   onAgent: (agent: "codex" | "deepseek") => void;
   collaborationModels: { codex: string; deepseek: string };
+  codexServiceTier?: string; onServiceTier?: (value: string) => void;
+  reasoningEffort?: string; collaborationEfforts?: { codex: string; deepseek: string };
+  onReasoningEffort?: (value: string) => void;
   onModel: (model: string) => void; onConnect: () => void; onInvite: () => void; onSettings: () => void;
   onRefresh: () => Promise<void>; notify: (text: string) => void;
 }
@@ -27,7 +33,10 @@ export default function ChatStage(p: Props) {
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [panel, setPanel] = useState<"members" | "evidence" | null>(null);
+  const [resultsOpen, setResultsOpen] = useState(false);
   const [mentions, setMentions] = useState(false);
+  const fastSpeed = speedChoices(probe?.models.find(m => m.model === model)).find(t => t.id === "priority" || t.id === "fast");
+  const fastMode = !!p.codexServiceTier && p.codexServiceTier !== "default";
   const task = snapshot.task;
   const taskActive = !!task && ["running", "cancelling"].includes(task.status);
   const taskControllable = !!task && ["running", "paused", "cancelling"].includes(task.status);
@@ -44,20 +53,21 @@ export default function ChatStage(p: Props) {
   const recipient = namedTarget === "codex" || namedTarget === "deepseek" ? namedTarget : group && taskActive ? task!.current_agent : agent;
   const ready = group ? !!p.collaborationModels[recipient] && members.includes(recipient) : !!probe && (!probe.requires_auth || !!probe.auth) && !!model && members.includes(recipient);
   const visibleMessages: Message[] = [];
-  let replyBlock: Message | null = null;
+  let replyBlockIndex = -1;
   for (const message of snapshot.messages) {
     if (message.role === "assistant") {
       if (!message.text.trim()) continue;
       const speaker = message.agent ?? agent;
+      const replyBlock = visibleMessages[replyBlockIndex];
       if (replyBlock?.agent === speaker) {
         replyBlock.text += `\n\n${message.text.trimEnd()}`;
       } else {
-        replyBlock = { ...message, agent: speaker, text: message.text.trimEnd() };
-        visibleMessages.push(replyBlock);
+        replyBlockIndex = visibleMessages.length;
+        visibleMessages.push({ ...message, agent: speaker, text: message.text.trimEnd() });
       }
     } else if (message.role !== "tool") {
       // New input, dispatch or workspace/status changes separate replies; tool activity does not.
-      replyBlock = null;
+      replyBlockIndex = -1;
       if (message.role === "user" && message.text.trim()) visibleMessages.push(message);
     }
   }
@@ -101,16 +111,16 @@ export default function ChatStage(p: Props) {
     setSending(true); setError(null); nearBottom.current = true;
     try {
       if (group) {
-        await invoke("group_task_start", { groupId: group.id, targetAgent, codexModel: p.collaborationModels.codex, deepseekModel: p.collaborationModels.deepseek, text: content });
-      } else await invoke(agent === "deepseek" ? "deepseek_send" : "codex_send", { ...scope, model, text: content, targetAgent });
+        await invoke("group_task_start", { groupId: group.id, targetAgent, codexServiceTier: p.collaborationModels.codex ? p.codexServiceTier ?? "default" : null, codexModel: p.collaborationModels.codex, deepseekModel: p.collaborationModels.deepseek, codexReasoningEffort: (p.collaborationModels.codex && p.collaborationEfforts?.codex) || null, deepseekReasoningEffort: (p.collaborationModels.deepseek && p.collaborationEfforts?.deepseek) || null, text: content });
+      } else await invoke(agent === "deepseek" ? "deepseek_send" : "codex_send", { ...scope, model, ...(agent === "codex" ? { serviceTier: p.codexServiceTier ?? "default" } : {}), reasoningEffort: p.reasoningEffort || null, text: content, targetAgent });
       setText(""); setFiles([]); setReply(null); await onRefresh();
     }
     catch (cause) { setError(String(cause)); } finally { setSending(false); }
   }
-  async function action(command: string, args: Record<string, unknown> = {}) {
+  async function action(command: string, args: Record<string, unknown> = {}, reportFailure = false) {
     setActing(true); setError(null);
     try { await invoke(command, { ...scope, ...args }); await onRefresh(); }
-    catch (cause) { setError(String(cause)); } finally { setActing(false); }
+    catch (cause) { setError(String(cause)); if (reportFailure) throw cause; } finally { setActing(false); }
   }
   function author(message: Message) { return message.role === "user" ? "我" : (message.agent ?? agent) === "deepseek" ? "DeepSeek" : "Codex"; }
   function quote(message: Message) { setReply({ author: author(message), text: message.text }); input.current?.focus(); }
@@ -130,7 +140,8 @@ export default function ChatStage(p: Props) {
     });
   }
   return <section className="chat-stage" aria-label={title}>
-    <header className="chat-header"><div className="chat-title"><Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : "独立私聊 · 无需选择项目"}</p></div></div><div className="chat-header-actions"><button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button><button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button></div></header>
+    {resultsOpen && group && <TaskResults groupId={group.id} latestTask={task} acting={acting} members={members} onClose={() => setResultsOpen(false)} notify={notify} onAction={async value => { if (!task) throw new Error("任务不存在，请刷新后重试。"); await action("group_task_control", { taskId: task.id, action: value }, true); }} />}
+    <header className="chat-header"><div className="chat-title"><Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : "独立私聊 · 无需选择项目"}</p></div></div><div className="chat-header-actions"><button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button type="button" className="outline-button task-results-trigger" onClick={() => setResultsOpen(true)}><Icon name="file" size={17} />任务结果</button>}{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button><button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button></div></header>
     <div className={`chat-stage-body ${panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{group ? "说说你的目标，或 @ 一位成员开始。群聊与私聊分别保留记录。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agent === "deepseek" ? "DeepSeek" : "Codex"}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
@@ -155,7 +166,7 @@ export default function ChatStage(p: Props) {
               } else void send();
             }
           }} />
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple accept=".txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.html,.css,.yaml,.yml,.log" onChange={attach} tabIndex={-1} aria-label="选择文本附件" /><button className="icon-button" type="button" title="添加文本附件，合计不超过 60 KB" aria-label="添加文本附件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control"><button className={`icon-button ${mentions ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => setMentions(!mentions)}><Icon name="at" size={19} /></button>{mentions && <div className="mention-menu"><div className="menu-caption">发送给哪位成员</div>{members.map(id => <button type="button" key={id} disabled={composingBlocked} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{id === "codex" ? "Codex" : "DeepSeek"}<small>{id === "codex" ? "可执行任务" : "可执行文件任务"}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}</div><span className="toolbar-divider" /><label className="model-picker"><span className="sr-only">选择模型</span><select aria-label="选择模型" value={model} onChange={event => onModel(event.target.value)} disabled={!probe || composingBlocked}>{!probe && <option value="">{connecting ? "正在连接…" : "选择模型"}</option>}{probe?.models.map(m => <option key={m.model} value={m.model}>{m.displayName}</option>)}</select><Icon name="down" size={13} /></label></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agent === "deepseek" ? "DeepSeek" : "Codex"}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action(executingAgent === "deepseek" ? "deepseek_cancel" : "codex_cancel")}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，本轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || !text.trim() || !desktop}><Icon name="send" size={21} /></button>}</div></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple accept=".txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.html,.css,.yaml,.yml,.log" onChange={attach} tabIndex={-1} aria-label="选择文本附件" /><button className="icon-button" type="button" title="添加文本附件，合计不超过 60 KB" aria-label="添加文本附件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control"><button className={`icon-button ${mentions ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => setMentions(!mentions)}><Icon name="at" size={19} /></button>{mentions && <div className="mention-menu"><div className="menu-caption">发送给哪位成员</div>{members.map(id => <button type="button" key={id} disabled={composingBlocked} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{id === "codex" ? "Codex" : "DeepSeek"}<small>{id === "codex" ? "可执行任务" : "可执行文件任务"}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}</div><span className="toolbar-divider" /><label className="model-picker"><span className="sr-only">选择模型</span><select aria-label="选择模型" value={model} onChange={event => onModel(event.target.value)} disabled={!probe || busy || taskControllable}>{!probe && <option value="">{connecting ? "正在连接…" : "选择模型"}</option>}{probe?.models.map(m => <option key={m.model} value={m.model}>{m.displayName}</option>)}</select><Icon name="down" size={13} /></label><ReasoningPicker key={`${agent}:${model}`} model={probe?.models.find(m => m.model === model)} value={p.reasoningEffort} disabled={busy || taskControllable || !probe} onChange={p.onReasoningEffort} />{agent === "codex" && <button type="button" className={`icon-button fast-mode-toggle ${fastMode ? "active" : ""}`} aria-label={fastMode ? "关闭快速模式" : "开启快速模式"} aria-pressed={fastMode} title={!fastSpeed && !fastMode ? "当前模型不支持快速模式" : fastMode ? "快速模式已开启，点击切回标准速度" : "开启快速模式，消耗更多额度"} disabled={!probe || (!fastSpeed && !fastMode) || busy || taskControllable} onClick={() => p.onServiceTier?.(fastMode ? "default" : fastSpeed!.id)}><Icon name="bolt" size={18} /></button>}</div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agent === "deepseek" ? "DeepSeek" : "Codex"}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action(executingAgent === "deepseek" ? "deepseek_cancel" : "codex_cancel")}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，本轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || !text.trim() || !desktop}><Icon name="send" size={21} /></button>}</div></div>
         </form><div className="composer-footer"><span>{group ? `发送给 ${recipient === "codex" ? "Codex" : "DeepSeek"}` : "私聊记录独立保存"}</span><span>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</span></div>
       </div>
     </div>{panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>
@@ -164,9 +175,9 @@ export default function ChatStage(p: Props) {
         {group && task && <div className="collaboration-card" aria-label="协作任务">
           <div className="collaboration-heading"><strong>{taskLabels[task.status] ?? task.status}</strong><span>{task.current_agent === "codex" ? "Codex" : "DeepSeek"} · 已执行 {task.turn_count} 次{task.queued_count > 0 ? ` · ${task.queued_count} 条待处理` : ""}</span></div>
           <p className="collaboration-objective" title={task.objective}>{task.objective}</p>
-          <details><summary>任务与模型</summary><p>任务：{task.id}</p><p>Codex：{task.codex_model}<br />DeepSeek：{task.deepseek_model}</p><p>交接内容在下方“交接详情”记录中查看。本轮回复不代表已验证通过，完成与否由你确认。</p></details>
+          <details><summary>任务与模型</summary><p>任务：{task.id}</p><p>Codex：{task.codex_model}<br />DeepSeek：{task.deepseek_model}</p><p>交接和文件依据可在“任务结果”中查看。本轮回复不代表已验证通过，完成与否由你确认。</p></details>
           {task.error && <p className="collaboration-reason">{task.error}</p>}
-          <div className="collaboration-actions">
+          <div className="collaboration-actions"><button type="button" className="outline-button" onClick={() => setResultsOpen(true)}>查看任务结果</button>
             {task.status === "running" && <button type="button" className="outline-button" disabled={acting} onClick={() => action("group_task_control", { taskId: task.id, action: "pause" })}>暂停接力</button>}
             {task.status === "paused" && <button type="button" className="outline-button" disabled={acting} onClick={() => action("group_task_control", { taskId: task.id, action: "resume" })}>继续接力</button>}
             {["running", "paused", "cancelling"].includes(task.status) && <button type="button" className="outline-button" disabled={acting || task.status === "cancelling"} onClick={() => action("group_task_control", { taskId: task.id, action: "cancel" })}>停止</button>}

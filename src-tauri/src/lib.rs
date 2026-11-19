@@ -4,7 +4,10 @@ mod collaboration;
 mod commands;
 mod deepseek;
 mod groups;
+mod reasoning;
+mod speed;
 mod storage;
+mod task_results;
 
 use tauri::Manager;
 
@@ -50,7 +53,10 @@ pub fn run() {
             commands::group_create,
             commands::group_update,
             commands::group_task_start,
-            commands::group_task_control
+            commands::group_task_control,
+            commands::group_task_list,
+            commands::group_task_result,
+            commands::group_task_export
         ])
         .build(tauri::generate_context!())
         .expect("AI-gent 启动失败，请检查本地数据目录和桌面运行环境")

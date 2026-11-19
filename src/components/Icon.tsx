@@ -21,6 +21,8 @@ const paths = {
   terminal: "m5 6 5 5-5 5M13 17h6",
   shield: "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6",
   back: "m14 5-7 7 7 7",
+  bolt: "m13 2-9 12h7l-1 8 10-12h-7l1-8Z",
+  reset: "M4 4v6h6M4 10a8 8 0 1 1 1 8",
   spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z",
 };
 export type IconName = keyof typeof paths;

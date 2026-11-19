@@ -60,6 +60,8 @@ pub async fn codex_send(
     target_agent: Option<String>,
     model: String,
     text: String,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 ) -> Result<Value, String> {
     let admission = app.clone();
     codex_call(app, move |runtime, store| {
@@ -71,6 +73,15 @@ pub async fn codex_send(
         {
             return Err("Codex 接口只能执行 Codex 任务。".into());
         }
+        let conversation = store.resolve_chat(project_id.as_deref(), group_id.as_deref())?;
+        crate::reasoning::save(
+            store,
+            &conversation,
+            "codex",
+            &model,
+            reasoning_effort.as_deref(),
+        )?;
+        crate::speed::save(store, &conversation, &model, service_tier.as_deref())?;
         if let Some(id) = group_id.as_deref() {
             let other = crate::collaboration::latest(store, id)?
                 .map(|task| task.deepseek_model)
@@ -135,6 +146,7 @@ pub async fn deepseek_send(
     app: tauri::AppHandle,
     model: String,
     text: String,
+    reasoning_effort: Option<String>,
     group_id: Option<String>,
     target_agent: Option<String>,
 ) -> Result<Value, String> {
@@ -148,6 +160,14 @@ pub async fn deepseek_send(
         {
             return Err("DeepSeek 接口只能执行 DeepSeek 任务。".into());
         }
+        let conversation = group_id.as_deref().unwrap_or(crate::deepseek::PERSONAL);
+        crate::reasoning::save(
+            store,
+            conversation,
+            "deepseek",
+            &model,
+            reasoning_effort.as_deref(),
+        )?;
         if let Some(id) = group_id {
             let other = crate::collaboration::latest(store, &id)?
                 .map(|task| task.codex_model)
@@ -332,11 +352,35 @@ pub async fn group_task_start(
     codex_model: String,
     deepseek_model: String,
     text: String,
+    codex_reasoning_effort: Option<String>,
+    deepseek_reasoning_effort: Option<String>,
+    codex_service_tier: Option<String>,
 ) -> Result<Value, String> {
     let handle = app.clone();
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        store.group(&group_id)?;
+        crate::reasoning::save(
+            store,
+            &group_id,
+            "codex",
+            &codex_model,
+            codex_reasoning_effort.as_deref(),
+        )?;
+        crate::reasoning::save(
+            store,
+            &group_id,
+            "deepseek",
+            &deepseek_model,
+            deepseek_reasoning_effort.as_deref(),
+        )?;
+        crate::speed::save(
+            store,
+            &group_id,
+            &codex_model,
+            codex_service_tier.as_deref(),
+        )?;
         crate::collaboration::start(
             &handle,
             store,
@@ -364,4 +408,22 @@ pub async fn group_task_control(
         crate::collaboration::control(&handle, store, &group_id, &task_id, &action)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn group_task_list(app: tauri::AppHandle, group_id: String) -> Result<Value, String> {
+    codex_call(app, move |_, store| crate::task_results::list(store, &group_id)).await
+}
+
+#[tauri::command]
+pub async fn group_task_result(app: tauri::AppHandle, group_id: String, task_id: String) -> Result<Value, String> {
+    codex_call(app, move |_, store| crate::task_results::result(store, &group_id, &task_id)).await
+}
+
+#[tauri::command]
+pub async fn group_task_export(app: tauri::AppHandle, group_id: String, task_id: String, path: String, format: String) -> Result<Value, String> {
+    codex_call(app, move |_, store| {
+        crate::task_results::export(store, &group_id, &task_id, &path, &format)?;
+        Ok(Value::Null)
+    }).await
 }

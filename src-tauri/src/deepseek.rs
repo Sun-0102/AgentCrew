@@ -141,6 +141,7 @@ impl Client {
         thread: &str,
         conversation: &str,
         model: &str,
+        effort: Option<&str>,
     ) -> Result<Arc<Self>, String> {
         let patch = runtime_dir(store)?.join("private.patch.yml");
         // Keep this application's logs local. Required approvals fail closed in this SDK version.
@@ -216,11 +217,11 @@ impl Client {
                 client.disconnect("DeepSeek 连接已断开，未完成任务的结果未知。");
             }
         });
-        let init = client.request(
-            "initialize",
-            json!({"cwd":workspace,"provider":"deepseek-official","model":model}),
-            Duration::from_secs(45),
-        );
+        let mut params = json!({"cwd":workspace,"provider":"deepseek-official","model":model});
+        if let Some(effort) = effort {
+            params["reasoningEffort"] = json!(effort);
+        }
+        let init = client.request("initialize", params, Duration::from_secs(45));
         match init {
             Ok(v) if v["serverInfo"]["name"] == "deepseek-harness-sdk-runtime" => Ok(client),
             _ => {
@@ -433,6 +434,7 @@ impl Runtime {
             "ai-gent-auth-probe",
             PERSONAL,
             models[0]["model"].as_str().ok_or("模型目录无效")?,
+            None,
         )?;
         let auth = client
             .request("shutdown", json!({}), Duration::from_secs(5))
@@ -482,6 +484,8 @@ impl Runtime {
         {
             return Err("请选择 Harness 目录中的模型。".into());
         }
+        let effort = crate::reasoning::read(store, conversation, "deepseek", model)?;
+        crate::reasoning::validate(&models, model, effort.as_deref())?;
         let existing = session(store, conversation)?;
         if !existing.is_null() && existing["runtime_version"] != install.version {
             return Err("Harness 版本已变化，请先核对历史会话兼容性。".into());
@@ -517,7 +521,15 @@ impl Runtime {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("ai-gent-deepseek-{}", uuid::Uuid::new_v4()));
-        let client = Client::start(store, &install, workspace, &thread, conversation, model)?;
+        let client = Client::start(
+            store,
+            &install,
+            workspace,
+            &thread,
+            conversation,
+            model,
+            effort.as_deref(),
+        )?;
         if !existing.is_null() {
             if let Err(error) = client.request(
                 "session/resume",
@@ -656,6 +668,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    #[test]
+    #[ignore = "Uses two short Harness model turns to verify reasoning off/max and resume"]
+    fn installed_deepseek_reasoning_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        let runtime = Runtime::default();
+        let probe = runtime.probe(&store).unwrap();
+        let model = probe["models"][0]["model"].as_str().unwrap();
+        let mut thread = Value::Null;
+        for effort in ["off", "max"] {
+            crate::reasoning::save(&store, PERSONAL, "deepseek", model, Some(effort)).unwrap();
+            runtime
+                .send(&store, model, "不要用工具或子代理。只回复 REASONING_OK。")
+                .unwrap();
+            let result = wait(&runtime, &store);
+            if !thread.is_null() {
+                assert_eq!(result["session"]["thread_id"], thread);
+            }
+            thread = result["session"]["thread_id"].clone();
+            assert!(result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "assistant")
+                .unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("REASONING_OK"));
+            println!("DeepSeek explicit effort {effort} completed");
+        }
+        runtime.shutdown();
+    }
+
     #[test]
     #[ignore = "Uses real Harness API calls in a temporary private workspace"]
     fn installed_deepseek_private_resume_and_cancel() {
