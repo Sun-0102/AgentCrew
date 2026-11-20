@@ -16,6 +16,7 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [block.active]);
+  if (!block.activity.some(message => message.text.trim())) return null;
   const tools = block.activity.filter(m => m.role === "tool");
   const commands = tools.filter(m => m.text.startsWith("命令：")).length;
   const changes = tools.filter(m => m.text.startsWith("文件变更：")).length;

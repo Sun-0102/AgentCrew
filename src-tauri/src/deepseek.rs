@@ -535,7 +535,12 @@ impl Runtime {
         }
         let effort = crate::reasoning::read(store, conversation, "deepseek", model)?;
         crate::reasoning::validate(&models, model, effort.as_deref())?;
-        let existing = session(store, conversation)?;
+        // Group assignments use a new native session and bounded shared history each time.
+        let existing = if role == "assignment" {
+            Value::Null
+        } else {
+            session(store, conversation)?
+        };
         if !existing.is_null() && existing["runtime_version"] != install.version {
             return Err("Harness 版本已变化，请先核对历史会话兼容性。".into());
         }
@@ -613,7 +618,7 @@ impl Runtime {
         };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'running') ON CONFLICT(conversation_id) DO UPDATE SET model=excluded.model,status='running',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'running') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='running',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
         append_message(
             &tx,
             conversation,

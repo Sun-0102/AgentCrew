@@ -577,7 +577,12 @@ impl Runtime {
             crate::reasoning::validate(&models, model, effort.as_deref())?;
             crate::speed::validate(&models, model, tier.as_deref())?;
         }
-        let existing = session(store, conversation_id)?;
+        // Group prompts already contain bounded shared history; resuming repeats old assignments.
+        let existing = if role == "assignment" {
+            None
+        } else {
+            session(store, conversation_id)?
+        };
         let any_running: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|row|row.get(0)).map_err(|e|e.to_string())?;
         if any_running {
             return Err("当前已有会话执行中。请先等待完成或返回该会话取消。".into());
@@ -619,7 +624,7 @@ impl Runtime {
                 .ok_or("Codex 未返回 provider")?;
             let name: String = group_name.unwrap_or_else(|| text.trim().chars().take(60).collect());
             client.request("thread/name/set", json!({"threadId":thread,"name":name}))?;
-            connection.execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider) VALUES(?1,?2,?3,?4,?5)", params![conversation_id, thread, model, client.version,provider]).map_err(|e| e.to_string())?;
+            connection.execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,provider=excluded.provider", params![conversation_id, thread, model, client.version,provider]).map_err(|e| e.to_string())?;
             client.loaded.lock().unwrap().insert(thread.clone());
             thread
         };

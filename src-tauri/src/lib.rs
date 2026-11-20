@@ -4,6 +4,7 @@ mod collaboration;
 mod commands;
 mod deepseek;
 mod groups;
+mod group_context;
 mod images;
 mod reasoning;
 mod speed;
