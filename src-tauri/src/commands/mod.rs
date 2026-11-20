@@ -13,6 +13,12 @@ pub struct AppInfo {
 }
 
 #[tauri::command]
+pub async fn image_read(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::images::read(&app.state::<Store>(), &id))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn app_info(store: State<'_, Store>) -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),

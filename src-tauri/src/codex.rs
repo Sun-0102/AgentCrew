@@ -347,9 +347,12 @@ impl Client {
                         item["aggregatedOutput"].as_str().unwrap_or("")
                     ),
                     "fileChange" => format!("文件变更：{}", item["changes"]),
+                    "imageGeneration" if method == "item/completed" => {
+                        generated_image_message(&Store { path: self.database.clone() }, item)
+                    }
                     _ => return Ok(()),
                 };
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, item["id"].as_str().unwrap_or(""), if kind == "agentMessage" { "assistant" } else { "tool" }, text]).map_err(|e| e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, item["id"].as_str().unwrap_or(""), if matches!(kind, "agentMessage" | "imageGeneration") { "assistant" } else { "tool" }, text]).map_err(|e| e.to_string())?;
             }
             "turn/completed" => {
                 let status = match p["turn"]["status"].as_str() {
@@ -397,15 +400,20 @@ impl Client {
     }
 
     fn update_status(&self, thread: &str, status: &str, error: Option<&str>) -> Result<(), String> {
-        Store {
+        let mut connection = Store {
             path: self.database.clone(),
         }
-        .connect()?
-        .execute(
+        .connect()?;
+        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        if matches!(status, "completed" | "cancelled" | "failed" | "interrupted") {
+            tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'task_end',?3 FROM codex_sessions WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')", params![thread, uuid::Uuid::new_v4().to_string(), status]).map_err(|e| e.to_string())?;
+        }
+        tx.execute(
             "UPDATE codex_sessions SET status=?2,error=?3 WHERE thread_id=?1",
             params![thread, status, error],
         )
         .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -622,6 +630,7 @@ impl Runtime {
             )
             .map_err(|e| e.to_string())?;
         transaction.execute("UPDATE codex_sessions SET status='starting',model=?2,turn_id=NULL,error=NULL WHERE conversation_id=?1", params![conversation_id, model]).map_err(|e| e.to_string())?;
+        transaction.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'task_start','running')", params![conversation_id, uuid::Uuid::new_v4().to_string()]).map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
         let result = client.request("turn/start", json!({"threadId":thread,"model":model,"effort":effort,"serviceTierForTurn":tier,"input":[{"type":"text","text":text,"text_elements":[]}]}));
         if let Err(error) = &result {
@@ -762,6 +771,19 @@ fn validate_context(response: &Value, root: &str) -> Result<(), String> {
         return Err("Codex 未采用项目写入沙箱及用户审批，任务未发送。".into());
     }
     Ok(())
+}
+
+fn generated_image_message(store: &Store, item: &Value) -> String {
+    if item["status"] != "completed" || !item["failure"].is_null() {
+        return "图片生成未完成，请重试。".into();
+    }
+    if let Some(data) = item["result"].as_str() {
+        return match crate::images::save(store, data) {
+            Ok(url) => format!("![生成的图片]({url})"),
+            Err(error) => format!("图片保存失败：{error}"),
+        };
+    }
+    "图片生成工具未返回可显示的图片数据。".into()
 }
 
 fn current_status(connection: &rusqlite::Connection, thread: &str) -> Option<String> {
@@ -917,6 +939,29 @@ mod tests {
     }
 
     #[test]
+    fn generated_images_are_saved_as_visible_replies() {
+        let (_dir, store, project, client) = fixture();
+        client.receive(json!({"method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}})).unwrap();
+        let image = json!({"id":"image","type":"imageGeneration","status":"completed","result":"iVBORw0KGgo=","failure":null});
+        for method in ["item/started", "item/completed", "item/completed"] {
+            client.receive(json!({"method":method,"params":{"threadId":"thread","turnId":"turn","item":image}})).unwrap();
+        }
+        let snapshot = Runtime::default().snapshot(&store, &project).unwrap();
+        let messages = snapshot["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "assistant");
+        let text = messages[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("![生成的图片](ai-gent-image:"));
+        assert!(text.len() < 150);
+        let id = text.split("ai-gent-image:").nth(1).unwrap().trim_end_matches(')');
+        assert_eq!(crate::images::read(&store,id).unwrap(),"data:image/png;base64,iVBORw0KGgo=");
+        assert!(!generated_image_message(&store, &json!({"status":"failed","result":"iVBORw0KGgo="})).contains("!["));
+        for data in ["", "not an image", "iVBORw0KGgo=) injected"] {
+            assert!(!generated_image_message(&store, &json!({"status":"completed","result":data})).contains("!["));
+        }
+    }
+
+    #[test]
     fn newer_desktop_runtime_wins_over_old_path_and_invalid_versions() {
         let candidates = vec![
             (PathBuf::from("invalid"), "unrelated tool".into()),
@@ -961,6 +1006,9 @@ mod tests {
             "cancelled"
         );
         client.disconnected("disconnected");
+        let end: (String, String) = store.connect().unwrap().query_row("SELECT text,created_at FROM codex_messages WHERE role='task_end'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(end.0, "cancelled");
+        assert!(!end.1.is_empty());
         assert_eq!(
             session(&store, &project).unwrap().unwrap()["status"],
             "cancelled"

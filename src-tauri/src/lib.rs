@@ -4,6 +4,7 @@ mod collaboration;
 mod commands;
 mod deepseek;
 mod groups;
+mod images;
 mod reasoning;
 mod speed;
 mod storage;
@@ -18,6 +19,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let store = storage::Store::open(data_dir.join("ai-gent.sqlite"))?;
+            images::recover(&store)?;
             codex::recover(&store)?;
             deepseek::recover(&store)?;
             collaboration::recover(&store)?;
@@ -38,6 +40,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::image_read,
             commands::project_list,
             commands::project_add,
             commands::codex_probe,

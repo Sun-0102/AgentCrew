@@ -4,6 +4,8 @@ import Icon from "../../components/Icon";
 import Avatar from "../../components/Avatar";
 import MessageBody from "./MessageBody";
 import TaskResults from "./TaskResults";
+import TaskActivity from "./TaskActivity";
+import { replyBlocks } from "./activity";
 import { speedChoices } from "./speed";
 import ReasoningPicker from "./ReasoningPicker";
 import { activeMention, insertMention, messageRecipients } from "./mentions";
@@ -55,25 +57,7 @@ export default function ChatStage(p: Props) {
   const namedTarget = recipients.length === 1 ? recipients[0] : agent;
   const recipient = namedTarget === "deepseek" ? "deepseek" : "codex";
   const ready = group ? recipients.every(id => members.includes(id) && !!p.collaborationModels[id as "codex" | "deepseek"]) : !!probe && (!probe.requires_auth || !!probe.auth) && !!model;
-  const visibleMessages: Message[] = [];
-  let replyBlockIndex = -1;
-  for (const message of snapshot.messages) {
-    if (message.role === "assistant") {
-      if (!message.text.trim()) continue;
-      const speaker = message.agent ?? agent;
-      const replyBlock = visibleMessages[replyBlockIndex];
-      if (replyBlock?.agent === speaker) {
-        replyBlock.text += `\n\n${message.text.trimEnd()}`;
-      } else {
-        replyBlockIndex = visibleMessages.length;
-        visibleMessages.push({ ...message, agent: speaker, text: message.text.trimEnd() });
-      }
-    } else if (message.role !== "tool") {
-      // New input, dispatch or workspace/status changes separate replies; tool activity does not.
-      replyBlockIndex = -1;
-      if (message.role === "user" && message.text.trim()) visibleMessages.push(message);
-    }
-  }
+  const visibleMessages = replyBlocks(snapshot, agent);
   const records = snapshot.messages.filter(m => m.role !== "user" && m.role !== "assistant");
   const hasMessages = visibleMessages.length > 0;
   const providerWorking = running(snapshot.session?.status);
@@ -84,7 +68,7 @@ export default function ChatStage(p: Props) {
     try { if (text) localStorage.setItem(`ai-gent.draft.${scopeKey}`, text); else localStorage.removeItem(`ai-gent.draft.${scopeKey}`); }
     catch { setError("草稿未能保存，请检查本机存储空间。"); }
   }, [scopeKey, text, files, reply]);
-  useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, snapshot.messages.map(m => m.text).join("")]);
+  useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, snapshot.messages.map(m => `${m.id}:${m.text.length}`).join("|")]);
   useEffect(() => {
     if (!group || composingBlocked) return;
     if (members.includes(recipient) && recipient !== agent) onAgent(recipient);
@@ -149,7 +133,7 @@ export default function ChatStage(p: Props) {
     <div className={`chat-stage-body ${panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agent === "deepseek" ? "DeepSeek" : "Codex"}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div><div className="message-bubble"><MessageBody text={message.text.trimEnd()} /></div></div></article>)}
+        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} /></div>}</div></article>)}
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">

@@ -411,7 +411,14 @@ fn set_status(
     status: &str,
     error: Option<&str>,
 ) -> Result<(), String> {
-    store.connect()?.execute("UPDATE deepseek_sessions SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')",params![thread,status,error]).map_err(|e|e.to_string())?;
+    let mut connection = store.connect()?;
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    let conversation: Option<String> = tx.query_row("SELECT conversation_id FROM deepseek_sessions WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')", params![thread, status], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    if let Some(conversation) = conversation.filter(|_| matches!(status, "completed" | "cancelled" | "failed" | "interrupted")) {
+        append_message(&tx, &conversation, &uuid::Uuid::new_v4().to_string(), "task_end", status)?;
+    }
+    tx.execute("UPDATE deepseek_sessions SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')",params![thread,status,error]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -588,6 +595,7 @@ impl Runtime {
             role,
             text,
         )?;
+        append_message(&tx, conversation, &uuid::Uuid::new_v4().to_string(), "task_start", "running")?;
         tx.commit().map_err(|e| e.to_string())?;
         *self.client.lock().unwrap() = Some(client.clone());
         let result = client.request(
@@ -647,7 +655,7 @@ impl Runtime {
         // No interrupt RPC in the pinned SDK. Stop our complete process group and confirm exit.
         match client.stop() {
             Ok(()) => {
-                store.connect()?.execute("UPDATE deepseek_sessions SET status='cancelled',error=NULL WHERE thread_id=?1",[&client.thread]).map_err(|e|e.to_string())?;
+                set_status(store, &client.thread, "cancelled", None)?;
                 Ok(json!({"cancelled":true}))
             }
             Err(error) => {
@@ -957,6 +965,21 @@ mod tests {
         runtime.shutdown();
         println!("DeepSeek private write, restart resume, model switch, generation cancel, process exit and post-cancel resume passed");
     }
+    #[test]
+    fn terminal_status_persists_one_end_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("test.sqlite")).unwrap();
+        store.connect().unwrap().execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES('deepseek-personal','deepseek','model','test','workspace','running')",[]).unwrap();
+        set_status(&store, "deepseek", "completed", None).unwrap();
+        set_status(&store, "deepseek", "completed", None).unwrap();
+        let result = Runtime::default().snapshot(&store).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "task_end");
+        assert_eq!(messages[0]["text"], "completed");
+        assert!(!messages[0]["created_at"].as_str().unwrap().is_empty());
+    }
+
     #[test]
     fn deepseek_records_are_separate_and_restart_is_conservative() {
         let temp = tempfile::tempdir().unwrap();
