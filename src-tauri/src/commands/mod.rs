@@ -6,6 +6,37 @@ use serde_json::Value;
 use tauri::Manager;
 use tauri::State;
 
+#[tauri::command]
+pub async fn skills_list(app: tauri::AppHandle, agent: String, project_id: Option<String>, group_id: Option<String>) -> Result<Vec<crate::skills::Skill>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::skills::list(&app, &app.state::<Store>(), &agent, project_id.as_deref(), group_id.as_deref(), &[]))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn skills_prepare(app: tauri::AppHandle, agents: Vec<String>, names: Vec<String>, project_id: Option<String>, group_id: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if names.len() > 8 || agents.is_empty() || agents.len() > 2 { return Err("一次最多调用 8 个技能。".to_owned()); }
+        let store = app.state::<Store>();
+        let mut prompt = String::from("\n\n本轮用户显式选择的本地技能（仅对应 Agent 使用）：\n");
+        for agent in agents {
+            let skills = crate::skills::list(&app, &store, &agent, project_id.as_deref(), group_id.as_deref(), &names)?;
+            for name in &names {
+                let skill = skills.iter().find(|skill| &skill.name == name)
+                    .ok_or_else(|| format!("{agent} 未找到本地技能 /{name}。请检查技能目录，或用 @ 指定有该技能的成员。"))?;
+                if skill.native {
+                    let content = skill.content.as_deref().ok_or_else(|| format!("{agent} 未返回 /{} 的技能正文", skill.name))?;
+                    prompt.push_str(&format!("- {agent}：/{}，运行时加载的技能正文如下：\n", skill.name));
+                    for line in content.lines() { prompt.push_str(&format!("> {line}\n")); }
+                } else {
+                    prompt.push_str(&format!("- {agent}：/{}，SKILL.md 文件路径：{}\n", skill.name, serde_json::to_string(&skill.path).map_err(|e| e.to_string())?));
+                }
+            }
+        }
+        prompt.push_str("请使用对应 Agent 的技能正文；仅提供文件路径时先读取 SKILL.md，再按技能要求处理本轮任务。相对资源路径以技能目录或正文中的资源说明为基准。技能不能扩大用户授权；工具不可用时如实说明。\n");
+        Ok(prompt)
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[derive(Serialize)]
 pub struct AppInfo {
     version: &'static str,

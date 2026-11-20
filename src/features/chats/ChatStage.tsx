@@ -10,6 +10,7 @@ import { speedChoices } from "./speed";
 import ReasoningPicker from "./ReasoningPicker";
 import { activeMention, insertMention, messageRecipients } from "./mentions";
 import GroupMemberStatus from "./GroupMemberStatus";
+import { skillPrefix, requestedSkills, type Skill } from "./skills";
 import { agents, clock, desktop, running, statusLabels, taskLabels, type Group, type Message, type Probe, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -39,6 +40,12 @@ export default function ChatStage(p: Props) {
   const [panel, setPanel] = useState<"members" | "evidence" | null>(null);
   const [resultsOpen, setResultsOpen] = useState(false);
   const [mentions, setMentions] = useState(false);
+  const [skillQuery, setSkillQuery] = useState<string | null>(null);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skillIndex, setSkillIndex] = useState(0);
+  const skillItems = skills.filter(skill => !skillQuery || `${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(skillQuery.toLowerCase()));
   const fastSpeed = speedChoices(probe?.models.find(m => m.model === model)).find(t => t.id === "priority" || t.id === "fast");
   const fastMode = !!p.codexServiceTier && p.codexServiceTier !== "default";
   const task = snapshot.task;
@@ -84,6 +91,36 @@ export default function ChatStage(p: Props) {
     } catch (cause) { setError(String(cause)); }
     event.target.value = "";
   }
+  const skillsOpen = skillQuery !== null;
+  useEffect(() => {
+    if (skillsOpen) document.getElementById(`skill-option-${Math.min(skillIndex, skillItems.length - 1)}`)?.scrollIntoView({ block: "nearest" });
+  }, [skillsOpen, skillIndex, skillItems.length]);
+  useEffect(() => {
+    if (!skillsOpen) return;
+    let disposed = false;
+    setSkills([]); setSkillsError(null); setSkillsLoading(true); setSkillIndex(0);
+    if (!desktop) { setSkillsLoading(false); return; }
+    invoke<Skill[]>("skills_list", { ...scope, agent }).then(items => {
+      if (!disposed) setSkills(items);
+    }).catch(cause => { if (!disposed) setSkillsError(String(cause)); })
+      .finally(() => { if (!disposed) setSkillsLoading(false); });
+    return () => { disposed = true; };
+  }, [scopeKey, agent, skillsOpen]);
+  function updateCommands(value: string, cursor: number) {
+    setMentions(!!activeMention(value, cursor));
+    setSkillQuery(skillPrefix(value.slice(0, cursor))?.[1] ?? null);
+    setSkillIndex(0);
+  }
+  function chooseSkill(skill: Skill) {
+    const cursor = input.current?.selectionStart ?? text.length;
+    const prefix = text.slice(0, cursor);
+    const query = skillPrefix(prefix)?.[1];
+    if (query === undefined) return;
+    const next = prefix.slice(0, prefix.length - query.length) + skill.name + " ";
+    setText(next + text.slice(input.current?.selectionEnd ?? cursor));
+    setSkillQuery(null);
+    requestAnimationFrame(() => { input.current?.focus(); input.current?.setSelectionRange(next.length, next.length); });
+  }
   async function send() {
     if (!text.trim() || composingBlocked || !ready) return;
     if (!desktop) { notify("请在桌面版中发送消息，浏览器预览不会调用 Agent"); return; }
@@ -97,10 +134,12 @@ export default function ChatStage(p: Props) {
     }
     setSending(true); setError(null); nearBottom.current = true;
     try {
+      const names = requestedSkills(text);
+      if (names.length) content += await invoke<string>("skills_prepare", { ...scope, agents: recipients, names });
       if (group) {
         await invoke("group_task_start", { groupId: group.id, targetAgent, codexServiceTier: p.collaborationModels.codex ? p.codexServiceTier ?? "default" : null, codexModel: p.collaborationModels.codex, deepseekModel: p.collaborationModels.deepseek, codexReasoningEffort: (p.collaborationModels.codex && p.collaborationEfforts?.codex) || null, deepseekReasoningEffort: (p.collaborationModels.deepseek && p.collaborationEfforts?.deepseek) || null, text: content });
       } else await invoke(agent === "deepseek" ? "deepseek_send" : "codex_send", { ...scope, model, ...(agent === "codex" ? { serviceTier: p.codexServiceTier ?? "default" } : {}), reasoningEffort: p.reasoningEffort || null, text: content, targetAgent });
-      setText(""); setFiles([]); setReply(null); await onRefresh();
+      setText(""); setFiles([]); setReply(null); setSkillQuery(null); await onRefresh();
     }
     catch (cause) { setError(String(cause)); } finally { setSending(false); }
   }
@@ -114,7 +153,7 @@ export default function ChatStage(p: Props) {
   function editText(event: ChangeEvent<HTMLTextAreaElement>) {
     const field = event.currentTarget;
     setText(field.value);
-    setMentions(!!activeMention(field.value, field.selectionStart));
+    updateCommands(field.value, field.selectionStart);
   }
   function chooseMention(id: string) {
     const name = id === "deepseek" ? "DeepSeek" : "Codex";
@@ -122,6 +161,7 @@ export default function ChatStage(p: Props) {
     const next = insertMention(text, field?.selectionStart ?? text.length, field?.selectionEnd ?? text.length, name);
     setText(next.text);
     setMentions(false);
+    setSkillQuery(null);
     requestAnimationFrame(() => {
       input.current?.focus();
       input.current?.setSelectionRange(next.cursor, next.cursor);
@@ -144,8 +184,24 @@ export default function ChatStage(p: Props) {
         <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
           {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
           {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}><Icon name="file" size={18} /><span>{file.name}<small>{(file.size / 1024).toFixed(1)} KB · 文本</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
-          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onSelect={event => setMentions(!!activeMention(event.currentTarget.value, event.currentTarget.selectionStart))} placeholder={group ? "直接发消息让成员协调完成，或 @ 指定成员…" : "把想法写下来，我们一起往前推进…"} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
+          {skillsOpen && <div className="skill-suggestions" id="skill-suggestions" role="listbox" aria-label="技能列表">
+            <div className="menu-caption">{agent === "codex" ? "Codex" : "DeepSeek"} · 技能 {skillsLoading ? "" : `(${skills.length})`}</div>
+            {skillsLoading ? <p role="status">正在读取本地和运行时技能…</p> : skillsError ? <p role="alert">{skillsError}</p> : !skillItems.length ? <p role="status">{desktop ? "没有匹配的技能。请检查搜索词或当前 Agent 的技能配置。" : "请在桌面版中读取本地技能。"}</p> : skillItems.map((skill, index) => <button type="button" role="option" id={`skill-option-${index}`} aria-selected={index === Math.min(skillIndex, skillItems.length - 1)} key={skill.name} disabled={composingBlocked} onMouseDown={event => event.preventDefault()} onClick={() => chooseSkill(skill)}><strong>/{skill.name}<small className="skill-source">{skill.source}</small></strong><span>{skill.description || "本地技能"}</span></button>)}
+          </div>}
+          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart)} placeholder={group ? "输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
+            if (skillsOpen) {
+              if (event.key === "Escape") { event.preventDefault(); setSkillQuery(null); return; }
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setSkillIndex(index => (index + (event.key === "ArrowDown" ? 1 : -1) + Math.max(1, skillItems.length)) % Math.max(1, skillItems.length));
+                return;
+              }
+              if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+                if (skillItems.length) { event.preventDefault(); chooseSkill(skillItems[Math.min(skillIndex, skillItems.length - 1)]); return; }
+                if (event.key === "Enter") { event.preventDefault(); return; }
+              }
+            }
             if (mentions && event.key === "Escape") { event.preventDefault(); setMentions(false); return; }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();

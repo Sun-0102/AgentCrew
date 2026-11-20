@@ -144,7 +144,8 @@ impl Client {
         model: &str,
         effort: Option<&str>,
     ) -> Result<Arc<Self>, String> {
-        let patch = runtime_dir(store)?.join("private.patch.yml");
+        let catalog = thread.starts_with("ai-gent-skill-catalog-");
+        let patch = runtime_dir(store)?.join(if catalog { "skills.patch.yml" } else { "private.patch.yml" });
         // Keep this application's logs local. Required approvals fail closed in this SDK version.
         let runtime_patch = if cfg!(windows) {
             let dir = runtime_dir(store)?;
@@ -153,6 +154,11 @@ impl Client {
             std::fs::write(&plugin, include_str!("deepseek_console_plugin.cjs")).map_err(|e| e.to_string())?;
             format!("{RUNTIME_PATCH}- insert:\n    - id: ai-gent-windows-console\n      name: {}\n",serde_json::to_string(&plugin.to_string_lossy()).map_err(|e|e.to_string())?)
         } else { RUNTIME_PATCH.to_owned() };
+        let runtime_patch = if catalog {
+            let skills_plugin = runtime_dir(store)?.join("skills-plugin.cjs");
+            std::fs::write(&skills_plugin, include_str!("deepseek_skills_plugin.cjs")).map_err(|e| e.to_string())?;
+            format!("{runtime_patch}- insert:\n    - id: ai-gent-skills\n      name: {}\n", serde_json::to_string(&skills_plugin.to_string_lossy()).map_err(|e| e.to_string())?)
+        } else { runtime_patch };
         std::fs::write(&patch, runtime_patch).map_err(|e| e.to_string())?;
         let home = std::env::var_os("DSH_HOME")
             .map(PathBuf::from)
@@ -436,6 +442,26 @@ pub fn recover(store: &Store) -> Result<(), String> {
 }
 
 impl Runtime {
+    pub(crate) fn skills(&self, store: &Store, workspace: &Path, names: &[String]) -> Reply {
+        let _operation = self.operation.lock().map_err(|e| e.to_string())?;
+        let install = Installation::find()?;
+        let models = install.models(store)?;
+        let model = models.as_array().and_then(|items| items.first()).and_then(|item| item["model"].as_str()).ok_or("Harness 模型目录为空")?;
+        std::fs::create_dir_all(workspace).map_err(|e| e.to_string())?;
+        let root = workspace.canonicalize().map_err(|e| e.to_string())?;
+        let root = root.to_str().ok_or("技能工作目录路径无效")?;
+        let root = if let Some(unc) = root.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") } else { root.strip_prefix(r"\\?\").unwrap_or(root).to_owned() };
+        let thread = format!("ai-gent-skill-catalog-{}", uuid::Uuid::new_v4());
+        // No prompt or Agent is created: the catalog only resolves the default preset scope.
+        let client = Client::start(store, &install, &root, &thread, &thread, model, None)?;
+        let result = client.request("ai-gent/skills", json!({"sessionId":thread,"names":names}), Duration::from_secs(45));
+        let _ = client.request("shutdown", json!({}), Duration::from_secs(5));
+        let stopped = client.stop();
+        let result = result?;
+        stopped?;
+        Ok(result)
+    }
+
     pub fn probe(&self, store: &Store) -> Reply {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
         let install = Installation::find()?;

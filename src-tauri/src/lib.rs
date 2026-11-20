@@ -7,6 +7,7 @@ mod groups;
 mod images;
 mod reasoning;
 mod speed;
+mod skills;
 mod storage;
 mod task_results;
 
@@ -40,6 +41,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::skills_list,
+            commands::skills_prepare,
             commands::image_read,
             commands::project_list,
             commands::project_add,

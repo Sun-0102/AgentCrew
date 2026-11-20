@@ -483,6 +483,10 @@ fn model_catalog(client: &Client) -> Result<Vec<Value>, String> {
 }
 
 impl Runtime {
+    pub(crate) fn skills(&self, store: &Store, workspace: &Path) -> Reply {
+        self.client(store)?.request("skills/list", json!({"cwds":[workspace],"forceReload":true}))
+    }
+
     fn client(&self, store: &Store) -> Result<Arc<Client>, String> {
         let mut slot = self.client.lock().map_err(|e| e.to_string())?;
         if let Some(client) = slot.as_ref() {
