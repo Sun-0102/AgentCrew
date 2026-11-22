@@ -63,6 +63,8 @@ pub fn run() {
             commands::group_session_list,
             commands::group_session_create,
             commands::group_session_update,
+            commands::group_session_delete,
+            commands::group_members_update,
             commands::group_task_start,
             commands::group_task_control,
             commands::group_task_list,

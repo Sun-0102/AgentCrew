@@ -83,6 +83,13 @@
 .session-row-menu { width: 25px; height: 25px; margin: 9px 4px 0 0; align-self: flex-start; flex-shrink: 0; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #9a8870; }
 .session-row-menu:hover, .session-row-menu[aria-expanded=true] { background: #ded3c0; color: var(--accent); }
 .session-actions.session-row-actions { position: fixed; right: auto; z-index: 40; }
+.session-actions .destructive-action, .member-remove { color: #a34737; }
+.member-remove { flex-shrink: 0; border: 1px solid #e5d6c5; border-radius: 6px; background: transparent; padding: 5px 9px; font-size: 12px; }
+.member-remove:not(:disabled):hover { background: #f2e4da; }
+.member-remove:disabled { opacity: .4; cursor: not-allowed; }
+.delete-session-description { font-size: 13px; line-height: 1.9; color: #8b7660; margin: 0; }
+.danger-button { background: #a34737; border-color: #a34737; }
+.danger-button:not(:disabled):hover { background: #8c392b; }
 .session-bottom { font-size: 11px; color: #958876; border-top: 1px solid var(--line); padding: 14px 18px; display: flex; align-items: center; gap: 6px; }
 .session-empty { text-align: center; padding: 20px 10px; color: #9c8d77; font-size: 12px; }
 .session-chat-header { height: 90px; min-height: 90px; padding: 18px 28px; gap: 12px; }

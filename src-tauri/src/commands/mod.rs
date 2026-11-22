@@ -457,6 +457,35 @@ pub async fn group_session_update(app: tauri::AppHandle, group_id: String, id: S
 }
 
 #[tauri::command]
+pub async fn group_session_delete(app: tauri::AppHandle, group_id: String, id: String) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e|e.to_string())?;
+        store.delete_group_session(&group_id,&id)?;
+        Ok(Value::Null)
+    }).await
+}
+
+#[tauri::command]
+pub async fn group_members_update(app: tauri::AppHandle, group_id: String, add: Vec<String>, remove: Vec<String>) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e|e.to_string())?;
+        if add.iter().chain(remove.iter()).any(|agent| !matches!(agent.as_str(),"codex"|"deepseek")) { return Err("不支持的群成员。".into()); }
+        if store.parent_group_id(&group_id)? != group_id { return Err("请修改所属群聊的成员。".into()); }
+        let group = store.group(&group_id)?;
+        let mut members = group.members;
+        members.retain(|agent| !remove.contains(agent));
+        members.extend(add);
+        members.sort();
+        members.dedup();
+        serde_json::to_value(store.update_group(&group_id,&group.name,members,group.project_id)?).map_err(|e|e.to_string())
+    }).await
+}
+
+#[tauri::command]
 pub async fn group_task_control(
     app: tauri::AppHandle,
     group_id: String,

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
 import Dialog from "../../components/Dialog";
-import { clock, saveGroupSession, taskLabels, type Group, type GroupSession } from "./api";
+import { clock, deleteGroupSession, saveGroupSession, taskLabels, type Group, type GroupSession } from "./api";
 import type { Project } from "../projects/api";
 
 function time(value: string | null) {
@@ -33,7 +33,7 @@ export function GroupHub({ groups, projects, onSelect, onCreate }: { groups: Gro
   </div></section>;
 }
 
-export function SessionSidebar({ sessions, selected, loading, saving, onSelect, onCreate, onRename, onArchive }: { sessions: GroupSession[]; selected?: GroupSession; loading: boolean; saving: boolean; onSelect: (session: GroupSession) => void; onCreate: () => void; onRename: (session: GroupSession) => void; onArchive: (session: GroupSession) => void }) {
+export function SessionSidebar({ sessions, selected, loading, saving, onSelect, onCreate, onRename, onArchive, onDelete }: { sessions: GroupSession[]; selected?: GroupSession; loading: boolean; saving: boolean; onSelect: (session: GroupSession) => void; onCreate: () => void; onRename: (session: GroupSession) => void; onArchive: (session: GroupSession) => void; onDelete: (session: GroupSession) => void }) {
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(selected?.archived ?? false);
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
@@ -60,8 +60,19 @@ export function SessionSidebar({ sessions, selected, loading, saving, onSelect, 
     <div className="session-list">{filtered.map(session => <div className={`session-row ${selected?.id === session.id ? "active" : ""}`} key={session.id}><button className="session-select" aria-pressed={selected?.id === session.id} onClick={() => { setMenu(null); onSelect(session); }}><span className="session-icon"><Icon name="chat" size={15} /></span><span className="session-copy"><strong title={session.name}>{session.name}</strong><small>{preview(session)}</small></span><time>{time(session.updated_at ?? session.created_at)}</time></button><button className="session-row-menu" aria-label={`${session.name}的操作`} aria-expanded={menu?.id === session.id} disabled={saving} onClick={e => { menuTrigger.current = e.currentTarget; const rect = e.currentTarget.getBoundingClientRect(); setMenu(menu?.id === session.id ? null : { id: session.id, top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 160)), left: Math.max(8, Math.min(rect.right - 155, window.innerWidth - 163)) }); }}><Icon name="more" size={16} /></button></div>)}
       {loading ? <p className="session-empty" role="status">正在读取会话…</p> : !filtered.length && <p className="session-empty">{query ? "没有找到相关会话" : archived ? "还没有归档会话" : "还没有会话，创建一个吧"}</p>}
     </div><div className="session-bottom"><Icon name="shield" size={15} />会话独立 · 项目共享</div>
-    {menu && menuSession && createPortal(<div className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="会话操作"><button disabled={saving} onClick={() => { setMenu(null); onRename(menuSession); }}>重命名</button><button disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onArchive(menuSession); }}>{menuSession.archived ? "恢复会话" : "归档会话"}</button></div>, document.body)}
+    {menu && menuSession && createPortal(<div className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="会话操作"><button disabled={saving} onClick={() => { setMenu(null); onRename(menuSession); }}>重命名</button><button disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onArchive(menuSession); }}>{menuSession.archived ? "恢复会话" : "归档会话"}</button><hr /><button className="destructive-action" disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onDelete(menuSession); }}>删除会话</button></div>, document.body)}
   </aside>;
+}
+
+export function DeleteSessionDialog({ session, onClose, onDeleted }: { session: GroupSession; onClose: () => void; onDeleted: (session: GroupSession) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  return <Dialog title="删除会话" onClose={() => { if (!saving) onClose(); }}>
+    <p className="session-dialog-intro">确定删除「{session.name}」吗？</p>
+    <p className="delete-session-description">将永久删除此会话在本应用中的消息、摘要、任务结果和草稿，无法撤销。群聊及其他会话保留。项目文件、图片缓存和原厂会话文件不会删除。</p>
+    {error && <p className="inline-error" role="alert">{error}</p>}
+    <div className="dialog-footer"><span /><div className="session-dialog-actions"><button className="outline-button" disabled={saving} onClick={onClose}>取消</button><button className="primary danger-button" disabled={saving} onClick={async () => { if (saving) return; setSaving(true); setError(""); try { await deleteGroupSession(session.group_id, session.id); onDeleted(session); } catch (cause) { setError(String(cause)); setSaving(false); } }}>{saving ? "正在删除…" : "确认删除"}</button></div></div>
+  </Dialog>;
 }
 
 export function SessionDialog({ groupId, existing, onClose, onSaved }: { groupId: string; existing?: GroupSession; onClose: () => void; onSaved: (session: GroupSession) => void }) {

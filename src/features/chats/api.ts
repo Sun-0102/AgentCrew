@@ -77,6 +77,25 @@ export async function saveGroup(name: string, members: string[], projectId: stri
   localStorage.setItem(previewKey, JSON.stringify([group, ...groups.filter(g => g.id !== group.id)]));
   return group;
 }
+export async function deleteGroupSession(groupId: string, id: string) {
+  if (desktop) return invoke<void>("group_session_delete", { groupId, id });
+  const list = await getGroupSessions(groupId);
+  if (!list.some(s => s.id === id)) throw new Error("会话不存在或已删除。");
+  const all = readPreview<Record<string, GroupSession[]>>(previewSessionsKey, {});
+  all[groupId] = list.filter(s => s.id !== id);
+  const messages = readPreview<Record<string, Message[]>>(previewMessagesKey, {});
+  delete messages[id];
+  localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
+  localStorage.setItem(previewSessionsKey, JSON.stringify(all));
+}
+export async function updateGroupMembers(groupId: string, add: string[], remove: string[]) {
+  if (desktop) return invoke<Group>("group_members_update", { groupId, add, remove });
+  const group = (await getGroups()).find(g => g.id === groupId);
+  if (!group) throw new Error("群聊不存在。");
+  const members = [...new Set([...group.members.filter(agent => !remove.includes(agent)), ...add])];
+  if (!members.length || members.some(agent => !agents.some(a => a.id === agent))) throw new Error("群内至少保留一位已接入的 Agent。");
+  return saveGroup(group.name, members, group.project_id, groupId);
+}
 export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>(scope.agent === "deepseek" ? "deepseek_snapshot" : "codex_snapshot", { ...scope }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
 export const probeCodex = () => invoke<Probe>("codex_probe");
 export const probeDeepSeek = () => invoke<Probe>("deepseek_probe");
