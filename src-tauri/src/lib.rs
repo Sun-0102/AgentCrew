@@ -5,6 +5,7 @@ mod commands;
 mod deepseek;
 mod groups;
 mod group_context;
+mod group_sessions;
 mod images;
 mod reasoning;
 mod speed;
@@ -59,6 +60,9 @@ pub fn run() {
             commands::group_list,
             commands::group_create,
             commands::group_update,
+            commands::group_session_list,
+            commands::group_session_create,
+            commands::group_session_update,
             commands::group_task_start,
             commands::group_task_control,
             commands::group_task_list,

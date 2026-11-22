@@ -12,6 +12,7 @@ pub struct Group {
     pub preview: Option<String>,
     pub updated_at: Option<String>,
     pub status: Option<String>,
+    pub session_count: u32,
 }
 
 fn validate(name: &str, members: &[String]) -> Result<Vec<String>, String> {
@@ -35,7 +36,7 @@ fn validate(name: &str, members: &[String]) -> Result<Vec<String>, String> {
 impl Store {
     pub fn groups(&self) -> Result<Vec<Group>, String> {
         let connection = self.connect()?;
-        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=g.conversation_id ORDER BY sequence DESC LIMIT 1),CASE WHEN d.status IN ('starting','running','waiting_approval','cancel_requested','stopping') THEN d.status WHEN EXISTS(SELECT 1 FROM group_tasks t WHERE t.conversation_id=g.conversation_id AND t.status IN ('running','cancelling')) THEN 'running' ELSE COALESCE(s.status,d.status) END FROM chat_groups g LEFT JOIN codex_sessions s ON s.conversation_id=g.conversation_id LEFT JOIN deepseek_sessions d ON d.conversation_id=g.conversation_id ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=g.conversation_id),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT g.conversation_id,g.name,g.members,g.project_id,g.created_at,(SELECT text FROM codex_messages WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=g.conversation_id) AND role IN ('user','assistant') ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=g.conversation_id) ORDER BY sequence DESC LIMIT 1),(SELECT t.status FROM group_tasks t JOIN group_sessions c ON c.conversation_id=t.conversation_id WHERE c.group_id=g.conversation_id ORDER BY CASE WHEN t.status IN ('running','paused','cancelling') THEN 0 ELSE 1 END,t.rowid DESC LIMIT 1),(SELECT COUNT(*) FROM group_sessions WHERE group_id=g.conversation_id AND archived=0) FROM chat_groups g WHERE g.parent_group_id IS NULL ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=g.conversation_id)),0) DESC,g.created_at DESC").map_err(|e|e.to_string())?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -47,11 +48,12 @@ impl Store {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, u32>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         rows.map(|row| {
-            let (id, name, members, project_id, created_at, preview, updated_at, status) =
+            let (id, name, members, project_id, created_at, preview, updated_at, status, session_count) =
                 row.map_err(|e| e.to_string())?;
             Ok(Group {
                 id,
@@ -63,16 +65,21 @@ impl Store {
                 preview,
                 updated_at,
                 status,
+                session_count,
             })
         })
         .collect()
     }
 
     pub fn group(&self, id: &str) -> Result<Group, String> {
-        self.groups()?
+        let parent = self.parent_group_id(id)?;
+        let mut group = self.groups()?
             .into_iter()
-            .find(|g| g.id == id)
-            .ok_or("群聊不存在".into())
+            .find(|g| g.id == parent)
+            .ok_or("群聊不存在")?;
+        // Runtime callers use the selected conversation, with live parent membership.
+        group.id = id.to_owned();
+        Ok(group)
     }
 
     pub fn create_group(
@@ -127,6 +134,7 @@ impl Store {
         )
         .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'system',?3)",params![id,uuid::Uuid::new_v4().to_string(),format!("群聊已创建 · {}",members.join("、"))]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO group_sessions(conversation_id,group_id,name) VALUES(?1,?1,'默认会话')",[&id]).map_err(|e|e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         self.group(&id)
     }
@@ -139,12 +147,13 @@ impl Store {
         project_id: Option<String>,
     ) -> Result<Group, String> {
         let members = validate(name, &members)?;
+        if self.parent_group_id(id)? != id { return Err("请在群设置中修改所属群聊。".into()); }
         let old = self.group(id)?;
         let mut connection = self.connect()?;
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id=?1 AND status IN ('running','paused','cancelling'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('running','paused','cancelling'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
         if running {
             return Err(
                 "请先完成或取消当前任务（含暂停的自动协作），再修改群成员或关联项目。".into(),
@@ -196,19 +205,19 @@ impl Store {
                 .optional()
                 .map_err(|e| e.to_string())?;
             // A loaded provider session can retain its old cwd; only reset its binding, never its transcript.
-            tx.execute("DELETE FROM codex_sessions WHERE conversation_id=?1", [id])
+            tx.execute("DELETE FROM codex_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1)", [id])
                 .map_err(|e| e.to_string())?;
             tx.execute(
-                "DELETE FROM deepseek_sessions WHERE conversation_id=?1",
+                "DELETE FROM deepseek_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1)",
                 [id],
             )
             .map_err(|e| e.to_string())?;
             tx.execute(
-                "UPDATE conversations SET workspace_path=?2 WHERE id=?1",
+                "UPDATE conversations SET workspace_path=?2 WHERE id=?1 OR id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1)",
                 params![id, root],
             )
             .map_err(|e| e.to_string())?;
-            tx.execute("UPDATE group_tasks SET status='interrupted',error='群关联项目已变更，旧目录的验收结论不再适用；请重新指派。',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE conversation_id=?1 AND status IN ('awaiting_review','idle')",[id]).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE group_tasks SET status='interrupted',error='群关联项目已变更，旧目录的验收结论不再适用；请重新指派。',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('awaiting_review','idle')",[id]).map_err(|e| e.to_string())?;
             let sessions = serde_json::json!({"codex":codex_thread,"deepseek":deepseek_thread});
             let summary = format!("群关联项目已更新 · {project_label} · 聊天记录保留，旧文件未搬移，后续使用新的执行会话。");
             tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'system',?3)",params![id,uuid::Uuid::new_v4().to_string(),summary]).map_err(|e| e.to_string())?;
@@ -216,7 +225,7 @@ impl Store {
             tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'workspace',?3)",params![id,uuid::Uuid::new_v4().to_string(),details]).map_err(|e| e.to_string())?;
         }
         tx.execute(
-            "UPDATE chat_groups SET name=?2,members=?3,project_id=?4 WHERE conversation_id=?1",
+            "UPDATE chat_groups SET name=?2,members=?3,project_id=?4 WHERE conversation_id=?1 OR parent_group_id=?1",
             params![
                 id,
                 name.trim(),
@@ -254,7 +263,7 @@ impl Store {
     pub fn group_name(&self, id: &str) -> Result<Option<String>, String> {
         self.connect()?
             .query_row(
-                "SELECT name FROM chat_groups WHERE conversation_id=?1",
+                "SELECT g.name || ' / ' || s.name FROM group_sessions s JOIN chat_groups g ON g.conversation_id=s.group_id WHERE s.conversation_id=?1",
                 [id],
                 |row| row.get(0),
             )

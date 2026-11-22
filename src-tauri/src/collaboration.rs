@@ -190,6 +190,7 @@ pub fn start(
         return Err("群消息请填写 1–20000 字节，较大材料请放在项目文件中。".into());
     }
     store.validate_group_target(group, first)?;
+    store.ensure_session_open(group)?;
     let previous = latest(store, group)?;
     let command = text.trim();
     let command = command
@@ -255,7 +256,7 @@ pub fn start(
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     let other_active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM group_tasks WHERE id!=?1 AND status IN ('running','paused','cancelling'))", [&id], |r| r.get(0)).map_err(|e|e.to_string())?;
     if other_active {
-        return Err("另一个群正在执行或暂停中，请先结束该群任务。".into());
+        return Err("其他会话正在执行或暂停中，请先完成或停止该会话的任务。切换会话不会停止任务。".into());
     }
     if continuing.is_none() {
         tx.execute("INSERT INTO group_tasks(id,conversation_id,objective,status,current_agent,codex_model,deepseek_model,pending_prompt,max_turns,workspace_path) VALUES(?1,?2,?3,'running',?4,?5,?6,'',0,?7)", params![id,group,text,recipients[0],codex_model,deepseek_model,root]).map_err(|e|e.to_string())?;
@@ -852,6 +853,9 @@ pub fn control(
     action: &str,
 ) -> Result<Value, String> {
     let current = latest(store, group)?.ok_or("本群没有协作任务")?;
+    if matches!(action, "resume" | "review_codex" | "review_deepseek") {
+        store.ensure_session_open(group)?;
+    }
     if current.id != task_id {
         return Err("此任务已不是本群最新任务，请刷新后操作。".into());
     }

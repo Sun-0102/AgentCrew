@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 export const desktop = isTauri();
-export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null; session_count?: number }
+export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: "codex" | "deepseek"; id: string; role: string; text: string; created_at: string | null }
@@ -34,13 +35,37 @@ export interface Snapshot {
   messages: Message[];
   approvals: { id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
 }
+// In runtime commands groupId identifies the selected execution conversation, including the default session.
 export interface Scope { projectId: string | null; groupId: string | null; agent?: "codex" | "deepseek" }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
 export const agents = [{ id: "codex", name: "Codex", description: "写代码、执行任务、整理交付", available: true }, { id: "deepseek", name: "DeepSeek", description: "私聊与群聊、讨论思路、文件任务", available: true }];
 const previewKey = "ai-gent.preview.groups.v1";
 const previewMessagesKey = "ai-gent.preview.messages.v1";
+const previewSessionsKey = "ai-gent.preview.sessions.v1";
 function readPreview<T>(key: string, fallback: T): T { const raw = localStorage.getItem(key); if (!raw) return fallback; try { return JSON.parse(raw) as T; } catch { throw new Error("本机预览记录无法读取，请检查浏览器存储。"); } }
-export const getGroups = async () => desktop ? invoke<Group[]>("group_list") : readPreview<Group[]>(previewKey, []);
+export const getGroups = async () => {
+  if (desktop) return invoke<Group[]>("group_list");
+  const sessions = readPreview<Record<string, GroupSession[]>>(previewSessionsKey, {});
+  return readPreview<Group[]>(previewKey, []).map(group => ({ ...group, session_count: sessions[group.id]?.filter(s => !s.archived).length ?? 1 }));
+};
+export async function getGroupSessions(groupId: string): Promise<GroupSession[]> {
+  if (desktop) return invoke<GroupSession[]>("group_session_list", { groupId });
+  const group = (await getGroups()).find(g => g.id === groupId);
+  if (!group) throw new Error("群聊不存在。");
+  return readPreview<Record<string, GroupSession[]>>(previewSessionsKey, {})[groupId] ?? [{ id: groupId, group_id: groupId, name: "默认会话", archived: false, created_at: group.created_at, preview: group.preview, updated_at: group.updated_at, status: null }];
+}
+export async function saveGroupSession(groupId: string, name: string, existing?: GroupSession, archived = existing?.archived ?? false): Promise<GroupSession> {
+  name = name.trim();
+  if (!name || [...name].length > 40) throw new Error("会话名称请填写 1–40 个字。");
+  if (desktop) return existing ? invoke<GroupSession>("group_session_update", { groupId, id: existing.id, name, archived }) : invoke<GroupSession>("group_session_create", { groupId, name });
+  const list = await getGroupSessions(groupId);
+  if (existing && !list.some(s => s.id === existing.id)) throw new Error("会话不属于当前群聊。");
+  const session: GroupSession = existing ? { ...existing, name, archived } : { id: crypto.randomUUID(), group_id: groupId, name, archived: false, created_at: new Date().toISOString(), preview: null, updated_at: null, status: null };
+  const all = readPreview<Record<string, GroupSession[]>>(previewSessionsKey, {});
+  all[groupId] = existing ? list.map(s => s.id === session.id ? session : s) : [session, ...list];
+  localStorage.setItem(previewSessionsKey, JSON.stringify(all));
+  return session;
+}
 export async function saveGroup(name: string, members: string[], projectId: string | null, existingId?: string) {
   if (desktop) return existingId ? invoke<Group>("group_update", { id: existingId, name, members, projectId }) : invoke<Group>("group_create", { name, members, projectId });
   const groups = await getGroups();

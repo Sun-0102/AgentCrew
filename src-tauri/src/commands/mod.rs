@@ -432,6 +432,31 @@ pub async fn group_task_start(
 }
 
 #[tauri::command]
+pub async fn group_session_list(app: tauri::AppHandle, group_id: String) -> Result<Value, String> {
+    codex_call(app, move |_, store| serde_json::to_value(store.group_sessions(&group_id)?).map_err(|e|e.to_string())).await
+}
+
+#[tauri::command]
+pub async fn group_session_create(app: tauri::AppHandle, group_id: String, name: String) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e|e.to_string())?;
+        serde_json::to_value(store.create_group_session(&group_id,&name)?).map_err(|e|e.to_string())
+    }).await
+}
+
+#[tauri::command]
+pub async fn group_session_update(app: tauri::AppHandle, group_id: String, id: String, name: String, archived: bool) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e|e.to_string())?;
+        serde_json::to_value(store.update_group_session(&group_id,&id,&name,archived)?).map_err(|e|e.to_string())
+    }).await
+}
+
+#[tauri::command]
 pub async fn group_task_control(
     app: tauri::AppHandle,
     group_id: String,

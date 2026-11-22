@@ -21,7 +21,7 @@ impl Store {
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if matches!(previous, 1..=12) {
+        if matches!(previous, 1..=13) {
             let backup = store
                 .path
                 .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
@@ -47,6 +47,7 @@ impl Store {
             include_str!("../../migrations/011_task_results.sql"),
             include_str!("../../migrations/012_parallel_members.sql"),
             include_str!("../../migrations/013_group_context.sql"),
+            include_str!("../../migrations/014_group_sessions.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
