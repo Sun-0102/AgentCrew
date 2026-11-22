@@ -68,10 +68,15 @@ fn collect(root: &Path, depth: usize, seen: &mut HashSet<PathBuf>, skills: &mut 
 }
 
 pub fn list(app: &tauri::AppHandle, store: &Store, agent: &str, project: Option<&str>, group: Option<&str>, names: &[String]) -> Result<Vec<Skill>, String> {
-    if !matches!(agent, "codex" | "deepseek") { return Err("不支持的 Agent".into()); }
+    let identity=agent;
+    let kind=crate::agents::ensure_enabled(store,identity)?;
+    let agent=kind.as_str();
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).ok_or("找不到用户目录")?;
-    let provider = if agent == "codex" { ".codex" } else { ".dsh" };
-    let workspace = if agent == "deepseek" && group.is_none() {
+    let provider = match agent {"codex"=>".codex","deepseek"=>".dsh","gemini"=>".gemini",_=>return Err("未知厂商的技能目录".into())};
+    let workspace = if identity != "codex" && identity != "deepseek" && group.is_none() {
+        let id=crate::agents::private_conversation(store,identity,project)?;
+        PathBuf::from(store.conversation_root(&id)?)
+    } else if agent == "deepseek" && group.is_none() {
         store.path.parent().ok_or("数据目录无效")?.join("runtimes/deepseek/workspace")
     } else {
         let id = store.resolve_chat(project, group)?;
@@ -82,7 +87,7 @@ pub fn list(app: &tauri::AppHandle, store: &Store, agent: &str, project: Option<
         roots.push(dir.join(provider).join("skills"));
         roots.push(dir.join(".agents/skills"));
     }
-    let variable = if agent == "codex" { "CODEX_HOME" } else { "DSH_HOME" };
+    let variable = match agent {"codex"=>"CODEX_HOME","deepseek"=>"DSH_HOME",_=>"GEMINI_CLI_HOME"};
     roots.push(std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| home.join(provider)).join("skills"));
     roots.push(home.join(".agents/skills"));
     // This machine's personal skill installation lives in CODEX_HOME, including
@@ -110,7 +115,7 @@ pub fn list(app: &tauri::AppHandle, store: &Store, agent: &str, project: Option<
                 skills.insert(name.clone(), Skill { name, path, description: item["description"].as_str().unwrap_or_default().into(), native: false, content: None, source: "Codex 运行时".into() });
             }
         }
-    } else {
+    } else if agent=="deepseek" {
         let catalog = app.state::<crate::deepseek::Runtime>().skills(store, &workspace, names)
             .map_err(|e| format!("读取 DeepSeek 原生技能目录失败：{e}"))?;
         let items = catalog["skills"].as_array().ok_or("DeepSeek 技能目录格式不兼容")?;

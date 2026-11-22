@@ -1,15 +1,16 @@
+import { useSyncExternalStore } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null; session_count?: number }
 export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
-export interface Message { agent?: "codex" | "deepseek"; id: string; role: string; text: string; created_at: string | null }
+export interface Message { agent?: string; id: string; role: string; text: string; created_at: string | null }
 export interface GroupTask {
   id: string; conversation_id: string; objective: string; status: string;
-  current_agent: "codex" | "deepseek"; codex_model: string; deepseek_model: string;
+  current_agent: string; codex_model: string; deepseek_model: string;
   turn_count: number; queued_count: number; error: string | null;
-  members?: { agent: "codex" | "deepseek"; status: string; queued_count: number; error: string | null }[];
+  members?: { agent: string; status: string; model?: string; queued_count: number; error: string | null }[];
 }
 export interface TaskSummary { id: string; objective: string; status: string; created_at: string }
 export interface FileEvidence { path: string; state: "captured" | "truncated" | "unavailable"; bytes: number | null; text: string | null; note: string | null }
@@ -28,17 +29,36 @@ export interface TaskResult {
 }
 export const taskLabels: Record<string, string> = { idle: "等待新消息", running: "正在处理", paused: "已暂停接力", cancelling: "正在取消", cancelled: "已取消", interrupted: "协作已中断", blocked: "需要你处理", awaiting_review: "待你验收", completed: "已验收", manual: "已转手动指派" };
 export interface Snapshot {
-  sessions?: Partial<Record<"codex" | "deepseek", Snapshot["session"]>>;
-  agent?: "codex" | "deepseek";
+  sessions?: Partial<Record<string, Snapshot["session"]>>;
+  agent?: string;
   task?: GroupTask | null;
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;
   messages: Message[];
-  approvals: { id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
+  approvals: { agent_id?: string; id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
 }
 // In runtime commands groupId identifies the selected execution conversation, including the default session.
-export interface Scope { projectId: string | null; groupId: string | null; agent?: "codex" | "deepseek" }
+export interface Scope { projectId: string | null; groupId: string | null; agent?: string }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
-export const agents = [{ id: "codex", name: "Codex", description: "写代码、执行任务、整理交付", available: true }, { id: "deepseek", name: "DeepSeek", description: "私聊与群聊、讨论思路、文件任务", available: true }];
+export interface Agent { id: string; name: string; description: string; provider_kind: string; runtime_kind?: string; available: boolean; registration_state: string; availability: string; enabled: boolean; runtime_version?: string | null; error?: string | null }
+export let agents: Agent[] = (desktop ? [] : ["codex", "deepseek"]).map(id => ({ id, name: id === "codex" ? "Codex" : "DeepSeek", description: "本机运行组件", provider_kind: id, available: !desktop, registration_state: "active", availability: "checking", enabled: true }));
+const registryListeners = new Set<() => void>();
+let registryRequest: Promise<void> | undefined;
+export async function refreshAgents() {
+  if (!desktop) return;
+  const rows = await invoke<(Omit<Agent, "name" | "description" | "available"> & {display_name: string})[]>("agent_list");
+  agents = rows.map(row => ({ ...row, name: row.display_name, description: row.error ?? `${row.provider_kind} · ${row.availability === "ready" ? "可接任务" : row.availability === "checking" ? "等待检查" : "需要处理"}`, available: row.enabled && row.registration_state === "active" }));
+  registryListeners.forEach(listener => listener());
+}
+export function useAgents() {
+  return useSyncExternalStore(listener => { registryListeners.add(listener); return () => { registryListeners.delete(listener); }; }, () => agents);
+}
+export function loadAgents() { return registryRequest ??= refreshAgents().catch(error => { registryRequest = undefined; throw error; }); }
+export const agentName = (id: string) => agents.find(agent => agent.id === id)?.name ?? id;
+export const providerKind = (id: string) => agents.find(agent => agent.id === id)?.provider_kind ?? id;
+export const mentionName = (id: string) => {
+  const agent=agents.find(a=>a.id===id);
+  return agent && agents.filter(a=>a.name.toLowerCase()===agent.name.toLowerCase()).length===1 ? agent.name : id;
+};
 const previewKey = "ai-gent.preview.groups.v1";
 const previewMessagesKey = "ai-gent.preview.messages.v1";
 const previewSessionsKey = "ai-gent.preview.sessions.v1";
@@ -96,9 +116,9 @@ export async function updateGroupMembers(groupId: string, add: string[], remove:
   if (!members.length || members.some(agent => !agents.some(a => a.id === agent))) throw new Error("群内至少保留一位已接入的 Agent。");
   return saveGroup(group.name, members, group.project_id, groupId);
 }
-export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>(scope.agent === "deepseek" ? "deepseek_snapshot" : "codex_snapshot", { ...scope }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
-export const probeCodex = () => invoke<Probe>("codex_probe");
-export const probeDeepSeek = () => invoke<Probe>("deepseek_probe");
+export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>("agent_snapshot", { ...scope, agent: scope.agent ?? "codex" }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
+export const probeCodex = () => invoke<Probe>("agent_probe", {agent:"codex"});
+export const probeDeepSeek = () => invoke<Probe>("agent_probe", {agent:"deepseek"});
 export const running = (status?: string) => ["starting", "running", "waiting_approval", "cancel_requested", "stopping"].includes(status ?? "");
 export const statusLabels: Record<string, string> = { idle: "就绪", starting: "正在启动", running: "正在处理", waiting_approval: "等待你批准", cancel_requested: "正在取消", stopping: "清理进程中", completed: "本轮完成", cancelled: "已取消", failed: "执行失败", interrupted: "执行已中断" };
 export function clock(value: string | null) { return value ? new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : ""; }

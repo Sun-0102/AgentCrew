@@ -4,6 +4,8 @@
 
 状态：仅完成官方文档阅读与接入方案记录，尚未实施或验证。用户已明确要求先不接入，后续再做。本文件不代表接入工作已获启动授权。
 
+2026-11-22 实施补充：本次已选择官方 Gemini CLI ACP v1 并加入适配代码，未选择 Antigravity 路线。当前电脑没有 Gemini，未安装、执行或实机验收。详细入口、数据与权限限制见 [通用邀请与 Gemini 实现说明](verification/2026-11-22-generic-pairing.md)；下文 Antigravity 内容继续作为候选预研保留。
+
 ## 1. 结论与范围
 
 从官方文档看，可以通过 Antigravity 为 AI-gent 增加使用 Gemini 的 Agent。Antigravity 提供 Agent 运行环境；Gemini 是底层模型。未来界面需区分成员身份、运行组件和所选模型，不能把三者混成同一个配置。

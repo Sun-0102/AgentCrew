@@ -1,3 +1,4 @@
+import { agentName } from "./api";
 import Avatar from "../../components/Avatar";
 import { running, statusLabels, type Snapshot } from "./api";
 
@@ -6,7 +7,7 @@ export default function GroupMemberStatus({ snapshot, members }: { snapshot: Sna
   if (!task?.members?.length) return null;
   return <div className="group-member-statuses" aria-label="成员执行状态">
     {task.members.filter(member => members.includes(member.agent)).map(member => {
-      const name = member.agent === "codex" ? "Codex" : "DeepSeek";
+      const name = agentName(member.agent);
       const session = snapshot.sessions?.[member.agent];
       const status = member.status === "running" ? session?.status ?? member.status : member.status;
       const active = running(status);

@@ -2,9 +2,10 @@ import { useState } from "react";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
 import Dialog from "../../components/Dialog";
-import { agents, updateGroupMembers, type Group } from "./api";
+import { useAgents, updateGroupMembers, type Group } from "./api";
 
 export default function GroupMembers({ group, onUpdated, onSettings }: { group: Group; onUpdated: (group: Group) => void; onSettings: () => void }) {
+  const agents = useAgents().filter(agent => agent.available);
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);

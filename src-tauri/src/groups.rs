@@ -19,13 +19,8 @@ fn validate(name: &str, members: &[String]) -> Result<Vec<String>, String> {
     if name.trim().is_empty() || name.trim().chars().count() > 40 {
         return Err("群名称请填写 1–40 个字。".into());
     }
-    if members.is_empty()
-        || members.len() > 2
-        || members
-            .iter()
-            .any(|m| !matches!(m.as_str(), "codex" | "deepseek"))
-    {
-        return Err("请选择本机 Codex 或 DeepSeek 成员。".into());
+    if members.is_empty() || members.len() > 32 {
+        return Err("请选择 1–32 位已接入的本机 Agent。".into());
     }
     let mut members = members.to_vec();
     members.sort();
@@ -100,6 +95,7 @@ impl Store {
         parent: &std::path::Path,
     ) -> Result<Group, String> {
         let members = validate(name, &members)?;
+        for member in &members { crate::agents::ensure_enabled(self, member)?; }
         let id = uuid::Uuid::new_v4().to_string();
         let root = if let Some(project) = project_id.as_deref() {
             self.list_projects()?
@@ -147,13 +143,14 @@ impl Store {
         project_id: Option<String>,
     ) -> Result<Group, String> {
         let members = validate(name, &members)?;
+        for member in &members { crate::agents::ensure_enabled(self, member)?; }
         if self.parent_group_id(id)? != id { return Err("请在群设置中修改所属群聊。".into()); }
         let old = self.group(id)?;
         let mut connection = self.connect()?;
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('running','paused','cancelling'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM gemini_sessions WHERE conversation_id IN (SELECT a.runtime_conversation_id FROM agent_sessions a JOIN group_sessions s ON s.conversation_id=a.conversation_id WHERE s.group_id=?1) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1) AND status IN ('running','paused','cancelling'))",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
         if running {
             return Err(
                 "请先完成或取消当前任务（含暂停的自动协作），再修改群成员或关联项目。".into(),
@@ -204,6 +201,8 @@ impl Store {
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
+            let sessions=self.group_sessions(id)?;
+            for session in sessions { crate::agents::clear_bindings(&tx,&session.id)?; }
             // A loaded provider session can retain its old cwd; only reset its binding, never its transcript.
             tx.execute("DELETE FROM codex_sessions WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=?1)", [id])
                 .map_err(|e| e.to_string())?;
@@ -257,6 +256,7 @@ impl Store {
         if !group.members.iter().any(|m| m == target) {
             return Err("该 Agent 不在当前群内。".into());
         }
+        crate::agents::ensure_enabled(self, target)?;
         Ok(())
     }
 

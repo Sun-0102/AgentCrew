@@ -15,7 +15,7 @@ pub async fn skills_list(app: tauri::AppHandle, agent: String, project_id: Optio
 #[tauri::command]
 pub async fn skills_prepare(app: tauri::AppHandle, agents: Vec<String>, names: Vec<String>, project_id: Option<String>, group_id: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if names.len() > 8 || agents.is_empty() || agents.len() > 2 { return Err("一次最多调用 8 个技能。".to_owned()); }
+        if names.len() > 8 || agents.is_empty() || agents.len() > 32 { return Err("一次最多调用 8 个技能。".to_owned()); }
         let store = app.state::<Store>();
         let mut prompt = String::from("\n\n本轮用户显式选择的本地技能（仅对应 Agent 使用）：\n");
         for agent in agents {
@@ -86,7 +86,7 @@ async fn codex_call(
 
 #[tauri::command]
 pub async fn codex_probe(app: tauri::AppHandle) -> Result<Value, String> {
-    codex_call(app, |runtime, store| runtime.probe(store)).await
+    crate::agent_commands::agent_probe(app,"codex".into()).await
 }
 
 #[tauri::command]
@@ -104,6 +104,7 @@ pub async fn codex_send(
     codex_call(app, move |runtime, store| {
         let gate = admission.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        crate::agents::ensure_enabled(store,"codex")?;
         if target_agent
             .as_deref()
             .is_some_and(|target| target != "codex")
@@ -164,7 +165,7 @@ async fn deepseek_call(
 
 #[tauri::command]
 pub async fn deepseek_probe(app: tauri::AppHandle) -> Result<Value, String> {
-    deepseek_call(app, |runtime, store| runtime.probe(store)).await
+    crate::agent_commands::agent_probe(app,"deepseek".into()).await
 }
 
 #[tauri::command]
@@ -191,6 +192,7 @@ pub async fn deepseek_send(
     deepseek_call(app, move |runtime, store| {
         let gate = admission.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        crate::agents::ensure_enabled(store,"deepseek")?;
         if target_agent
             .as_deref()
             .is_some_and(|target| target != "deepseek")
@@ -473,7 +475,8 @@ pub async fn group_members_update(app: tauri::AppHandle, group_id: String, add: 
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e|e.to_string())?;
-        if add.iter().chain(remove.iter()).any(|agent| !matches!(agent.as_str(),"codex"|"deepseek")) { return Err("不支持的群成员。".into()); }
+        if add.len()>32 || remove.len()>32 {return Err("一次最多调整 32 位成员。".into());}
+        for agent in &add {crate::agents::ensure_enabled(store,agent)?;}
         if store.parent_group_id(&group_id)? != group_id { return Err("请修改所属群聊的成员。".into()); }
         let group = store.group(&group_id)?;
         let mut members = group.members;

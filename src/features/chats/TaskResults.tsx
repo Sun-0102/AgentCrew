@@ -1,3 +1,4 @@
+import { agentName } from "./api";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -6,7 +7,7 @@ import Icon from "../../components/Icon";
 import MessageBody from "./MessageBody";
 import { desktop, statusLabels, taskLabels, type GroupTask, type TaskResult, type TaskSummary, type WorkspaceEvidence } from "./api";
 
-const name = (agent: string) => agent === "user" ? "我" : agent === "codex" ? "Codex" : agent === "deepseek" ? "DeepSeek" : agent;
+const name = (agent: string) => agent === "user" ? "我" : agentName(agent);
 const date = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN") : "未记录";
 const stepLabel = (value: string) => statusLabels[value] ?? value;
 const inputLabels: Record<string, string> = { queued: "待处理", selected: "待发送", delivered: "已投递", cancelled: "已取消" };
@@ -94,7 +95,7 @@ export default function TaskResults({ groupId, latestTask, acting, members, onCl
           <div className="result-note"><strong>{data.task.status === "completed" ? "用户已确认完成" : "尚未由用户验收"}</strong><p>{data.task.note ?? "继续发言沿用本任务。检查结果后可确认完成，或结束任务而不验收。"}</p><p>Agent 的完成说明不代表测试通过。文件复核是否充分，仍需结合实际读取记录判断。</p></div>
           <h3>{finalStep ? `${name(finalStep.agent)} · 第 ${finalStep.ordinal} 轮回复` : "暂无归档回复"}</h3>
           {reply ? <MessageBody text={reply} /> : <p className="panel-caption">当前轮次未归档，或这是新增记录功能前的任务。聊天原记录仍保留，不补造历史文件依据。</p>}
-          {reviewable && <div className="result-review-actions"><span>按需发起实际文件复核</span>{(["codex", "deepseek"] as const).filter(agent => members.includes(agent) && agent !== finalStep?.agent).map(agent => <button type="button" className="outline-button" disabled={acting || !latestTask?.[agent === "codex" ? "codex_model" : "deepseek_model"]} key={agent} onClick={() => void act(`review_${agent}`)}>请 {name(agent)} 复核</button>)}<button type="button" className="outline-button" disabled={acting} onClick={() => void act("close")}>结束任务，不验收</button><button type="button" className="primary" disabled={acting} onClick={() => void act("accept")}>确认完成</button><small>继续发言会沿用本任务。复核使用本任务模型与现有执行权限，并发送只读检查要求。</small></div>}
+          {reviewable && <div className="result-review-actions"><span>按需发起实际文件复核</span>{members.filter(agent => members.includes(agent) && agent !== finalStep?.agent).map(agent => <button type="button" className="outline-button" disabled={acting} key={agent} onClick={() => void act(`review_${agent}`)}>请 {name(agent)} 复核</button>)}<button type="button" className="outline-button" disabled={acting} onClick={() => void act("close")}>结束任务，不验收</button><button type="button" className="primary" disabled={acting} onClick={() => void act("accept")}>确认完成</button><small>继续发言会沿用本任务。复核使用本任务模型与现有执行权限，并发送只读检查要求。</small></div>}
           <details className="result-detail"><summary>记录范围与未验证限制</summary><ul className="result-limitations">{data.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></details>
         </>}
         {tab === "handoffs" && <>

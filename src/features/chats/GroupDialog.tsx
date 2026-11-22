@@ -2,11 +2,12 @@ import { useState } from "react";
 import Dialog from "../../components/Dialog";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
-import { agents, saveGroup, type Group } from "./api";
+import { useAgents, saveGroup, type Group } from "./api";
 import type { Project } from "../projects/api";
 export default function GroupDialog({ existing, projects, onSaved, onClose }: { existing?: Group; projects: Project[]; onSaved: (group: Group) => void; onClose: () => void }) {
+  const agents = useAgents().filter(agent => agent.available);
   const [name, setName] = useState(existing?.name ?? "");
-  const [members, setMembers] = useState(existing?.members ?? ["codex"]);
+  const [members, setMembers] = useState(existing?.members ?? (agents[0] ? [agents[0].id] : []));
   const [projectId, setProjectId] = useState(existing?.project_id ?? "");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);

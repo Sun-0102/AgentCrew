@@ -339,8 +339,13 @@ pub fn result(store: &Store, group: &str, id: &str) -> Result<Value, String> {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?
     };
+    let attempts={
+        let mut statement=connection.prepare("SELECT a.id,a.input_id,a.generation,a.phase,a.native_run_id,a.error,a.created_at,a.finished_at,i.target_agent,i.message_id,g.provider_kind,g.runtime_kind,g.display_name FROM agent_attempts a JOIN group_task_inputs i ON i.id=a.input_id JOIN agents g ON g.id=i.target_agent WHERE i.task_id=?1 ORDER BY a.created_at,a.id").map_err(|e|e.to_string())?;
+        let rows=statement.query_map([id],|r|Ok(json!({"attempt_id":r.get::<_,String>(0)?,"delivery_id":r.get::<_,i64>(1)?,"generation":r.get::<_,u32>(2)?,"phase":r.get::<_,String>(3)?,"native_run_id":r.get::<_,Option<String>>(4)?,"error":r.get::<_,Option<String>>(5)?,"created_at":r.get::<_,String>(6)?,"finished_at":r.get::<_,Option<String>>(7)?,"agent_id":r.get::<_,String>(8)?,"source_message_id":r.get::<_,String>(9)?,"provider_kind":r.get::<_,String>(10)?,"runtime_kind":r.get::<_,String>(11)?,"display_name":r.get::<_,String>(12)?}))).map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?
+    };
     Ok(
-        json!({"format_version":1,"task":task,"inputs":inputs,"steps":steps,"limitations":[
+        json!({"format_version":2,"task":task,"inputs":inputs,"steps":steps,"attempts":attempts,"limitations":[
             "这是可读工作记录，不是完整项目备份或厂商会话恢复包。未采集的文件和早期任务依据不会事后补造。",
             "运行中的轮次仅有执行前依据；回复及工具记录在本轮结束后归档。重启中断的轮次可能没有结束快照。",
             "并行成员共用工作目录，快照差异可能包含另一位成员和原有修改，不能据此归属单个成员。快照可能包含项目敏感信息。敏感文件名过滤不能保证内容脱敏，请检查后分享。",
@@ -413,6 +418,10 @@ fn markdown(data: &Value) -> Result<String, String> {
                 block(field(input, "text"))
             ));
         }
+    }
+    if let Some(attempts)=data["attempts"].as_array() {
+        out.push_str("\n## 投递与执行尝试\n\n");
+        for attempt in attempts {out.push_str(&format!("- {} · {} ({}) · 投递 {} · 代次 {} · {} · 原厂执行 {}\n",field(attempt,"attempt_id"),field(attempt,"display_name"),field(attempt,"agent_id"),attempt["delivery_id"],attempt["generation"],field(attempt,"phase"),field(attempt,"native_run_id")));}
     }
     if let Some(steps) = data["steps"].as_array() {
         for step in steps {

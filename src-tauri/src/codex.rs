@@ -1,3 +1,4 @@
+use crate::process::BoundedOutput;
 use crate::storage::Store;
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -32,7 +33,7 @@ struct Client {
     database: PathBuf,
     version: String,
     executable: PathBuf,
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     job: ProcessJob,
 }
 
@@ -94,8 +95,29 @@ impl Drop for ProcessJob {
     }
 }
 
+#[cfg(unix)]
+pub(crate) struct ProcessJob { group: i32, stopped: AtomicBool }
+#[cfg(unix)]
+impl ProcessJob {
+    pub(crate) fn attach(child: &Child) -> Result<Self,String> {
+        let group=child.id() as i32;
+        if unsafe {libc::getpgid(group)}!=group {return Err("运行组件未进入应用管理的进程组。".into());}
+        Ok(Self {group,stopped:AtomicBool::new(false)})
+    }
+    pub(crate) fn terminate(&self) -> Result<(),String> {
+        if self.stopped.swap(true,Ordering::SeqCst) {return Ok(());}
+        if unsafe {libc::kill(-self.group,libc::SIGTERM)}!=0 && std::io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH) {self.stopped.store(false,Ordering::SeqCst);return Err("无法停止应用管理的进程组。".into());}
+        std::thread::sleep(Duration::from_millis(200));
+        if unsafe {libc::kill(-self.group,libc::SIGKILL)}!=0 && std::io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH) {self.stopped.store(false,Ordering::SeqCst);return Err("无法清理应用管理的进程组。".into());}
+        Ok(())
+    }
+}
+#[cfg(unix)]
+impl Drop for ProcessJob {fn drop(&mut self) {let _=self.terminate();}}
+
 fn command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
+    #[cfg(unix)] {use std::os::unix::process::CommandExt;command.process_group(0);}
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -147,10 +169,17 @@ fn resolve_codex() -> Result<(PathBuf, String), String> {
             );
         }
     }
+    #[cfg(target_os="macos")]
+    {
+        paths.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
+        for directory in ["/usr/local/bin","/opt/homebrew/bin"] {paths.push(PathBuf::from(directory).join("codex"));}
+        if let Some(home)=std::env::var_os("HOME") {paths.push(PathBuf::from(home).join("Applications/Codex.app/Contents/Resources/codex"));}
+    }
+    paths.retain(|path|path.is_file());
     paths.sort();
     paths.dedup();
     let candidates = paths.into_iter().filter_map(|path| {
-        let output = command(&path).arg("--version").output().ok()?;
+        let output = command(&path).arg("--version").bounded_output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -170,7 +199,7 @@ impl Client {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动 Codex App Server：{e}"))?;
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         let job = match ProcessJob::attach(&child) {
             Ok(job) => job,
             Err(error) => {
@@ -193,7 +222,7 @@ impl Client {
             database,
             version,
             executable,
-            #[cfg(windows)]
+            #[cfg(any(windows, unix))]
             job,
         });
         // Drain diagnostics separately. Never put authentication diagnostics in the UI or database.
@@ -437,7 +466,7 @@ impl Client {
     }
 
     fn stop(&self) -> Result<(), String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         self.job.terminate()?;
         if let Ok(mut child) = self.child.lock() {
             if matches!(child.try_wait(), Ok(None)) {
@@ -826,7 +855,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         let job = ProcessJob::attach(&child).unwrap();
         let client = Client {
             input: Mutex::new(child.stdin.take().unwrap()),
@@ -839,7 +868,7 @@ mod tests {
             database: store.path.clone(),
             version: "test".into(),
             executable: PathBuf::from("test-codex"),
-            #[cfg(windows)]
+            #[cfg(any(windows, unix))]
             job,
         };
         (dir, store, project.id, client)

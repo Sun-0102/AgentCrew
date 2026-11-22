@@ -1,5 +1,6 @@
+import { agents } from "./api";
 export function activeMention(text: string, cursor: number) {
-  const match = text.slice(0, cursor).match(/(?:^|[\s，。！？、：；（(])@([a-z]*)$/i);
+  const match = text.slice(0, cursor).match(/(?:^|[\s，。！？、：；（(])@([^\s@]*)$/i);
   return match ? { start: cursor - match[1].length - 1, query: match[1].toLowerCase() } : null;
 }
 
@@ -41,8 +42,13 @@ export function messageRecipients(text: string, members: string[]) {
         continue;
       }
       if (inline !== null || line[cursor] !== "@" || /[a-z0-9_@\\]/i.test(line[cursor - 1] ?? "")) continue;
-      const match = line.slice(cursor).match(/^@(Codex|DeepSeek)(?![a-z0-9_])/i);
-      if (match && !named.includes(match[1].toLowerCase())) named.push(match[1].toLowerCase());
+      for (const agent of agents.filter(a => members.includes(a.id))) {
+        const uniqueName = agents.filter(a => members.includes(a.id) && a.name.toLowerCase() === agent.name.toLowerCase()).length === 1;
+        for (const label of uniqueName ? [agent.id, agent.name] : [agent.id]) {
+          const prefix = `@${label}`;
+          if (line.slice(cursor, cursor + prefix.length).toLowerCase() === prefix.toLowerCase() && !/[\p{L}\p{N}_-]/u.test(line[cursor + prefix.length] ?? "") && !named.includes(agent.id)) named.push(agent.id);
+        }
+      }
     }
   }
   return named.length ? named : members;

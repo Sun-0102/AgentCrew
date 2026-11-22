@@ -1,3 +1,4 @@
+use crate::process::BoundedOutput;
 use crate::storage::Store;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -31,6 +32,7 @@ pub struct ExecutionGate(pub Mutex<()>);
 
 fn command(path: &Path) -> Command {
     let mut cmd = Command::new(path);
+    #[cfg(unix)] {use std::os::unix::process::CommandExt;cmd.process_group(0);}
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -42,6 +44,7 @@ fn command(path: &Path) -> Command {
 struct Installation {
     executable: PathBuf,
     cli: PathBuf,
+    resources: PathBuf,
     version: String,
 }
 impl Installation {
@@ -52,27 +55,44 @@ impl Installation {
         }
         #[cfg(windows)]
         {
-            let output = command(Path::new("powershell.exe")).args(["-NoProfile", "-NonInteractive", "-Command", "Get-ItemProperty 'HKCU:/Software/Microsoft/Windows/CurrentVersion/Uninstall/*','HKLM:/Software/Microsoft/Windows/CurrentVersion/Uninstall/*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'DeepSeek Harness*' } | ForEach-Object { Join-Path $_.InstallLocation 'DeepSeek Harness.exe' }"]).output().map_err(|_| "无法检查 DeepSeek Harness 安装位置")?;
+            let output = command(Path::new("powershell.exe")).args(["-NoProfile", "-NonInteractive", "-Command", "Get-ItemProperty 'HKCU:/Software/Microsoft/Windows/CurrentVersion/Uninstall/*','HKLM:/Software/Microsoft/Windows/CurrentVersion/Uninstall/*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'DeepSeek Harness*' } | ForEach-Object { Join-Path $_.InstallLocation 'DeepSeek Harness.exe' }"]).bounded_output().map_err(|_| "无法检查 DeepSeek Harness 安装位置")?;
             candidates.extend(
                 String::from_utf8_lossy(&output.stdout)
                     .lines()
                     .map(|s| PathBuf::from(s.trim())),
             );
         }
-        let executable = candidates.into_iter().find(|p| p.is_file()).ok_or("找不到 DeepSeek Harness 桌面运行组件。请安装 Harness；自定义位置可通过 AI_GENT_DSH_DESKTOP 指定 exe 路径。")?;
-        let cli = executable
-            .parent()
-            .ok_or("Harness 安装路径无效")?
-            .join("resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js");
+        #[cfg(target_os="macos")]
+        {
+            let mut directories=vec![PathBuf::from("/Applications")];
+            if let Some(home)=std::env::var_os("HOME") {directories.push(PathBuf::from(home).join("Applications"));}
+            for directory in directories {
+                if let Ok(entries)=std::fs::read_dir(directory) {
+                    for entry in entries.flatten() {
+                        let path=entry.path();
+                        if path.extension().is_some_and(|s|s=="app") && path.file_name().is_some_and(|s|s.to_string_lossy().to_lowercase().contains("deepseek")) {
+                            let output=command(Path::new("/usr/bin/plutil")).args(["-extract","CFBundleExecutable","raw","-o","-"]).arg(path.join("Contents/Info.plist")).bounded_output();
+                            if let Ok(output)=output {if output.status.success() {let name=String::from_utf8_lossy(&output.stdout).trim().to_owned();if !name.contains('/') {candidates.push(path.join("Contents/MacOS").join(name));}}}
+                        }
+                    }
+                }
+            }
+        }
+        let executable = candidates.into_iter().find(|p| p.is_file()).ok_or("找不到 DeepSeek Harness 桌面运行组件。请安装 Harness；自定义位置可通过 AI_GENT_DSH_DESKTOP 指定运行文件。")?;
+        let parent=executable.parent().ok_or("Harness 安装路径无效")?;
+        let resources=if cfg!(target_os="macos") {parent.parent().ok_or("Harness 应用包无效")?.join("Resources")} else {parent.join("resources")};
+        if !resources.join("app.asar").is_file() {return Err("Harness 安装布局不支持：缺少应用资源包。".into());}
+        let cli=resources.join("app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js");
         let mut installation = Self {
             executable,
             cli,
+            resources,
             version: String::new(),
         };
         let output = installation
             .launch()
             .arg("--version")
-            .output()
+            .bounded_output()
             .map_err(|_| "无法读取 Harness 版本")?;
         installation.version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !output.status.success() || installation.version != VERSION {
@@ -97,8 +117,8 @@ impl Installation {
             .env("ELECTRON_RUN_AS_NODE", "1")
             .arg("--expose-internals")
             .arg(script)
-            .arg(self.executable.parent().ok_or("Harness 目录无效")?)
-            .output()
+            .arg(&self.resources)
+            .bounded_output()
             .map_err(|_| "读取 Harness 模型目录失败")?;
         if !output.status.success() {
             return Err("读取已安装 Harness 模型目录失败。".into());
@@ -131,7 +151,7 @@ struct Client {
     database: PathBuf,
     thread: String,
     conversation: String,
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     job: crate::codex::ProcessJob,
 }
 impl Client {
@@ -162,7 +182,7 @@ impl Client {
         std::fs::write(&patch, runtime_patch).map_err(|e| e.to_string())?;
         let home = std::env::var_os("DSH_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".dsh")))
+            .or_else(|| std::env::var_os("USERPROFILE").or_else(||std::env::var_os("HOME")).map(|p| PathBuf::from(p).join(".dsh")))
             .ok_or("找不到 Harness 配置目录")?;
         let mut cmd = install.launch();
         cmd.args(["--profile", PROFILE]);
@@ -184,7 +204,7 @@ impl Client {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| "无法启动 DeepSeek Harness SDK")?;
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         let job = match crate::codex::ProcessJob::attach(&child) {
             Ok(job) => job,
             Err(_) => {
@@ -205,7 +225,7 @@ impl Client {
             database: store.path.clone(),
             thread: thread.into(),
             conversation: conversation.into(),
-            #[cfg(windows)]
+            #[cfg(any(windows, unix))]
             job,
         });
         std::thread::spawn(move || {
@@ -368,12 +388,12 @@ impl Client {
     }
     fn stop(&self) -> Result<(), String> {
         self.healthy.store(false, Ordering::SeqCst);
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         self.job
             .terminate()
             .map_err(|_| "停止 DeepSeek 进程组失败")?;
         let mut child = self.child.lock().unwrap();
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, unix)))]
         child.kill().map_err(|e| e.to_string())?;
         child.wait().map_err(|e| e.to_string())?;
         Ok(())
@@ -429,7 +449,7 @@ fn set_status(
 }
 
 pub fn ensure_idle(store: &Store) -> Result<(), String> {
-    let busy:bool=store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let busy:bool=store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM gemini_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     if busy {
         Err("已有任务正在执行，请先完成或取消。".into())
     } else {
@@ -553,7 +573,9 @@ impl Runtime {
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
             path
         } else {
-            store.validate_group_target(conversation, "deepseek")?;
+            if let Some((agent, logical)) = crate::agents::logical_identity(store, conversation)? {
+                if store.group_name(&logical)?.is_some() { store.validate_group_target(&logical, &agent)?; }
+            } else { store.validate_group_target(conversation, "deepseek")?; }
             PathBuf::from(store.conversation_root(conversation)?)
         };
         let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
@@ -611,10 +633,12 @@ impl Runtime {
             let _ = client.stop();
             return Err("Harness 返回的工作目录不匹配，执行已停止。".into());
         }
-        let prompt = if conversation == PERSONAL {
+        let logical = crate::agents::logical_identity(store, conversation)?;
+        let group_conversation = logical.as_ref().map(|(_, id)| id.as_str()).unwrap_or(conversation);
+        let prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
             text.to_owned()
         } else {
-            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(conversation)?.name)
+            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
         };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;

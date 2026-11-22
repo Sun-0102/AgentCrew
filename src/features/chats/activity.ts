@@ -20,7 +20,7 @@ export function elapsed(start: string | null, end: string | null, now: number) {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
-export function replyBlocks(snapshot: Snapshot, fallbackAgent: "codex" | "deepseek"): ReplyBlock[] {
+export function replyBlocks(snapshot: Snapshot, fallbackAgent: string): ReplyBlock[] {
   const blocks: ReplyBlock[] = [];
   let current: ReplyBlock | undefined;
   let startedAt: string | null = null;
