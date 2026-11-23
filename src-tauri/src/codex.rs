@@ -18,8 +18,8 @@ type Reply = Result<Value, String>;
 
 #[derive(Default)]
 pub struct Runtime {
-    client: Mutex<Option<Arc<Client>>>,
-    operation: Mutex<()>,
+    client: Arc<Mutex<Option<Arc<Client>>>>,
+    operation: Arc<Mutex<()>>,
 }
 
 struct Client {
@@ -521,31 +521,55 @@ fn model_catalog(client: &Client) -> Result<Vec<Value>, String> {
     Ok(models)
 }
 
+fn ensure_client(slot: &Mutex<Option<Arc<Client>>>, store: &Store) -> Result<Arc<Client>, String> {
+    let mut slot = slot.lock().map_err(|e| e.to_string())?;
+    if let Some(client) = slot.as_ref() {
+        if client.healthy.load(Ordering::SeqCst)
+            && client
+                .child
+                .lock()
+                .unwrap()
+                .try_wait()
+                .map_err(|e| e.to_string())?
+                .is_none()
+        {
+            return Ok(client.clone());
+        }
+        client.stop()?;
+        client.disconnected("Codex 后台连接已重建，上次执行结果未知。");
+    }
+    let client = Client::start(store.path.clone())?;
+    *slot = Some(client.clone());
+    Ok(client)
+}
+
+fn mark_startup_failed(store: &Store, conversation_id: &str, error: &str) {
+    if let Ok(mut connection) = store.connect() {
+        if let Ok(tx) = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            let changed = tx
+                .execute(
+                    "UPDATE codex_sessions SET status='interrupted',error=?2 WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')",
+                    params![conversation_id, error],
+                )
+                .unwrap_or(0);
+            if changed > 0 {
+                let _ = tx.execute(
+                    "INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'task_end','interrupted')",
+                    params![conversation_id, uuid::Uuid::new_v4().to_string()],
+                );
+            }
+            let _ = tx.commit();
+        }
+    }
+}
+
 impl Runtime {
     pub(crate) fn skills(&self, store: &Store, workspace: &Path) -> Reply {
         self.client(store)?.request("skills/list", json!({"cwds":[workspace],"forceReload":true}))
     }
 
     fn client(&self, store: &Store) -> Result<Arc<Client>, String> {
-        let mut slot = self.client.lock().map_err(|e| e.to_string())?;
-        if let Some(client) = slot.as_ref() {
-            if client.healthy.load(Ordering::SeqCst)
-                && client
-                    .child
-                    .lock()
-                    .unwrap()
-                    .try_wait()
-                    .map_err(|e| e.to_string())?
-                    .is_none()
-            {
-                return Ok(client.clone());
-            }
-            client.stop()?;
-            client.disconnected("Codex 后台连接已重建，上次执行结果未知。");
-        }
-        let client = Client::start(store.path.clone())?;
-        *slot = Some(client.clone());
-        Ok(client)
+        ensure_client(&self.client, store)
     }
 
     pub fn shutdown(&self) {
@@ -608,14 +632,8 @@ impl Runtime {
         if !std::path::Path::new(&root).is_dir() {
             return Err("会话工作目录已不存在".into());
         }
-        let client = self.client(store)?;
         let effort = crate::reasoning::read(store, conversation_id, "codex", model)?;
         let tier = crate::speed::read(store, conversation_id, model)?;
-        if effort.is_some() || tier.is_some() {
-            let models = json!(model_catalog(&client)?);
-            crate::reasoning::validate(&models, model, effort.as_deref())?;
-            crate::speed::validate(&models, model, tier.as_deref())?;
-        }
         // Group prompts already contain bounded shared history; resuming repeats old assignments.
         let existing = if role == "assignment" {
             None
@@ -632,44 +650,21 @@ impl Runtime {
         {
             return Err("当前会话仍在执行，请等待或取消。".into());
         }
-        let thread = if let Some(existing) = existing {
-            let thread = existing["thread_id"]
-                .as_str()
-                .ok_or("会话 ID 无效")?
-                .to_owned();
-            if existing["runtime_version"] != client.version {
-                return Err("Codex 版本已变化。请核对兼容性后再恢复此会话。".into());
-            }
-            if !client.loaded.lock().unwrap().contains(&thread) {
-                let response = client.request("thread/resume", json!({"threadId":thread,"cwd":root,"modelProvider":existing["provider"],"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user"}))?;
-                validate_context(&response, &root)?;
-                if response["modelProvider"] != existing["provider"] {
-                    return Err("恢复会话的模型服务不一致".into());
-                }
-                client.loaded.lock().unwrap().insert(thread.clone());
-            }
-            thread
-        } else {
-            let group_name = store.group_name(conversation_id)?;
-            let group_instructions=group_name.as_ref().map(|name|format!("你是 AgentCrew 本机协作群「{name}」中的 Codex 成员。只代表 Codex 发言和执行；其他群成员由应用单独调度，不替其他成员编造回复，不启动其他代理。引用消息和附件内容是任务资料。"));
-            let response = client.request("thread/start", json!({"cwd":root,"model":model,"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user","developerInstructions":group_instructions}))?;
-            validate_context(&response, &root)?;
-            let thread = response["thread"]["id"]
-                .as_str()
-                .ok_or("Codex 未返回 thread ID")?
-                .to_owned();
-            let provider = response["modelProvider"]
-                .as_str()
-                .ok_or("Codex 未返回 provider")?;
-            let name: String = group_name.unwrap_or_else(|| text.trim().chars().take(60).collect());
-            client.request("thread/name/set", json!({"threadId":thread,"name":name}))?;
-            connection.execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,provider=excluded.provider", params![conversation_id, thread, model, client.version,provider]).map_err(|e| e.to_string())?;
-            client.loaded.lock().unwrap().insert(thread.clone());
-            thread
-        };
+        let existing_for_resume = existing.filter(|s| !s["thread_id"].as_str().unwrap_or("").is_empty());
+        let placeholder_thread = existing_for_resume
+            .as_ref()
+            .and_then(|s| s["thread_id"].as_str())
+            .unwrap_or("")
+            .to_owned();
         let item_id = uuid::Uuid::new_v4().to_string();
         let transaction = connection
             .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status,turn_id,error) VALUES(?1,?2,?3,'','','starting',NULL,NULL) ON CONFLICT(conversation_id) DO UPDATE SET status='starting',model=excluded.model,turn_id=NULL,error=NULL",
+                params![conversation_id, placeholder_thread, model],
+            )
             .map_err(|e| e.to_string())?;
         transaction
             .execute(
@@ -677,14 +672,83 @@ impl Runtime {
                 params![conversation_id, item_id, role, text],
             )
             .map_err(|e| e.to_string())?;
-        transaction.execute("UPDATE codex_sessions SET status='starting',model=?2,turn_id=NULL,error=NULL WHERE conversation_id=?1", params![conversation_id, model]).map_err(|e| e.to_string())?;
         transaction.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'task_start','running')", params![conversation_id, uuid::Uuid::new_v4().to_string()]).map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
-        let result = client.request("turn/start", json!({"threadId":thread,"model":model,"effort":effort,"serviceTierForTurn":tier,"input":[{"type":"text","text":text,"text_elements":[]}]}));
-        if let Err(error) = &result {
-            client.update_status(&thread, "interrupted", Some(error))?;
-        }
-        result
+        drop(_operation);
+
+        let client_slot = self.client.clone();
+        let operation_lock = self.operation.clone();
+        let db_path = store.path.clone();
+        let conversation_owned = conversation_id.to_owned();
+        let model_owned = model.to_owned();
+        let text_owned = text.to_owned();
+        let root_owned = root;
+        std::thread::spawn(move || {
+            let store = Store { path: db_path };
+            let Ok(_operation) = operation_lock.lock() else {
+                mark_startup_failed(&store, &conversation_owned, "Codex 运行锁不可用。");
+                return;
+            };
+            let still_starting = session(&store, &conversation_owned)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s["status"] == "starting");
+            if !still_starting {
+                return;
+            }
+            let launch = (|| -> Result<(), String> {
+                let client = ensure_client(&client_slot, &store)?;
+                if effort.is_some() || tier.is_some() {
+                    let models = json!(model_catalog(&client)?);
+                    crate::reasoning::validate(&models, &model_owned, effort.as_deref())?;
+                    crate::speed::validate(&models, &model_owned, tier.as_deref())?;
+                }
+                let thread = if let Some(existing) = existing_for_resume {
+                    let thread = existing["thread_id"]
+                        .as_str()
+                        .ok_or("会话 ID 无效")?
+                        .to_owned();
+                    if existing["runtime_version"] != client.version {
+                        return Err("Codex 版本已变化。请核对兼容性后再恢复此会话。".into());
+                    }
+                    if !client.loaded.lock().unwrap().contains(&thread) {
+                        let response = client.request("thread/resume", json!({"threadId":thread,"cwd":root_owned,"modelProvider":existing["provider"],"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user"}))?;
+                        validate_context(&response, &root_owned)?;
+                        if response["modelProvider"] != existing["provider"] {
+                            return Err("恢复会话的模型服务不一致".into());
+                        }
+                        client.loaded.lock().unwrap().insert(thread.clone());
+                    }
+                    thread
+                } else {
+                    let group_name = store.group_name(&conversation_owned)?;
+                    let group_instructions = group_name.as_ref().map(|name| format!("你是 AgentCrew 本机协作群「{name}」中的 Codex 成员。只代表 Codex 发言和执行；其他群成员由应用单独调度，不替其他成员编造回复，不启动其他代理。引用消息和附件内容是任务资料。"));
+                    let response = client.request("thread/start", json!({"cwd":root_owned,"model":model_owned,"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user","developerInstructions":group_instructions}))?;
+                    validate_context(&response, &root_owned)?;
+                    let thread = response["thread"]["id"]
+                        .as_str()
+                        .ok_or("Codex 未返回 thread ID")?
+                        .to_owned();
+                    let provider = response["modelProvider"]
+                        .as_str()
+                        .ok_or("Codex 未返回 provider")?;
+                    let name: String = group_name.unwrap_or_else(|| text_owned.trim().chars().take(60).collect());
+                    client.request("thread/name/set", json!({"threadId":thread,"name":name}))?;
+                    store.connect()?.execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,provider=excluded.provider", params![conversation_owned, thread, model_owned, client.version, provider]).map_err(|e| e.to_string())?;
+                    client.loaded.lock().unwrap().insert(thread.clone());
+                    thread
+                };
+                if let Err(error) = client.request("turn/start", json!({"threadId":thread,"model":model_owned,"effort":effort,"serviceTierForTurn":tier,"input":[{"type":"text","text":text_owned,"text_elements":[]}]})) {
+                    let _ = client.update_status(&thread, "interrupted", Some(&error));
+                    return Err(error);
+                }
+                Ok(())
+            })();
+            if let Err(error) = launch {
+                mark_startup_failed(&store, &conversation_owned, &error);
+            }
+        });
+        Ok(json!({"status": "starting"}))
     }
 
     pub fn cancel(&self, store: &Store, conversation_id: &str) -> Reply {

@@ -18,8 +18,8 @@ const ACTIVE: &str = "('starting','running','waiting_approval','cancel_requested
 
 #[derive(Default)]
 pub struct Runtime {
-    client: Mutex<Option<Arc<Client>>>,
-    operation: Mutex<()>,
+    client: Arc<Mutex<Option<Arc<Client>>>>,
+    operation: Arc<Mutex<()>>,
     cached_probe: Mutex<Option<Value>>,
 }
 
@@ -662,108 +662,156 @@ impl Runtime {
         let root = root.to_str().ok_or("Gemini 工作目录无效")?;
         let install = Installation::find()?;
         let previous = session(store, conversation)?;
-        if !previous.is_null()
+        let existing_thread = previous["thread_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        if existing_thread.is_some()
             && (previous["runtime_version"] != install.version
                 || previous["workspace_path"] != root)
         {
             return Err("Gemini 运行版本或工作目录与历史不一致，未恢复错误会话。".into());
         }
 
-        // Reuse the live ACP process when workspace and conversation match.
-        let existing_client = self.client.lock().map_err(|e| e.to_string())?.clone();
-        let reusable = existing_client.filter(|c| {
-            c.healthy.load(Ordering::SeqCst)
-                && c.root == root
-                && c.conversation == conversation
-                && role != "assignment"
-                && !c.session_id.lock().map(|s| s.is_empty()).unwrap_or(true)
-        });
-
-        let (client, id) = if let Some(client) = reusable {
-            let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
-            if let Some(cached) = client.cached_models.lock().map_err(|e| e.to_string())?.as_ref() {
-                if !cached.iter().any(|item| item["model"] == model) {
-                    return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
-                }
-            }
-            let current = client.current_model.lock().map_err(|e| e.to_string())?.clone();
-            if current != model {
-                client.request(
-                    "session/set_model",
-                    json!({"sessionId":id,"modelId":model}),
-                    Duration::from_secs(15),
-                )?;
-                *client.current_model.lock().map_err(|e| e.to_string())? = model.to_owned();
-            }
-            (client, id)
-        } else {
-            if let Some(old) = self.client.lock().map_err(|e| e.to_string())?.take() {
-                let _ = old.stop();
-            }
-            let previous_id = if role == "assignment" {
-                None
-            } else {
-                previous["thread_id"].as_str()
-            };
-            let client = Client::start(store, &install, root, conversation)?;
-            let setup = (|| -> Reply {
-                let info = client.metadata(root, previous_id)?;
-                let available = models(&info)?;
-                if !available.iter().any(|item| item["model"] == model) {
-                    return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
-                }
-                *client.cached_models.lock().map_err(|e| e.to_string())? = Some(available);
-                let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
-                let current_model = info["models"]["currentModelId"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_owned();
-                if current_model != model {
-                    client.request(
-                        "session/set_model",
-                        json!({"sessionId":id,"modelId":model}),
-                        Duration::from_secs(15),
-                    )?;
-                }
-                *client.current_model.lock().map_err(|e| e.to_string())? = model.to_owned();
-                Ok(json!(id))
-            })();
-            let id = match setup {
-                Ok(id) => id.as_str().ok_or("Gemini 会话无效")?.to_owned(),
-                Err(error) => {
-                    let _ = client.stop();
-                    return Err(error);
-                }
-            };
-            (client, id)
-        };
         let turn = uuid::Uuid::new_v4().to_string();
-        *client.turn_id.lock().map_err(|e| e.to_string())? = turn.clone();
+        let placeholder_thread = existing_thread.clone().unwrap_or_default();
         let mut connection = store.connect()?;
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO gemini_sessions(conversation_id,thread_id,turn_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,?6,'starting') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,turn_id=excluded.turn_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='starting',error=NULL",params![conversation,id,turn,model,install.version,root]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO gemini_sessions(conversation_id,thread_id,turn_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,?6,'starting') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,turn_id=excluded.turn_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='starting',error=NULL",params![conversation,placeholder_thread,turn,model,install.version,root]).map_err(|e|e.to_string())?;
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'gemini')",params![conversation,format!("gemini:input:{turn}"),role,text]).map_err(|e|e.to_string())?;
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'task_start','running','gemini')",params![conversation,format!("gemini:start:{turn}")]).map_err(|e|e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        set_status(store, conversation, &turn, "running", None)?;
-        client.recording.store(true, Ordering::SeqCst);
-        // Save the prompt correlation before writing; completion comes only from its real RPC response.
-        let request_id = client.next.fetch_add(1, Ordering::Relaxed);
-        let (send, receive) = mpsc::channel();
-        client
-            .pending
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(request_id, send);
-        *self.client.lock().map_err(|e| e.to_string())? = Some(client.clone());
-        if let Err(error)=client.write(json!({"jsonrpc":"2.0","id":request_id,"method":"session/prompt","params":{"sessionId":id,"prompt":[{"type":"text","text":text}]}})) {let _=client.stop();return Err(error);}
+        drop(_operation);
+
+        let client_slot = self.client.clone();
+        let operation_lock = self.operation.clone();
+        let db_path = store.path.clone();
+        let conversation_owned = conversation.to_owned();
+        let model_owned = model.to_owned();
+        let text_owned = text.to_owned();
+        let role_owned = role.to_owned();
+        let root_owned = root.to_owned();
+        let turn_bg = turn.clone();
         std::thread::spawn(move || {
-            let outcome = receive.recv_timeout(Duration::from_secs(24 * 60 * 60));
-            let store = Store {
-                path: client.database.clone(),
+            let store = Store { path: db_path };
+            let Ok(_operation) = operation_lock.lock() else {
+                let _ = set_status(&store, &conversation_owned, &turn_bg, "failed", Some("Gemini 运行锁不可用。"));
+                return;
             };
+            let still_starting = session(&store, &conversation_owned)
+                .ok()
+                .is_some_and(|s| s["turn_id"].as_str() == Some(turn_bg.as_str()) && s["status"] == "starting");
+            if !still_starting {
+                return;
+            }
+
+            let launch = (|| -> Result<(Arc<Client>, String, mpsc::Receiver<Reply>), String> {
+                // Reuse the live ACP process when workspace and conversation match.
+                let existing_client = client_slot.lock().map_err(|e| e.to_string())?.clone();
+                let reusable = existing_client.filter(|c| {
+                    c.healthy.load(Ordering::SeqCst)
+                        && c.root == root_owned
+                        && c.conversation == conversation_owned
+                        && role_owned != "assignment"
+                        && !c.session_id.lock().map(|s| s.is_empty()).unwrap_or(true)
+                });
+
+                let (client, id) = if let Some(client) = reusable {
+                    let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
+                    if let Some(cached) = client.cached_models.lock().map_err(|e| e.to_string())?.as_ref() {
+                        if !cached.iter().any(|item| item["model"] == model_owned) {
+                            return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
+                        }
+                    }
+                    let current = client.current_model.lock().map_err(|e| e.to_string())?.clone();
+                    if current != model_owned {
+                        client.request(
+                            "session/set_model",
+                            json!({"sessionId":id,"modelId":model_owned}),
+                            Duration::from_secs(15),
+                        )?;
+                        *client.current_model.lock().map_err(|e| e.to_string())? = model_owned.clone();
+                    }
+                    (client, id)
+                } else {
+                    if let Some(old) = client_slot.lock().map_err(|e| e.to_string())?.take() {
+                        let _ = old.stop();
+                    }
+                    let previous_id = if role_owned == "assignment" {
+                        None
+                    } else {
+                        existing_thread.as_deref()
+                    };
+                    let client = Client::start(&store, &install, &root_owned, &conversation_owned)?;
+                    let setup = (|| -> Reply {
+                        let info = client.metadata(&root_owned, previous_id)?;
+                        let available = models(&info)?;
+                        if !available.iter().any(|item| item["model"] == model_owned) {
+                            return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
+                        }
+                        *client.cached_models.lock().map_err(|e| e.to_string())? = Some(available);
+                        let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
+                        let current_model = info["models"]["currentModelId"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned();
+                        if current_model != model_owned {
+                            client.request(
+                                "session/set_model",
+                                json!({"sessionId":id,"modelId":model_owned}),
+                                Duration::from_secs(15),
+                            )?;
+                        }
+                        *client.current_model.lock().map_err(|e| e.to_string())? = model_owned.clone();
+                        Ok(json!(id))
+                    })();
+                    let id = match setup {
+                        Ok(id) => id.as_str().ok_or("Gemini 会话无效")?.to_owned(),
+                        Err(error) => {
+                            let _ = client.stop();
+                            return Err(error);
+                        }
+                    };
+                    (client, id)
+                };
+
+                *client.turn_id.lock().map_err(|e| e.to_string())? = turn_bg.clone();
+                store
+                    .connect()?
+                    .execute(
+                        "UPDATE gemini_sessions SET thread_id=?3,status='running' WHERE conversation_id=?1 AND turn_id=?2 AND status='starting'",
+                        params![conversation_owned, turn_bg, id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                client.recording.store(true, Ordering::SeqCst);
+                // Save the prompt correlation before writing; completion comes only from its real RPC response.
+                let request_id = client.next.fetch_add(1, Ordering::Relaxed);
+                let (send, receive) = mpsc::channel();
+                client
+                    .pending
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(request_id, send);
+                *client_slot.lock().map_err(|e| e.to_string())? = Some(client.clone());
+                if let Err(error) = client.write(json!({"jsonrpc":"2.0","id":request_id,"method":"session/prompt","params":{"sessionId":id,"prompt":[{"type":"text","text":text_owned}]}})) {
+                    let _ = client.stop();
+                    return Err(error);
+                }
+                Ok((client, id, receive))
+            })();
+
+            let (client, _id, receive) = match launch {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = set_status(&store, &conversation_owned, &turn_bg, "failed", Some(&error));
+                    return;
+                }
+            };
+            drop(_operation);
+
+            let outcome = receive.recv_timeout(Duration::from_secs(24 * 60 * 60));
             let (status, reason): (&str, Option<String>) = match outcome {
                 Ok(Ok(result)) if result["stopReason"] == "end_turn" => ("completed", None),
                 Ok(Ok(result)) if result["stopReason"] == "cancelled" => ("cancelled", None),
@@ -782,8 +830,8 @@ impl Runtime {
             };
             let _ = set_status(
                 &store,
-                &client.conversation,
-                &turn,
+                &conversation_owned,
+                &turn_bg,
                 status,
                 reason.as_deref(),
             );
@@ -797,7 +845,7 @@ impl Runtime {
                 let _ = client.stop();
             }
         });
-        Ok(json!({"thread_id":id}))
+        Ok(json!({"turn_id": turn, "status": "starting"}))
     }
     pub fn approvals(&self, conversation: &str) -> Result<Vec<Value>, String> {
         let slot = self.client.lock().map_err(|e| e.to_string())?;

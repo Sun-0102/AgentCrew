@@ -47,6 +47,7 @@ export default function ChatStage(p: Props) {
   const [files, setFiles] = useState<Attachment[]>(() => drafts.get(scopeKey)?.files ?? []);
   const [reply, setReply] = useState<Reply | null>(() => drafts.get(scopeKey)?.reply ?? null);
   const [sending, setSending] = useState(false);
+  const [optimistic, setOptimistic] = useState<(Message & { scopeKey: string; baselineCount: number })[]>([]);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [panel, setPanel] = useState<"members" | "evidence" | null>(null);
@@ -85,7 +86,9 @@ export default function ChatStage(p: Props) {
   const namedTarget = recipients.length === 1 ? recipients[0] : agent;
   const recipient = namedTarget;
   const ready = group ? recipients.every(id => members.includes(id) && !!p.collaborationModels[id as string]) : !!probe && (!probe.requires_auth || !!probe.auth) && !!model;
-  const visibleMessages = replyBlocks(snapshot, agent);
+  const userMessageCount = snapshot.messages.filter(m => m.role === "user").length;
+  const pendingMessages = optimistic.filter(item => item.scopeKey === scopeKey && userMessageCount <= item.baselineCount);
+  const visibleMessages = replyBlocks({ ...snapshot, messages: [...snapshot.messages, ...pendingMessages] }, agent);
   const records = snapshot.messages.filter(m => m.role !== "user" && m.role !== "assistant");
   const hasMessages = visibleMessages.length > 0;
   const providerWorking = running(snapshot.session?.status);
@@ -96,7 +99,7 @@ export default function ChatStage(p: Props) {
     try { if (text) localStorage.setItem(`ai-gent.draft.${scopeKey}`, text); else localStorage.removeItem(`ai-gent.draft.${scopeKey}`); }
     catch { setError("草稿未能保存，请检查本机存储空间。"); }
   }, [scopeKey, text, files, reply]);
-  useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, snapshot.messages.map(m => `${m.id}:${m.text.length}`).join("|")]);
+  useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, pendingMessages.length, snapshot.messages.map(m => `${m.id}:${m.text.length}`).join("|")]);
   useEffect(() => {
     if (!group || composingBlocked) return;
     if (members.includes(recipient) && recipient !== agent) onAgent(recipient);
@@ -147,22 +150,36 @@ export default function ChatStage(p: Props) {
     if (!desktop) { notify("请在桌面版中发送消息，浏览器预览不会调用 Agent"); return; }
     const targetAgent = recipient;
     if (!members.includes(targetAgent)) { setError("这个 Agent 不在当前群里，请先邀请成员。"); return; }
-    let content = text.trim();
-    if (reply) content = `> 回复 ${reply.author}：${reply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${content}`;
-    for (const file of files) {
+    const draftText = text;
+    const draftFiles = files;
+    const draftReply = reply;
+    let content = draftText.trim();
+    if (draftReply) content = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${content}`;
+    for (const file of draftFiles) {
       const fence = "`".repeat((file.text.match(/`+/g) ?? []).reduce((size, run) => Math.max(size, run.length + 1), 3));
       content += `\n\n文本附件：${file.name}\n${fence}\n${file.text}\n${fence}`;
     }
+    const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const baselineCount = userMessageCount;
+    setText(""); setFiles([]); setReply(null); setSkillQuery(null); setMentions(false);
+    setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: content, created_at: new Date().toISOString(), agent: targetAgent }]);
     setSending(true); setError(null); nearBottom.current = true;
     try {
-      const names = requestedSkills(text);
+      const names = requestedSkills(draftText);
       if (names.length) content += await invoke<string>("skills_prepare", { ...scope, agents: recipients, names });
       if (group) {
         await invoke("agent_group_send", { groupId: scope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content });
       } else await invoke("agent_send", { ...scope, agent, model, serviceTier: provider === "codex" ? p.codexServiceTier ?? "default" : null, reasoningEffort: p.reasoningEffort || null, text: content });
-      setText(""); setFiles([]); setReply(null); setSkillQuery(null); await onRefresh();
+      await onRefresh();
+      setOptimistic(current => current.filter(item => item.id !== optimisticId));
     }
-    catch (cause) { setError(String(cause)); } finally { setSending(false); }
+    catch (cause) {
+      setOptimistic(current => current.filter(item => item.id !== optimisticId));
+      setText(current => current || draftText);
+      setFiles(current => current.length ? current : draftFiles);
+      setReply(current => current ?? draftReply);
+      setError(String(cause));
+    } finally { setSending(false); }
   }
   async function action(command: string, args: Record<string, unknown> = {}, reportFailure = false) {
     setActing(true); setError(null);

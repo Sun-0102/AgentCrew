@@ -22,8 +22,8 @@ const RUNTIME_PATCH: &str = "- id: session-log-deepseek\n  disabled: true\n- id:
 
 #[derive(Default)]
 pub struct Runtime {
-    client: Mutex<Option<Arc<Client>>>,
-    operation: Mutex<()>,
+    client: Arc<Mutex<Option<Arc<Client>>>>,
+    operation: Arc<Mutex<()>>,
 }
 
 // Serializes task admission across both providers. Running work is tracked in SQLite.
@@ -547,10 +547,6 @@ impl Runtime {
         if !existing.is_null() && existing["runtime_version"] != install.version {
             return Err("Harness 版本已变化，请先核对历史会话兼容性。".into());
         }
-        if let Some(old) = self.client.lock().unwrap().take() {
-            let _ = old.request("shutdown", json!({}), Duration::from_secs(5));
-            old.stop()?;
-        }
         let workspace = if conversation == PERSONAL {
             let path = runtime_dir(store)?.join("workspace");
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -580,42 +576,6 @@ impl Runtime {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("ai-gent-deepseek-{}", uuid::Uuid::new_v4()));
-        let client = Client::start(
-            store,
-            &install,
-            workspace,
-            &thread,
-            conversation,
-            model,
-            effort.as_deref(),
-        )?;
-        if !existing.is_null() {
-            if let Err(error) = client.request(
-                "session/resume",
-                json!({"sessionId":thread}),
-                Duration::from_secs(30),
-            ) {
-                let _ = client.stop();
-                return Err(error);
-            }
-        }
-        let root = client.request(
-            "session/working-directory/get",
-            json!({"sessionId":thread}),
-            Duration::from_secs(30),
-        );
-        if !root.as_ref().is_ok_and(|v| {
-            v["cwd"].as_str().is_some_and(|s| {
-                Path::new(s).canonicalize().is_ok_and(|actual| {
-                    Path::new(workspace)
-                        .canonicalize()
-                        .is_ok_and(|expected| actual == expected)
-                })
-            })
-        }) {
-            let _ = client.stop();
-            return Err("Harness 返回的工作目录不匹配，执行已停止。".into());
-        }
         let logical = crate::agents::logical_identity(store, conversation)?;
         let group_conversation = logical.as_ref().map(|(_, id)| id.as_str()).unwrap_or(conversation);
         let prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
@@ -625,7 +585,7 @@ impl Runtime {
         };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'running') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='running',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'starting') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='starting',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
         append_message(
             &tx,
             conversation,
@@ -635,21 +595,96 @@ impl Runtime {
         )?;
         append_message(&tx, conversation, &uuid::Uuid::new_v4().to_string(), "task_start", "running")?;
         tx.commit().map_err(|e| e.to_string())?;
-        *self.client.lock().unwrap() = Some(client.clone());
-        let result = client.request(
-            "session/prompt",
-            json!({"sessionId":thread,"contentBlocks":[{"type":"text","text":prompt}]}),
-            Duration::from_secs(30),
-        );
-        if let Err(error) = result {
-            let _ = client.stop();
-            set_status(store, &thread, "interrupted", Some(&error))?;
-            return Err(error);
-        }
+        drop(_op);
+
+        let client_slot = self.client.clone();
+        let operation_lock = self.operation.clone();
+        let db_path = store.path.clone();
+        let conversation_owned = conversation.to_owned();
+        let workspace_owned = workspace.to_owned();
+        let thread_bg = thread.clone();
+        let model_owned = model.to_owned();
+        let is_resume = !existing.is_null();
         std::thread::spawn(move || {
-            let store = Store {
-                path: client.database.clone(),
+            let store = Store { path: db_path };
+            let Ok(_op) = operation_lock.lock() else {
+                let _ = set_status(&store, &thread_bg, "interrupted", Some("DeepSeek 运行锁不可用。"));
+                return;
             };
+            let still_starting = session(&store, &conversation_owned)
+                .ok()
+                .is_some_and(|s| s["thread_id"].as_str() == Some(thread_bg.as_str()) && s["status"] == "starting");
+            if !still_starting {
+                return;
+            }
+            let launch = (|| -> Result<Arc<Client>, String> {
+                if let Some(old) = client_slot.lock().unwrap().take() {
+                    let _ = old.request("shutdown", json!({}), Duration::from_secs(5));
+                    old.stop()?;
+                }
+                let client = Client::start(
+                    &store,
+                    &install,
+                    &workspace_owned,
+                    &thread_bg,
+                    &conversation_owned,
+                    &model_owned,
+                    effort.as_deref(),
+                )?;
+                if is_resume {
+                    if let Err(error) = client.request(
+                        "session/resume",
+                        json!({"sessionId":thread_bg}),
+                        Duration::from_secs(30),
+                    ) {
+                        let _ = client.stop();
+                        return Err(error);
+                    }
+                }
+                let root = client.request(
+                    "session/working-directory/get",
+                    json!({"sessionId":thread_bg}),
+                    Duration::from_secs(30),
+                );
+                if !root.as_ref().is_ok_and(|v| {
+                    v["cwd"].as_str().is_some_and(|s| {
+                        Path::new(s).canonicalize().is_ok_and(|actual| {
+                            Path::new(&workspace_owned)
+                                .canonicalize()
+                                .is_ok_and(|expected| actual == expected)
+                        })
+                    })
+                }) {
+                    let _ = client.stop();
+                    return Err("Harness 返回的工作目录不匹配，执行已停止。".into());
+                }
+                store
+                    .connect()?
+                    .execute(
+                        "UPDATE deepseek_sessions SET status='running' WHERE thread_id=?1 AND status='starting'",
+                        params![thread_bg],
+                    )
+                    .map_err(|e| e.to_string())?;
+                *client_slot.lock().unwrap() = Some(client.clone());
+                if let Err(error) = client.request(
+                    "session/prompt",
+                    json!({"sessionId":thread_bg,"contentBlocks":[{"type":"text","text":prompt}]}),
+                    Duration::from_secs(30),
+                ) {
+                    let _ = client.stop();
+                    return Err(error);
+                }
+                Ok(client)
+            })();
+            let client = match launch {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = set_status(&store, &thread_bg, "interrupted", Some(&error));
+                    return;
+                }
+            };
+            drop(_op);
+
             match client.request(
                 "session/wait",
                 json!({"sessionId":client.thread}),
@@ -667,7 +702,7 @@ impl Runtime {
                 }
             }
         });
-        Ok(json!({"thread_id":thread}))
+        Ok(json!({"thread_id":thread, "status":"starting"}))
     }
     pub fn cancel(&self, store: &Store) -> Reply {
         self.cancel_in(store, PERSONAL)
