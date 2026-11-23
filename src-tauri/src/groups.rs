@@ -240,6 +240,60 @@ impl Store {
         self.group(id)
     }
 
+    pub fn delete_group(&self, id: &str) -> Result<(), String> {
+        let mut connection = self.connect()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_groups WHERE conversation_id=?1 AND parent_group_id IS NULL)",
+            [id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !exists { return Err("群聊不存在或已删除。".into()); }
+        // Include the parent even when its default session has already been deleted.
+        let conversations = {
+            let mut statement = tx.prepare(
+                "SELECT ?1 UNION SELECT conversation_id FROM group_sessions WHERE group_id=?1 UNION SELECT conversation_id FROM chat_groups WHERE parent_group_id=?1",
+            ).map_err(|e| e.to_string())?;
+            let rows = statement.query_map([id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        };
+        // Check every conversation before removing any provider bindings.
+        for conversation in &conversations {
+            let busy: bool = tx.query_row(
+                "WITH session_ids AS (SELECT ?1 AS id UNION SELECT runtime_conversation_id FROM agent_sessions WHERE conversation_id=?1)
+                 SELECT EXISTS(SELECT 1 FROM group_tasks WHERE conversation_id=?1 AND status IN ('running','paused','cancelling'))
+                 OR EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id IN (SELECT id FROM session_ids) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))
+                 OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id IN (SELECT id FROM session_ids) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))
+                 OR EXISTS(SELECT 1 FROM gemini_sessions WHERE conversation_id IN (SELECT id FROM session_ids) AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",
+                [conversation], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if busy { return Err("请先完成或取消群内所有任务（含暂停或停止中的任务），再删除群。".into()); }
+        }
+        for conversation in &conversations {
+            crate::agents::clear_bindings(&tx, conversation)?;
+            for table in ["group_task_steps", "group_task_inputs", "group_task_members"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE task_id IN (SELECT id FROM group_tasks WHERE conversation_id=?1)"), [conversation])
+                    .map_err(|e| e.to_string())?;
+            }
+            for table in ["group_tasks", "group_message_summaries", "codex_messages", "codex_sessions", "deepseek_sessions", "gemini_sessions", "reasoning_preferences", "speed_preferences", "group_sessions"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE conversation_id=?1"), [conversation])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.execute("DELETE FROM chat_groups WHERE parent_group_id=?1", [id]).map_err(|e| e.to_string())?;
+        for conversation in &conversations {
+            if conversation != id {
+                tx.execute("DELETE FROM conversations WHERE id=?1", [conversation]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.execute("DELETE FROM chat_groups WHERE conversation_id=?1", [id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM conversations WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        // Project files, workspaces, image caches and native transcripts remain on disk.
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     pub fn resolve_chat(
         &self,
         project: Option<&str>,

@@ -119,6 +119,7 @@ pub fn run() {
             commands::group_list,
             commands::group_create,
             commands::group_update,
+            commands::group_delete,
             commands::group_session_list,
             commands::group_session_create,
             commands::group_session_update,

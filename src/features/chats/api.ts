@@ -114,6 +114,18 @@ export async function saveGroup(name: string, members: string[], projectId: stri
   localStorage.setItem(previewKey, JSON.stringify([group, ...groups.filter(g => g.id !== group.id)]));
   return group;
 }
+export async function deleteGroup(id: string) {
+  if (desktop) return invoke<void>("group_delete", { id });
+  const groups = await getGroups();
+  if (!groups.some(group => group.id === id)) throw new Error("群聊不存在或已删除。");
+  const all = readPreview<Record<string, GroupSession[]>>(previewSessionsKey, {});
+  const messages = readPreview<Record<string, Message[]>>(previewMessagesKey, {});
+  for (const conversationId of [id, ...(all[id] ?? []).map(session => session.id)]) delete messages[conversationId];
+  delete all[id];
+  localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
+  localStorage.setItem(previewSessionsKey, JSON.stringify(all));
+  localStorage.setItem(previewKey, JSON.stringify(groups.filter(group => group.id !== id)));
+}
 export async function deleteGroupSession(groupId: string, id: string) {
   if (desktop) return invoke<void>("group_session_delete", { groupId, id });
   const list = await getGroupSessions(groupId);

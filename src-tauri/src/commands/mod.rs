@@ -493,6 +493,17 @@ pub async fn group_session_delete(app: tauri::AppHandle, group_id: String, id: S
 }
 
 #[tauri::command]
+pub async fn group_delete(app: tauri::AppHandle, id: String) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        store.delete_group(&id)?;
+        Ok(Value::Null)
+    }).await
+}
+
+#[tauri::command]
 pub async fn private_session_list(app: tauri::AppHandle, agent_id: String) -> Result<Value, String> {
     codex_call(app, move |_, store| {
         serde_json::to_value(store.private_sessions(&agent_id)?).map_err(|e| e.to_string())
