@@ -38,6 +38,7 @@ fn command(path: &Path) -> Command {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
+    crate::process::apply_system_proxy(&mut cmd);
     cmd
 }
 

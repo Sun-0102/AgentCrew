@@ -123,6 +123,7 @@ fn command(executable: &Path) -> Command {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+    crate::process::apply_system_proxy(&mut command);
     command
 }
 

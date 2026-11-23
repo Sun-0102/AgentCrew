@@ -40,15 +40,31 @@ export interface Snapshot {
 // In runtime commands groupId identifies the selected execution conversation, including the default session.
 export interface Scope { projectId: string | null; groupId: string | null; sessionId?: string | null; agent?: string }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
-export interface Agent { id: string; name: string; description: string; provider_kind: string; runtime_kind?: string; available: boolean; registration_state: string; availability: string; enabled: boolean; runtime_version?: string | null; error?: string | null }
-export let agents: Agent[] = (desktop ? [] : ["codex", "deepseek"]).map(id => ({ id, name: id === "codex" ? "Codex" : "DeepSeek", description: "本机运行组件", provider_kind: id, available: !desktop, registration_state: "active", availability: "checking", enabled: true }));
+export interface Agent { id: string; name: string; description: string; provider_kind: string; runtime_kind?: string; available: boolean; connected: boolean; registration_state: string; availability: string; enabled: boolean; runtime_version?: string | null; error?: string | null }
+export interface DiscoveryItem { provider_kind: string; display_name: string; status: "connected" | "needs_auth" | "unavailable"; version: string | null; executable: string | null; model_count: number; message: string }
+export let agents: Agent[] = (desktop ? [] : ["codex", "deepseek"]).map(id => ({ id, name: id === "codex" ? "Codex" : "DeepSeek", description: "本机运行组件", provider_kind: id, available: !desktop, connected: !desktop, registration_state: "active", availability: desktop ? "checking" : "ready", enabled: true }));
 const registryListeners = new Set<() => void>();
 let registryRequest: Promise<void> | undefined;
 export async function refreshAgents() {
   if (!desktop) return;
-  const rows = await invoke<(Omit<Agent, "name" | "description" | "available"> & {display_name: string})[]>("agent_list");
-  agents = rows.map(row => ({ ...row, name: row.display_name, description: row.error ?? `${row.provider_kind} · ${row.availability === "ready" ? "可接任务" : row.availability === "checking" ? "等待检查" : "需要处理"}`, available: row.enabled && row.registration_state === "active" }));
+  const rows = await invoke<(Omit<Agent, "name" | "description" | "available" | "connected"> & {display_name: string})[]>("agent_list");
+  agents = rows.map(row => {
+    const available = row.enabled && row.registration_state === "active";
+    const connected = available && (row.availability === "ready" || row.availability === "checking");
+    return { ...row, name: row.display_name, description: row.error ?? `${row.provider_kind} · ${row.availability === "ready" ? "已连接" : row.availability === "checking" ? "正在连接…" : "未连接"}`, available, connected };
+  });
   registryListeners.forEach(listener => listener());
+}
+export async function autoDiscoverAgents(autoEnable = true): Promise<DiscoveryItem[]> {
+  if (!desktop) {
+    return [
+      { provider_kind: "codex", display_name: "Codex", status: "connected", version: "preview", executable: null, model_count: 1, message: "浏览器预览模式" },
+      { provider_kind: "deepseek", display_name: "DeepSeek", status: "connected", version: "preview", executable: null, model_count: 1, message: "浏览器预览模式" },
+    ];
+  }
+  const results = await invoke<DiscoveryItem[]>("agent_auto_discover", { autoEnable });
+  await refreshAgents();
+  return results;
 }
 export function useAgents() {
   return useSyncExternalStore(listener => { registryListeners.add(listener); return () => { registryListeners.delete(listener); }; }, () => agents);

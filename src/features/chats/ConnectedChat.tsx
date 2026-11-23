@@ -8,9 +8,20 @@ import { selectedSpeed } from "./speed";
 type Props = Pick<ComponentProps<typeof ChatStage>, "scope" | "scopeKey" | "title" | "group" | "project" | "agent" | "snapshot" | "onAgent" | "onInvite" | "onSettings" | "onRefresh" | "notify" | "session" | "onGroups" | "onRenameSession" | "onArchiveSession" | "sessionSaving" | "onDeleteSession" | "onGroupUpdated"> & { legacyProbes: Partial<Record<string, Probe | null>>; onConnectLegacy: Partial<Record<string, () => void>>; legacyConnecting: Partial<Record<string, boolean>> };
 interface Preferences { models: Record<string,string>; efforts: Record<string,string>; tiers: Record<string,string> }
 
+const probeCacheKey = "ai-gent.probe-cache.v1";
+
+function readProbeCache(): Record<string, Probe> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(probeCacheKey) ?? "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
 export default function ConnectedChat(p: Props) {
   const registry = useAgents();
-  const [probes, setProbes] = useState<Record<string,Probe>>({});
+  const [probes, setProbes] = useState<Record<string,Probe>>(readProbeCache);
   const [connecting, setConnecting] = useState<Record<string,boolean>>({});
   const [error, setError] = useState("");
   const [preferences, setPreferences] = useState<Preferences>(() => {
@@ -28,10 +39,20 @@ export default function ConnectedChat(p: Props) {
   async function connect(id: string) {
     const connectLegacy=p.onConnectLegacy[id];
     if (connectLegacy) {connectLegacy();return;}
-    setConnecting(current => ({...current,[id]:true}));setError("");
-    try {const probe=await invoke<Probe>("agent_probe",{agent:id});setProbes(current=>({...current,[id]:probe}));await refreshAgents();}
+    const hasCached = !!probes[id]?.models?.length;
+    if (!hasCached) setConnecting(current => ({...current,[id]:true}));
+    setError("");
+    try {
+      const probe=await invoke<Probe>("agent_probe",{agent:id});
+      setProbes(current=>{
+        const next={...current,[id]:probe};
+        try { localStorage.setItem(probeCacheKey, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      await refreshAgents();
+    }
     catch(cause) {setError(String(cause));}
-    finally {setConnecting(current=>({...current,[id]:false}));}
+    finally {if (!hasCached) setConnecting(current=>({...current,[id]:false}));}
   }
   useEffect(() => {
     if (!desktop) return;

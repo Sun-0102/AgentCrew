@@ -23,6 +23,26 @@ pub struct Agent {
     pub error: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct DiscoveryItem {
+    pub provider_kind: String,
+    pub display_name: String,
+    pub status: String,
+    pub version: Option<String>,
+    pub executable: Option<String>,
+    pub model_count: usize,
+    pub message: String,
+}
+
+pub fn default_display_name(kind: &str) -> &'static str {
+    match kind {
+        "codex" => "Codex",
+        "deepseek" => "DeepSeek",
+        "gemini" => "Gemini",
+        _ => "Agent",
+    }
+}
+
 pub fn runtime_kind(provider: &str) -> Option<&'static str> {
     PROVIDERS
         .iter()
@@ -300,6 +320,151 @@ pub fn record_probe(store: &Store, id: &str, result: &Result<Value, String>) -> 
         }
     }
     Ok(())
+}
+
+pub fn auto_discover(
+    app: &tauri::AppHandle,
+    store: &Store,
+    auto_enable: bool,
+) -> Result<Vec<DiscoveryItem>, String> {
+    let mut items = Vec::new();
+    for (kind, runtime) in PROVIDERS {
+        let display_name = default_display_name(kind).to_owned();
+        if *kind == "deepseek" && crate::deepseek::ensure_idle(store).is_err() {
+            let current = list(store)?.into_iter().find(|a| a.provider_kind == *kind);
+            let is_ready = current
+                .as_ref()
+                .map(|a| a.enabled && a.registration_state == "active" && a.availability == "ready")
+                .unwrap_or(false);
+            items.push(DiscoveryItem {
+                provider_kind: (*kind).to_owned(),
+                display_name,
+                status: if is_ready { "connected" } else { "unavailable" }.to_owned(),
+                version: current.and_then(|a| a.runtime_version),
+                executable: None,
+                model_count: 0,
+                message: "当前有任务正在执行，保留现有连接状态。".to_owned(),
+            });
+            continue;
+        }
+        let result = probe(app, store, kind);
+        match result {
+            Ok(ref info) => {
+                let needs_auth = info["requires_auth"] == true && info["auth"].is_null();
+                let availability = if needs_auth { "degraded" } else { "ready" };
+                let err_msg: Option<&str> = if needs_auth {
+                    Some("请先完成原厂登录；认证与额度以真实执行为准。")
+                } else {
+                    None
+                };
+                let caps = capabilities(kind, info).to_string();
+                let version = info["version"].as_str().map(str::to_owned);
+                let executable = info["executable"].as_str().map(str::to_owned);
+                let model_count = info["models"].as_array().map(|m| m.len()).unwrap_or(0);
+                {
+                    let connection = store.connect()?;
+                    let existing: Option<(String, bool)> = connection
+                        .query_row(
+                            "SELECT registration_state, enabled FROM agents WHERE id=?1",
+                            [*kind],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    match existing {
+                        None => {
+                            let has_other_active: bool = connection
+                                .query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM agents WHERE provider_kind=?1 AND registration_state='active' AND enabled=1)",
+                                    [*kind],
+                                    |r| r.get(0),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            if !has_other_active {
+                                connection
+                                    .execute(
+                                        "INSERT INTO agents(id,display_name,provider_kind,runtime_kind,registration_state,availability,enabled,source,runtime_version,executable_path,capabilities,error,updated_at) VALUES(?1,?2,?3,?4,'active',?5,1,'auto',?6,?7,?8,?9,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                                        params![
+                                            *kind,
+                                            &display_name,
+                                            *kind,
+                                            *runtime,
+                                            availability,
+                                            version.as_deref(),
+                                            executable.as_deref(),
+                                            &caps,
+                                            err_msg
+                                        ],
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                        Some((reg_state, enabled)) => {
+                            if auto_enable || (reg_state == "active" && enabled) {
+                                connection
+                                    .execute(
+                                        "UPDATE agents SET registration_state='active',enabled=1,availability=?2,runtime_version=?3,executable_path=?4,capabilities=?5,error=?6,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                                        params![
+                                            *kind,
+                                            availability,
+                                            version.as_deref(),
+                                            executable.as_deref(),
+                                            &caps,
+                                            err_msg
+                                        ],
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
+                if let Ok(registry) = list(store) {
+                    for agent in registry.iter().filter(|a| {
+                        a.id != *kind
+                            && a.provider_kind == *kind
+                            && a.enabled
+                            && a.registration_state == "active"
+                    }) {
+                        let _ = record_probe(store, &agent.id, &result);
+                    }
+                }
+                items.push(DiscoveryItem {
+                    provider_kind: (*kind).to_owned(),
+                    display_name,
+                    status: if needs_auth { "needs_auth" } else { "connected" }.to_owned(),
+                    version,
+                    executable,
+                    model_count,
+                    message: if needs_auth {
+                        "已检测到本机组件，请先完成原厂登录后即可使用。".to_owned()
+                    } else if model_count > 0 {
+                        format!("已自动连接 · {model_count} 个模型")
+                    } else {
+                        "已自动连接".to_owned()
+                    },
+                });
+            }
+            Err(_) => {
+                if let Ok(registry) = list(store) {
+                    for agent in registry.iter().filter(|a| {
+                        a.provider_kind == *kind && a.enabled && a.registration_state == "active"
+                    }) {
+                        let _ = record_probe(store, &agent.id, &result);
+                    }
+                }
+                items.push(DiscoveryItem {
+                    provider_kind: (*kind).to_owned(),
+                    display_name,
+                    status: "unavailable".to_owned(),
+                    version: None,
+                    executable: None,
+                    model_count: 0,
+                    message: "未检测到本机可用组件".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(items)
 }
 
 pub fn clear_bindings(connection: &rusqlite::Connection, conversation: &str) -> Result<(), String> {

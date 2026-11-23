@@ -20,6 +20,7 @@ const ACTIVE: &str = "('starting','running','waiting_approval','cancel_requested
 pub struct Runtime {
     client: Mutex<Option<Arc<Client>>>,
     operation: Mutex<()>,
+    cached_probe: Mutex<Option<Value>>,
 }
 
 fn command(program: &Path) -> Command {
@@ -34,19 +35,91 @@ fn command(program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    crate::process::apply_system_proxy(&mut command);
     command
 }
 
+enum Launch {
+    Agy(PathBuf),
+    GeminiCli { node: PathBuf, entry: PathBuf },
+}
+
 struct Installation {
-    node: PathBuf,
-    entry: PathBuf,
+    launch: Launch,
+    executable: PathBuf,
     version: String,
 }
 impl Installation {
     fn find() -> Result<Self, String> {
-        let paths = std::env::var_os("PATH")
+        let mut paths = std::env::var_os("PATH")
             .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
             .unwrap_or_default();
+        #[cfg(unix)]
+        {
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                for extra in [
+                    home.join(".local/bin"),
+                    home.join(".gemini/antigravity/bin"),
+                    home.join("Library/Application Support/Antigravity/bin"),
+                ] {
+                    if extra.is_dir() {
+                        paths.push(extra);
+                    }
+                }
+                let nvm_root = home.join(".nvm/versions/node");
+                if let Ok(entries) = std::fs::read_dir(&nvm_root) {
+                    let mut nvm_bins: Vec<PathBuf> = entries
+                        .flatten()
+                        .map(|entry| entry.path().join("bin"))
+                        .filter(|p| p.is_dir())
+                        .collect();
+                    nvm_bins.sort();
+                    nvm_bins.reverse();
+                    paths.extend(nvm_bins);
+                }
+                for extra in [
+                    home.join(".npm-global/bin"),
+                    home.join(".volta/bin"),
+                    home.join("Library/pnpm"),
+                ] {
+                    if extra.is_dir() {
+                        paths.push(extra);
+                    }
+                }
+            }
+            for extra in [PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")] {
+                if extra.is_dir() {
+                    paths.push(extra);
+                }
+            }
+        }
+        // Prefer Antigravity CLI (`agy acp`) when installed.
+        let agy_name = if cfg!(windows) { "agy.exe" } else { "agy" };
+        for dir in &paths {
+            let candidate = dir.join(agy_name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let executable = candidate.canonicalize().unwrap_or(candidate);
+            let Ok(output) = command(&executable).arg("--version").bounded_output() else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let version = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .trim_start_matches('v')
+                .to_owned();
+            if version.is_empty() {
+                continue;
+            }
+            return Ok(Self {
+                launch: Launch::Agy(executable.clone()),
+                executable,
+                version,
+            });
+        }
         let mut roots = Vec::new();
         // This is explicit local configuration, never a path supplied over HTTP.
         if let Some(root) = std::env::var_os("AI_GENT_GEMINI_PACKAGE") {
@@ -120,12 +193,12 @@ impl Installation {
                 );
             }
             return Ok(Self {
-                node,
-                entry,
+                executable: entry.clone(),
+                launch: Launch::GeminiCli { node, entry },
                 version,
             });
         }
-        Err("runtime_not_found：未发现官方 Gemini CLI。此电脑未安装时不能接入；应用不会安装 Gemini 或改用 Codex 执行。".into())
+        Err("runtime_not_found：未发现 Antigravity CLI (agy) 或 Gemini CLI。".into())
     }
 }
 
@@ -138,11 +211,14 @@ struct Client {
     healthy: AtomicBool,
     recording: AtomicBool,
     database: PathBuf,
+    root: String,
     conversation: String,
     session_id: Mutex<String>,
     turn_id: Mutex<String>,
     message_id: Mutex<Option<String>>,
     capabilities: Mutex<Value>,
+    current_model: Mutex<String>,
+    cached_models: Mutex<Option<Vec<Value>>>,
     #[cfg(any(windows, unix))]
     job: codex::ProcessJob,
 }
@@ -154,15 +230,25 @@ impl Client {
         root: &str,
         conversation: &str,
     ) -> Result<Arc<Self>, String> {
-        let mut child = command(&install.node)
-            .arg(&install.entry)
-            .args(["--acp", "--approval-mode", "default"])
+        let mut cmd = match &install.launch {
+            Launch::Agy(bin) => {
+                let mut c = command(bin);
+                c.arg("acp");
+                c
+            }
+            Launch::GeminiCli { node, entry } => {
+                let mut c = command(node);
+                c.arg(entry).args(["--acp", "--approval-mode", "default"]);
+                c
+            }
+        };
+        let mut child = cmd
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|_| "无法启动 Gemini CLI ACP：请检查本机安装及权限。")?;
+            .map_err(|_| "无法启动 Gemini / Antigravity ACP：请检查本机安装及权限。")?;
         #[cfg(any(windows, unix))]
         let job = match codex::ProcessJob::attach(&child) {
             Ok(job) => job,
@@ -184,11 +270,14 @@ impl Client {
             healthy: AtomicBool::new(true),
             recording: AtomicBool::new(false),
             database: store.path.clone(),
+            root: root.into(),
             conversation: conversation.into(),
             session_id: Mutex::new(String::new()),
             turn_id: Mutex::new(String::new()),
             message_id: Mutex::new(None),
             capabilities: Mutex::new(Value::Null),
+            current_model: Mutex::new(String::new()),
+            cached_models: Mutex::new(None),
             #[cfg(any(windows, unix))]
             job,
         });
@@ -224,9 +313,16 @@ impl Client {
         match result {
             Ok(info)
                 if info["protocolVersion"] == 1
-                    && info["agentInfo"]["name"] == "gemini-cli"
-                    && info["agentInfo"]["version"] == install.version
-                    && info["agentCapabilities"]["loadSession"] == true =>
+                    && info["agentCapabilities"]["loadSession"] == true
+                    && match &install.launch {
+                        Launch::Agy(_) => info["agentInfo"]["name"]
+                            .as_str()
+                            .is_some_and(|n| n.to_lowercase().contains("antigravity")),
+                        Launch::GeminiCli { .. } => {
+                            info["agentInfo"]["name"] == "gemini-cli"
+                                && info["agentInfo"]["version"] == install.version
+                        }
+                    } =>
             {
                 *client.capabilities.lock().map_err(|e| e.to_string())? =
                     info["agentCapabilities"].clone();
@@ -234,7 +330,7 @@ impl Client {
             }
             _ => {
                 let _ = client.stop();
-                Err("runtime_identity_mismatch：组件不是兼容的官方 Gemini CLI ACP v1，或版本/身份不一致。未调用模型。".into())
+                Err("runtime_identity_mismatch：组件不是兼容的 Antigravity / Gemini ACP v1，或版本/身份不一致。未调用模型。".into())
             }
         }
     }
@@ -493,7 +589,11 @@ pub fn recover(store: &Store) -> Result<(), String> {
 impl Runtime {
     pub fn probe(&self, store: &Store) -> Reply {
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
-        crate::deepseek::ensure_idle(store)?;
+        if let Some(cached) = self.cached_probe.lock().map_err(|e| e.to_string())?.as_ref() {
+            if cached["auth"].is_string() {
+                return Ok(cached.clone());
+            }
+        }
         let install = Installation::find()?;
         let root = store
             .path
@@ -509,15 +609,28 @@ impl Runtime {
             "",
         )?;
         let result: Reply = (|| {
-            let info = client.metadata(root.to_str().ok_or("Gemini 工作目录无效")?, None)?;
-            let models = models(&info)?;
-            Ok(
-                json!({"version":install.version,"executable":install.entry,"runtime_kind":"gemini-cli-acp","auth":"Gemini CLI 原厂登录（模型额度在真实执行时确认）","requires_auth":true,"models":models,"sidebar_warning":null,"capabilities":{"resume":client.capabilities.lock().map_err(|e|e.to_string())?["loadSession"]==true,"cancel":true,"approval":true,"tools":true,"workspace_isolation":false}}),
-            )
+            let caps = json!({"resume":client.capabilities.lock().map_err(|e|e.to_string())?["loadSession"]==true,"cancel":true,"approval":true,"tools":true,"workspace_isolation":false});
+            let auth_label = match &install.launch {
+                Launch::Agy(_) => "Antigravity (agy) 原厂登录",
+                Launch::GeminiCli { .. } => "Gemini CLI 原厂登录（模型额度在真实执行时确认）",
+            };
+            match client.metadata(root.to_str().ok_or("Gemini 工作目录无效")?, None) {
+                Ok(info) => {
+                    let models = models(&info)?;
+                    Ok(json!({"version":install.version,"executable":install.executable,"runtime_kind":"gemini-cli-acp","auth":auth_label,"requires_auth":true,"models":models,"sidebar_warning":null,"capabilities":caps}))
+                }
+                Err(err) if err.starts_with("authentication_failed") => Ok(
+                    json!({"version":install.version,"executable":install.executable,"runtime_kind":"gemini-cli-acp","auth":Value::Null,"requires_auth":true,"models":[],"sidebar_warning":null,"capabilities":caps}),
+                ),
+                Err(err) => Err(err),
+            }
         })();
         let stopped = client.stop();
         let result = result?;
         stopped?;
+        if result["auth"].is_string() {
+            *self.cached_probe.lock().map_err(|e| e.to_string())? = Some(result.clone());
+        }
         Ok(result)
     }
     pub fn send_recorded(
@@ -543,9 +656,6 @@ impl Runtime {
         if busy {
             return Err("Gemini 已有任务正在执行，请等待或取消。".into());
         }
-        if let Some(old) = self.client.lock().map_err(|e| e.to_string())?.take() {
-            old.stop()?;
-        }
         let root = PathBuf::from(store.conversation_root(conversation)?)
             .canonicalize()
             .map_err(|e| format!("Gemini 工作目录不可用：{e}"))?;
@@ -558,33 +668,74 @@ impl Runtime {
         {
             return Err("Gemini 运行版本或工作目录与历史不一致，未恢复错误会话。".into());
         }
-        let previous = if role == "assignment" {
-            None
-        } else {
-            previous["thread_id"].as_str()
-        };
-        let client = Client::start(store, &install, root, conversation)?;
-        let setup = (|| -> Reply {
-            let info = client.metadata(root, previous)?;
-            if !models(&info)?.iter().any(|item| item["model"] == model) {
-                return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
-            }
+
+        // Reuse the live ACP process when workspace and conversation match.
+        let existing_client = self.client.lock().map_err(|e| e.to_string())?.clone();
+        let reusable = existing_client.filter(|c| {
+            c.healthy.load(Ordering::SeqCst)
+                && c.root == root
+                && c.conversation == conversation
+                && role != "assignment"
+                && !c.session_id.lock().map(|s| s.is_empty()).unwrap_or(true)
+        });
+
+        let (client, id) = if let Some(client) = reusable {
             let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
-            if info["models"]["currentModelId"] != model {
+            if let Some(cached) = client.cached_models.lock().map_err(|e| e.to_string())?.as_ref() {
+                if !cached.iter().any(|item| item["model"] == model) {
+                    return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
+                }
+            }
+            let current = client.current_model.lock().map_err(|e| e.to_string())?.clone();
+            if current != model {
                 client.request(
                     "session/set_model",
                     json!({"sessionId":id,"modelId":model}),
                     Duration::from_secs(15),
                 )?;
+                *client.current_model.lock().map_err(|e| e.to_string())? = model.to_owned();
             }
-            Ok(json!(id))
-        })();
-        let id = match setup {
-            Ok(id) => id.as_str().ok_or("Gemini 会话无效")?.to_owned(),
-            Err(error) => {
-                let _ = client.stop();
-                return Err(error);
+            (client, id)
+        } else {
+            if let Some(old) = self.client.lock().map_err(|e| e.to_string())?.take() {
+                let _ = old.stop();
             }
+            let previous_id = if role == "assignment" {
+                None
+            } else {
+                previous["thread_id"].as_str()
+            };
+            let client = Client::start(store, &install, root, conversation)?;
+            let setup = (|| -> Reply {
+                let info = client.metadata(root, previous_id)?;
+                let available = models(&info)?;
+                if !available.iter().any(|item| item["model"] == model) {
+                    return Err("Gemini 实际目录中没有所选模型，未切换到其他模型。".into());
+                }
+                *client.cached_models.lock().map_err(|e| e.to_string())? = Some(available);
+                let id = client.session_id.lock().map_err(|e| e.to_string())?.clone();
+                let current_model = info["models"]["currentModelId"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                if current_model != model {
+                    client.request(
+                        "session/set_model",
+                        json!({"sessionId":id,"modelId":model}),
+                        Duration::from_secs(15),
+                    )?;
+                }
+                *client.current_model.lock().map_err(|e| e.to_string())? = model.to_owned();
+                Ok(json!(id))
+            })();
+            let id = match setup {
+                Ok(id) => id.as_str().ok_or("Gemini 会话无效")?.to_owned(),
+                Err(error) => {
+                    let _ = client.stop();
+                    return Err(error);
+                }
+            };
+            (client, id)
         };
         let turn = uuid::Uuid::new_v4().to_string();
         *client.turn_id.lock().map_err(|e| e.to_string())? = turn.clone();
@@ -642,7 +793,9 @@ impl Runtime {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
-            let _ = client.stop();
+            if status != "completed" {
+                let _ = client.stop();
+            }
         });
         Ok(json!({"thread_id":id}))
     }

@@ -69,3 +69,84 @@ impl BoundedOutput for Command {
         })
     }
 }
+
+/// Inherits macOS system proxy settings for GUI-launched child processes when proxy env vars are absent.
+pub fn apply_system_proxy(command: &mut Command) {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var_os("HTTPS_PROXY").is_some()
+            || std::env::var_os("https_proxy").is_some()
+            || std::env::var_os("HTTP_PROXY").is_some()
+            || std::env::var_os("http_proxy").is_some()
+        {
+            return;
+        }
+        let Ok(output) = Command::new("/usr/sbin/scutil").arg("--proxy").output() else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let value = |key: &str| -> Option<String> {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.trim() == key {
+                    Some(v.trim().to_owned())
+                } else {
+                    None
+                }
+            })
+        };
+        let http_url = if value("HTTPEnable").as_deref() == Some("1") {
+            match (value("HTTPProxy"), value("HTTPPort")) {
+                (Some(host), Some(port)) if !host.is_empty() && !port.is_empty() => {
+                    Some(format!("http://{host}:{port}"))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let https_url = if value("HTTPSEnable").as_deref() == Some("1") {
+            match (value("HTTPSProxy"), value("HTTPSPort")) {
+                (Some(host), Some(port)) if !host.is_empty() && !port.is_empty() => {
+                    Some(format!("http://{host}:{port}"))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let socks_url = if value("SOCKSEnable").as_deref() == Some("1") {
+            match (value("SOCKSProxy"), value("SOCKSPort")) {
+                (Some(host), Some(port)) if !host.is_empty() && !port.is_empty() => {
+                    Some(format!("socks5://{host}:{port}"))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut applied = false;
+        if let Some(ref url) = http_url {
+            command.env("HTTP_PROXY", url).env("http_proxy", url);
+            applied = true;
+        }
+        if let Some(ref url) = https_url {
+            command.env("HTTPS_PROXY", url).env("https_proxy", url);
+            applied = true;
+        }
+        if let Some(url) = socks_url.or(https_url).or(http_url) {
+            command.env("ALL_PROXY", &url).env("all_proxy", &url);
+            applied = true;
+        }
+        if applied && std::env::var_os("NO_PROXY").is_none() && std::env::var_os("no_proxy").is_none() {
+            command
+                .env("NO_PROXY", "localhost,127.0.0.1,::1")
+                .env("no_proxy", "localhost,127.0.0.1,::1");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = command;
+}

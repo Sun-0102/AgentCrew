@@ -10,6 +10,19 @@ pub fn agent_list(store: tauri::State<'_, Store>) -> Result<Vec<agents::Agent>, 
 }
 
 #[tauri::command]
+pub async fn agent_auto_discover(
+    app: tauri::AppHandle,
+    auto_enable: Option<bool>,
+) -> Result<Vec<agents::DiscoveryItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        agents::auto_discover(&app, &store, auto_enable.unwrap_or(true))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn pairing_create(
     app: tauri::AppHandle,
     display_name: String,
@@ -125,9 +138,14 @@ pub async fn agent_send(
     service_tier: Option<String>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let gate = app.state::<crate::deepseek::ExecutionGate>();
-        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         let store = app.state::<Store>();
+        let kind = agents::ensure_enabled(&store, &agent)?;
+        let gate = app.state::<crate::deepseek::ExecutionGate>();
+        let _guard = if kind == "deepseek" {
+            Some(gate.0.lock().map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
         if store
             .connect()?
             .query_row("SELECT paused FROM app_controls WHERE id=1", [], |r| {
@@ -138,13 +156,14 @@ pub async fn agent_send(
             return Err("所有派发已暂停，请先继续。".into());
         }
         crate::collaboration::manual_send(&store, &model, &text)?;
-        crate::deepseek::ensure_idle(&store)?;
+        if kind == "deepseek" {
+            crate::deepseek::ensure_idle(&store)?;
+        }
         let id = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
         if session_id.is_some() {
             store.ensure_private_session_open(&id)?;
         }
         let runtime = agents::binding(&store, &agent, &id)?;
-        let kind = agents::ensure_enabled(&store, &agent)?;
         crate::reasoning::save(&store, &runtime, &kind, &model, reasoning_effort.as_deref())?;
         if kind == "codex" {
             crate::speed::save(&store, &runtime, &model, service_tier.as_deref())?;

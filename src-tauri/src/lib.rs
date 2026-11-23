@@ -52,14 +52,7 @@ pub fn run() {
                     let gate=bootstrap.state::<deepseek::ExecutionGate>();
                     let _guard=gate.0.lock().unwrap_or_else(|e|e.into_inner());
                     let store=bootstrap.state::<storage::Store>();
-                    if let Ok(registry)=agents::list(&store) {
-                        for (kind,_) in agents::PROVIDERS {
-                            if registry.iter().any(|a|a.provider_kind==*kind && a.enabled && a.registration_state=="active") {
-                                let result=agents::probe(&bootstrap,&store,kind);
-                                for agent in registry.iter().filter(|a|a.provider_kind==*kind && a.enabled && a.registration_state=="active") {let _=agents::record_probe(&store,&agent.id,&result);}
-                            }
-                        }
-                    }
+                    let _=agents::auto_discover(&bootstrap,&store,false);
                 }
                 collaboration::start_scheduler(&bootstrap);
             });
@@ -92,6 +85,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agent_commands::agent_list,
+            agent_commands::agent_auto_discover,
             agent_commands::agent_probe,
             agent_commands::agent_send,
             agent_commands::agent_snapshot,
