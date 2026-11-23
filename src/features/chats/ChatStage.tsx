@@ -317,7 +317,7 @@ export default function ChatStage(p: Props) {
         {snapshot.approvals.map(approval => <div className="approval-card" key={approval.id}><div><Icon name="shield" size={18} /><strong>{agentName(approval.agent_id ?? agent)} 需要你批准{approval.method.includes("fileChange") ? "文件修改" : "命令执行"}</strong></div><pre>{approval.command ?? "请检查执行记录中的文件变更。"}</pre>{approval.cwd && <small>{approval.cwd}</small>}<p>{approval.reason}</p><div className="approval-actions"><button className="outline-button" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: false })}>拒绝</button><button className="primary" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: true })}>批准本次</button></div></div>)}
         {(error || snapshot.session?.error) && <div className="inline-error" role="alert">{error ?? snapshot.session?.error}</div>}
         {probe?.sidebar_warning && <div className="sync-notice">最近列表同步未完成，私聊仍可使用。{probe.sidebar_warning}</div>}
-        {provider === "gemini" && <p className="panel-caption">Gemini 使用自己的 CLI 和原厂登录。工具请求需单次批准；工作目录不等于独立沙箱。</p>}
+        {provider === "gemini" && <p className="panel-caption">Gemini 使用自己的 CLI 和原厂登录，当前已开启自动批准模式（无独立沙箱隔离）。</p>}
         {provider === "deepseek" && <p className="panel-caption">DeepSeek 按消息更新，按当前运行时提供的工具执行任务。</p>}
         <div className="execution-status"><strong>执行详情</strong><small>{records.length} 条记录</small></div>
         {records.length ? records.map(record => <details className="panel-tool" key={record.id}>

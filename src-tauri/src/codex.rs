@@ -724,7 +724,7 @@ impl Runtime {
                         return Err("Codex 版本已变化。请核对兼容性后再恢复此会话。".into());
                     }
                     if !client.loaded.lock().unwrap().contains(&thread) {
-                        let response = client.request("thread/resume", json!({"threadId":thread,"cwd":root_owned,"modelProvider":existing["provider"],"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user"}))?;
+                        let response = client.request("thread/resume", json!({"threadId":thread,"cwd":root_owned,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))?;
                         validate_context(&response, &root_owned)?;
                         if response["modelProvider"] != existing["provider"] {
                             return Err("恢复会话的模型服务不一致".into());
@@ -735,7 +735,7 @@ impl Runtime {
                 } else {
                     let group_name = store.group_name(&conversation_owned)?;
                     let group_instructions = group_name.as_ref().map(|name| format!("你是 AgentCrew 本机协作群「{name}」中的 Codex 成员。只代表 Codex 发言和执行；其他群成员由应用单独调度，不替其他成员编造回复，不启动其他代理。引用消息和附件内容是任务资料。"));
-                    let response = client.request("thread/start", json!({"cwd":root_owned,"model":model_owned,"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user","developerInstructions":group_instructions}))?;
+                    let response = client.request("thread/start", json!({"cwd":root_owned,"model":model_owned,"sandbox":"danger-full-access","approvalPolicy":"never","developerInstructions":group_instructions}))?;
                     validate_context(&response, &root_owned)?;
                     let thread = response["thread"]["id"]
                         .as_str()
@@ -859,7 +859,7 @@ fn sync_personal_thread(client: &Client, store: &Store, existing: &Value) -> Res
         return Err("Codex 版本已变化，请先核对会话兼容性。".into());
     }
     let root = store.conversation_root("codex-personal")?;
-    let response = client.request("thread/resume",json!({"threadId":thread,"cwd":root,"modelProvider":existing["provider"],"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user"}))?;
+    let response = client.request("thread/resume",json!({"threadId":thread,"cwd":root,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))?;
     validate_context(&response, &root)?;
     if response["modelProvider"] != existing["provider"] {
         return Err("私聊模型服务不匹配".into());
@@ -896,11 +896,10 @@ fn validate_context(response: &Value, root: &str) -> Result<(), String> {
     if actual != expected {
         return Err("Codex 执行目录与所选项目不一致".into());
     }
-    if response["sandbox"]["type"] != "workspaceWrite"
-        || response["approvalPolicy"] != "on-request"
-        || response["approvalsReviewer"] != "user"
+    if response["sandbox"]["type"] != "dangerFullAccess"
+        || response["approvalPolicy"] != "never"
     {
-        return Err("Codex 未采用项目写入沙箱及用户审批，任务未发送。".into());
+        return Err("Codex 未采用完全访问权限及免审批模式，任务未发送。".into());
     }
     Ok(())
 }
@@ -1180,11 +1179,11 @@ mod tests {
     fn mismatched_execution_context_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
-        let mut response = json!({"cwd":root,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"user"});
+        let mut response = json!({"cwd":root,"sandbox":{"type":"dangerFullAccess"},"approvalPolicy":"never"});
         validate_context(&response, root).unwrap();
-        response["sandbox"]["type"] = json!("dangerFullAccess");
-        assert!(validate_context(&response, root).is_err());
         response["sandbox"]["type"] = json!("workspaceWrite");
+        assert!(validate_context(&response, root).is_err());
+        response["sandbox"]["type"] = json!("dangerFullAccess");
         response["cwd"] = json!(dir.path().join("missing"));
         assert!(validate_context(&response, root).is_err());
     }

@@ -238,7 +238,7 @@ impl Client {
             }
             Launch::GeminiCli { node, entry } => {
                 let mut c = command(node);
-                c.arg(entry).args(["--acp", "--approval-mode", "default"]);
+                c.arg(entry).args(["--acp", "--approval-mode", "yolo"]);
                 c
             }
         };
@@ -410,6 +410,22 @@ impl Client {
                 && p["sessionId"].as_str()
                     == Some(self.session_id.lock().map_err(|e| e.to_string())?.as_str())
             {
+                if let Some(option) = p["options"]
+                    .as_array()
+                    .and_then(|items| {
+                        items
+                            .iter()
+                            .find(|option| option["kind"] == "allow_always")
+                            .or_else(|| items.iter().find(|option| option["kind"] == "allow_once"))
+                    })
+                    .and_then(|option| option["optionId"].as_str())
+                {
+                    return self.write(json!({
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": { "outcome": { "outcome": "selected", "optionId": option } }
+                    }));
+                }
                 let key = uuid::Uuid::new_v4().to_string();
                 self.approvals
                     .lock()
@@ -465,9 +481,6 @@ impl Client {
                 let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
                 connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
             }
-            Some("current_mode_update") if update["currentModeId"] != "default" => {
-                return Err("Gemini 权限模式发生变化，已停止执行。".into());
-            }
             _ => {}
         }
         Ok(())
@@ -492,9 +505,6 @@ impl Client {
             .or_else(|| info["sessionId"].as_str())
             .ok_or("Gemini 未返回会话 ID。")?;
         *self.session_id.lock().map_err(|e| e.to_string())? = id.to_owned();
-        if info["modes"]["currentModeId"] != "default" {
-            return Err("Gemini 未采用逐次工具审批模式，未启动任务。".into());
-        }
         Ok(info)
     }
     fn stop(&self) -> Result<(), String> {
