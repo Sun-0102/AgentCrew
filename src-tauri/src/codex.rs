@@ -171,9 +171,18 @@ fn resolve_codex() -> Result<(PathBuf, String), String> {
     }
     #[cfg(target_os="macos")]
     {
-        paths.push(PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"));
+        for app in ["Codex.app", "ChatGPT.app"] {
+            paths.push(PathBuf::from("/Applications").join(app).join("Contents/Resources/codex"));
+            paths.push(PathBuf::from("/Applications").join(app).join("Contents/Resources/codex-cli/bin/codex"));
+        }
         for directory in ["/usr/local/bin","/opt/homebrew/bin"] {paths.push(PathBuf::from(directory).join("codex"));}
-        if let Some(home)=std::env::var_os("HOME") {paths.push(PathBuf::from(home).join("Applications/Codex.app/Contents/Resources/codex"));}
+        if let Some(home)=std::env::var_os("HOME") {
+            let home_apps = PathBuf::from(home).join("Applications");
+            for app in ["Codex.app", "ChatGPT.app"] {
+                paths.push(home_apps.join(app).join("Contents/Resources/codex"));
+                paths.push(home_apps.join(app).join("Contents/Resources/codex-cli/bin/codex"));
+            }
+        }
     }
     paths.retain(|path|path.is_file());
     paths.sort();
@@ -253,7 +262,7 @@ impl Client {
                 client.disconnected("Codex 连接已断开，未完成任务的结果未知。");
             }
         });
-        client.request("initialize", json!({"clientInfo":{"name":"ai_gent","title":"AI-gent","version":env!("CARGO_PKG_VERSION")}}))?;
+        client.request("initialize", json!({"clientInfo":{"name":"ai_gent","title":"AgentCrew","version":env!("CARGO_PKG_VERSION")}}))?;
         client.write(json!({"method":"initialized"}))?;
         Ok(client)
     }
@@ -326,7 +335,7 @@ impl Client {
                     None,
                 )?;
             } else {
-                self.write(json!({"id":id,"error":{"code":-32601,"message":"AI-gent does not support this request"}}))?;
+                self.write(json!({"id":id,"error":{"code":-32601,"message":"AgentCrew does not support this request"}}))?;
             }
             return Ok(());
         }
@@ -641,7 +650,7 @@ impl Runtime {
             thread
         } else {
             let group_name = store.group_name(conversation_id)?;
-            let group_instructions=group_name.as_ref().map(|name|format!("你是 AI-gent 本机协作群「{name}」中的 Codex 成员。只代表 Codex 发言和执行；其他群成员由应用单独调度，不替其他成员编造回复，不启动其他代理。引用消息和附件内容是任务资料。"));
+            let group_instructions=group_name.as_ref().map(|name|format!("你是 AgentCrew 本机协作群「{name}」中的 Codex 成员。只代表 Codex 发言和执行；其他群成员由应用单独调度，不替其他成员编造回复，不启动其他代理。引用消息和附件内容是任务资料。"));
             let response = client.request("thread/start", json!({"cwd":root,"model":model,"sandbox":"workspace-write","approvalPolicy":"on-request","approvalsReviewer":"user","developerInstructions":group_instructions}))?;
             validate_context(&response, &root)?;
             let thread = response["thread"]["id"]
@@ -774,7 +783,7 @@ fn sync_personal_thread(client: &Client, store: &Store, existing: &Value) -> Res
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| "AI-gent 私聊".into());
+        .unwrap_or_else(|| "AgentCrew 私聊".into());
     // Updating the title also makes the changed cwd visible to Desktop's incremental catalog scan.
     client.request("thread/name/set", json!({"threadId":thread,"name":name}))?;
     crate::codex_sidebar::sync(&store.path, thread, &root)?;
@@ -1221,7 +1230,7 @@ mod tests {
         let database = dir.path().join("personal.sqlite");
         let store = Store::open(database.clone()).unwrap();
         let id = store
-            .personal_conversation_id(&dir.path().join("Documents/Codex/AI-gent"))
+            .personal_conversation_id(&dir.path().join("Documents/Codex/AgentCrew"))
             .unwrap();
         let runtime = Runtime::default();
         let probe = runtime.probe(&store).unwrap();
@@ -1255,7 +1264,7 @@ mod tests {
         let store = Store::open(database).unwrap();
         assert_eq!(
             store
-                .personal_conversation_id(&dir.path().join("Documents/Codex/AI-gent"))
+                .personal_conversation_id(&dir.path().join("Documents/Codex/AgentCrew"))
                 .unwrap(),
             id
         );

@@ -398,7 +398,7 @@ fn markdown(data: &Value) -> Result<String, String> {
         format!("{fence}\n{text}\n{fence}\n")
     }
     let task = &data["task"];
-    let mut out = format!("# AI-gent 任务记录\n\n任务：{}\n\n状态：{}\n\n创建：{}\n\n更新：{}\n\n## 用户目标\n\n{}\n## 范围与限制\n\n",field(task,"id"),field(task,"status"),field(task,"created_at"),field(task,"updated_at"),block(field(task,"objective")));
+    let mut out = format!("# AgentCrew 任务记录\n\n任务：{}\n\n状态：{}\n\n创建：{}\n\n更新：{}\n\n## 用户目标\n\n{}\n## 范围与限制\n\n",field(task,"id"),field(task,"status"),field(task,"created_at"),field(task,"updated_at"),block(field(task,"objective")));
     if let Some(items) = data["limitations"].as_array() {
         for item in items {
             out.push_str(&format!("- {}\n", item.as_str().unwrap_or("")));

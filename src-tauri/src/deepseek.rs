@@ -486,24 +486,6 @@ impl Runtime {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
         let install = Installation::find()?;
         let models = install.models(store)?;
-        let workspace = runtime_dir(store)?.join("workspace");
-        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-        let client = Client::start(
-            store,
-            &install,
-            workspace.to_str().ok_or("私聊目录无效")?,
-            "ai-gent-auth-probe",
-            PERSONAL,
-            models[0]["model"].as_str().ok_or("模型目录无效")?,
-            None,
-        )?;
-        let auth = client
-            .request("shutdown", json!({}), Duration::from_secs(5))
-            .is_ok();
-        let _ = client.stop();
-        if !auth {
-            return Err("DeepSeek 连接检查未完成。".into());
-        }
         Ok(
             json!({"version":install.version,"executable":install.executable,"auth":"Harness 配置（发送时验证认证）","requires_auth":true,"models":models,"sidebar_warning":null,"catalog_source":"已安装 Harness 内置目录","capabilities":{"streaming":"message-events","resume":true,"cancel":"process-group","approval":false}}),
         )
@@ -638,7 +620,7 @@ impl Runtime {
         let prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
             text.to_owned()
         } else {
-            format!("你是 AI-gent 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
+            format!("你是 AgentCrew 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
         };
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
@@ -912,7 +894,7 @@ mod tests {
     #[ignore = "Uses real Harness API calls in a temporary private workspace"]
     fn installed_deepseek_private_resume_and_cancel() {
         let temp = tempfile::Builder::new()
-            .prefix("AI-gent 中文 private ")
+            .prefix("AgentCrew 中文 private ")
             .tempdir()
             .unwrap();
         let store = Store::open(temp.path().join("test.sqlite")).unwrap();

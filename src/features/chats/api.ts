@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null; session_count?: number }
 export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface PrivateSession { id: string; agent_id: string; name: string; archived: boolean; is_default?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: string; id: string; role: string; text: string; created_at: string | null }
@@ -37,7 +38,7 @@ export interface Snapshot {
   approvals: { agent_id?: string; id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
 }
 // In runtime commands groupId identifies the selected execution conversation, including the default session.
-export interface Scope { projectId: string | null; groupId: string | null; agent?: string }
+export interface Scope { projectId: string | null; groupId: string | null; sessionId?: string | null; agent?: string }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
 export interface Agent { id: string; name: string; description: string; provider_kind: string; runtime_kind?: string; available: boolean; registration_state: string; availability: string; enabled: boolean; runtime_version?: string | null; error?: string | null }
 export let agents: Agent[] = (desktop ? [] : ["codex", "deepseek"]).map(id => ({ id, name: id === "codex" ? "Codex" : "DeepSeek", description: "本机运行组件", provider_kind: id, available: !desktop, registration_state: "active", availability: "checking", enabled: true }));
@@ -108,6 +109,36 @@ export async function deleteGroupSession(groupId: string, id: string) {
   localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
   localStorage.setItem(previewSessionsKey, JSON.stringify(all));
 }
+const previewPrivateSessionsKey = "ai-gent.preview.private-sessions.v1";
+export async function getPrivateSessions(agentId: string): Promise<PrivateSession[]> {
+  if (desktop) return invoke<PrivateSession[]>("private_session_list", { agentId });
+  const all = readPreview<Record<string, PrivateSession[]>>(previewPrivateSessionsKey, {});
+  return all[agentId] ?? [{ id: agentId === "deepseek" ? "deepseek" : agentId === "codex" ? "personal" : `agent:${agentId}:personal`, agent_id: agentId, name: "默认会话", archived: false, is_default: true, created_at: new Date().toISOString(), preview: null, updated_at: null, status: null }];
+}
+export async function savePrivateSession(agentId: string, name: string, existing?: PrivateSession, archived = existing?.archived ?? false): Promise<PrivateSession> {
+  name = name.trim();
+  if (!name || [...name].length > 40) throw new Error("会话名称请填写 1–40 个字。");
+  if (desktop) return existing ? invoke<PrivateSession>("private_session_update", { agentId, id: existing.id, name, archived }) : invoke<PrivateSession>("private_session_create", { agentId, name });
+  const list = await getPrivateSessions(agentId);
+  if (existing && !list.some(s => s.id === existing.id)) throw new Error("会话不属于当前 Agent。");
+  const session: PrivateSession = existing ? { ...existing, name, archived } : { id: crypto.randomUUID(), agent_id: agentId, name, archived: false, is_default: false, created_at: new Date().toISOString(), preview: null, updated_at: null, status: null };
+  const all = readPreview<Record<string, PrivateSession[]>>(previewPrivateSessionsKey, {});
+  all[agentId] = existing ? list.map(s => s.id === session.id ? session : s) : [session, ...list];
+  localStorage.setItem(previewPrivateSessionsKey, JSON.stringify(all));
+  return session;
+}
+export async function deletePrivateSession(agentId: string, id: string) {
+  if (desktop) return invoke<void>("private_session_delete", { agentId, id });
+  const list = await getPrivateSessions(agentId);
+  const target = list.find(s => s.id === id);
+  if (!target) throw new Error("会话不存在或已删除。");
+  const all = readPreview<Record<string, PrivateSession[]>>(previewPrivateSessionsKey, {});
+  all[agentId] = target.is_default ? list : list.filter(s => s.id !== id);
+  const messages = readPreview<Record<string, Message[]>>(previewMessagesKey, {});
+  delete messages[id];
+  localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
+  localStorage.setItem(previewPrivateSessionsKey, JSON.stringify(all));
+}
 export async function updateGroupMembers(groupId: string, add: string[], remove: string[]) {
   if (desktop) return invoke<Group>("group_members_update", { groupId, add, remove });
   const group = (await getGroups()).find(g => g.id === groupId);
@@ -116,7 +147,7 @@ export async function updateGroupMembers(groupId: string, add: string[], remove:
   if (!members.length || members.some(agent => !agents.some(a => a.id === agent))) throw new Error("群内至少保留一位已接入的 Agent。");
   return saveGroup(group.name, members, group.project_id, groupId);
 }
-export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>("agent_snapshot", { ...scope, agent: scope.agent ?? "codex" }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
+export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>("agent_snapshot", { ...scope, agent: scope.agent ?? "codex" }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? scope.sessionId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
 export const probeCodex = () => invoke<Probe>("agent_probe", {agent:"codex"});
 export const probeDeepSeek = () => invoke<Probe>("agent_probe", {agent:"deepseek"});
 export const running = (status?: string) => ["starting", "running", "waiting_approval", "cancel_requested", "stopping"].includes(status ?? "");

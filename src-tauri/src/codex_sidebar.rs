@@ -56,7 +56,7 @@ fn sync_in(home: &Path, database: &Path, thread_id: &str, root: &str) -> Result<
             continue;
         };
         if originator.as_deref() != Some("ai_gent") {
-            return Err("会话不属于 AI-gent，未修改官方索引。".into());
+            return Err("会话不属于 AgentCrew，未修改官方索引。".into());
         }
         if std::fs::canonicalize(&cwd).map_err(|e| e.to_string())?
             != std::fs::canonicalize(root).map_err(|e| e.to_string())?

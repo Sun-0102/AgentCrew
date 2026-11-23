@@ -85,7 +85,7 @@ pub fn ensure_enabled(store: &Store, id: &str) -> Result<String, String> {
     let kind: Option<String> = connection.query_row("SELECT provider_kind FROM agents WHERE id=?1 AND enabled=1 AND registration_state='active'", [id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
     let kind = kind.ok_or("Agent 尚未接入、已停用或已移除。")?;
     if !supported(&kind) {
-        return Err("provider_not_supported：AI-gent 尚未适配此运行组件。".into());
+        return Err("provider_not_supported：AgentCrew 尚未适配此运行组件。".into());
     }
     Ok(kind)
 }

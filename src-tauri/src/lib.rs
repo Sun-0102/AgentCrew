@@ -12,6 +12,7 @@ mod groups;
 mod images;
 mod lifecycle;
 mod pairing;
+mod private_sessions;
 mod process;
 mod reasoning;
 mod skills;
@@ -125,6 +126,10 @@ pub fn run() {
             commands::group_session_create,
             commands::group_session_update,
             commands::group_session_delete,
+            commands::private_session_list,
+            commands::private_session_create,
+            commands::private_session_update,
+            commands::private_session_delete,
             commands::group_members_update,
             commands::group_task_start,
             commands::group_task_control,
@@ -133,7 +138,7 @@ pub fn run() {
             commands::group_task_export
         ])
         .build(tauri::generate_context!())
-        .expect("AI-gent 启动失败，请检查本地数据目录和桌面运行环境")
+        .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 lifecycle::shutdown(app);

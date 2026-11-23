@@ -64,7 +64,7 @@ export default function TaskResults({ groupId, latestTask, acting, members, onCl
     setExporting(true); setError(null);
     try {
       const extension = format === "json" ? "json" : "md";
-      const path = await save({ title: "导出任务记录（请选择新的文件名）", defaultPath: `AI-gent-${taskId}.${extension}`, filters: [{ name: format === "json" ? "JSON 工作记录" : "Markdown 工作记录", extensions: [extension] }] });
+      const path = await save({ title: "导出任务记录（请选择新的文件名）", defaultPath: `AgentCrew-${taskId}.${extension}`, filters: [{ name: format === "json" ? "JSON 工作记录" : "Markdown 工作记录", extensions: [extension] }] });
       if (!path) return;
       await invoke("group_task_export", { groupId, taskId, path, format });
       notify("任务记录已导出");

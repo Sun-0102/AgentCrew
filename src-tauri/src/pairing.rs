@@ -184,8 +184,8 @@ pub fn invitation(
     name: &str,
     previous: Option<&str>,
 ) -> Result<Value, String> {
-    if name.trim().is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
-        return Err("名称请填写 1–40 个字，不含换行。".into());
+    if name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err("名称最多 40 个字，且不能包含换行或控制字符。".into());
     }
     let service = app.state::<Arc<Service>>();
     let address = service.address.lock().map_err(|e| e.to_string())?.clone()?;
@@ -210,7 +210,12 @@ pub fn invitation(
     }
     tx.execute("INSERT INTO pairing_invitations(id,instance_id,expected_provider,display_name,code_hash,expires_at,protocol_version) VALUES(?1,?2,'',?3,?4,?5,2)",params![id,service.instance,name.trim(),hash(&code),expiry]).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    let prompt=format!("请将你自己使用的本机 Agent 运行组件接入我的 AI-gent。\nAI-gent 地址：{address}\n应用实例：{}\n协议版本：2\n邀请 ID：{id}\n配对码：{code}\n有效期至：UTC Unix 时间 {expiry}（10 分钟）\n显示名称：{}\n邀请不绑定厂商，请自行识别并上报 provider_kind 和 runtime_kind。\n\n1. 用你已有的命令或网络工具读取 /local/v2/health 和 /local/v2/pairing-guide，确认实例和协议。\n2. 识别自己的厂商和运行组件，按说明提交请求，不让另一位 Agent 代办。Gemini 应上报自己的 Gemini CLI；不借 Codex 的运行身份。未知组件或无法识别时如实报告。\n3. 生成 request_id，重试保持不变。用返回的短期 claim_token 每秒查询一次，最多 60 秒。202 仅表示受理；只有返回 active 才报告‘已接入 AI-gent’，并给出实际核验的名称、厂商、组件和版本。\n4. 不打印或保存配对码和令牌，不提供账号密钥、登录文件或环境变量全集。后续由 AI-gent 调用对应组件执行，任务结果在应用中显示；Gemini 不由 Codex 代执行。\n5. 本次只授权登记及无模型接入检查，不安装依赖、不修改原厂全局配置、不开放其他网络端口、不变更项目文件。沙箱阻止请求时使用原厂权限机制；失败报告真实原因，不冒充成功。",service.instance,name.trim());
+    let display_label = if name.trim().is_empty() {
+        "自动按接入组件命名".to_owned()
+    } else {
+        name.trim().to_owned()
+    };
+    let prompt=format!("请将你自己使用的本机 Agent 运行组件接入我的 AgentCrew。\nAgentCrew 地址：{address}\n应用实例：{}\n协议版本：2\n邀请 ID：{id}\n配对码：{code}\n有效期至：UTC Unix 时间 {expiry}（10 分钟）\n显示名称：{}\n邀请不绑定厂商，请自行识别并上报 provider_kind 和 runtime_kind。\n\n1. 用你已有的命令或网络工具读取 /local/v2/health 和 /local/v2/pairing-guide，确认实例和协议。\n2. 识别自己的厂商和运行组件，按说明提交请求，不让另一位 Agent 代办。Gemini 应上报自己的 Gemini CLI；不借 Codex 的运行身份。未知组件或无法识别时如实报告。\n3. 生成 request_id，重试保持不变。用返回的短期 claim_token 每秒查询一次，最多 60 秒。202 仅表示受理；只有返回 active 才报告‘已接入 AgentCrew’，并给出实际核验的名称、厂商、组件和版本。\n4. 不打印或保存配对码和令牌，不提供账号密钥、登录文件或环境变量全集。后续由 AgentCrew 调用对应组件执行，任务结果在应用中显示；Gemini 不由 Codex 代执行。\n5. 本次只授权登记及无模型接入检查，不安装依赖、不修改原厂全局配置、不开放其他网络端口、不变更项目文件。沙箱阻止请求时使用原厂权限机制；失败报告真实原因，不冒充成功。",service.instance,display_label);
     Ok(
         json!({"id":id,"display_name":name.trim(),"protocol_version":2,"code":code,"expires_at":expiry,"prompt":prompt,"state":"pending"}),
     )
@@ -257,7 +262,7 @@ async fn claim_impl(
         return error(
             StatusCode::BAD_REQUEST,
             "provider_not_supported",
-            "已有程序调用路线，AI-gent 适配尚未开发。",
+            "已有程序调用路线，AgentCrew 适配尚未开发。",
         );
     }
     if request.protocol_version != version {
@@ -488,7 +493,8 @@ fn claim_record(
             "provider_not_supported",
             "此厂商尚未适配。".into(),
         ))?;
-        tx.execute("INSERT INTO agents(id,display_name,provider_kind,runtime_kind,registration_state) VALUES(?1,?2,?3,?4,'validating')",params![agent,name,request.provider_kind,runtime]).map_err(failure)?;
+        let resolved_name = resolve_agent_display_name(&tx, &name, &request.provider_kind).map_err(failure)?;
+        tx.execute("INSERT INTO agents(id,display_name,provider_kind,runtime_kind,registration_state) VALUES(?1,?2,?3,?4,'validating')",params![agent,resolved_name,request.provider_kind,runtime]).map_err(failure)?;
         tx.execute("INSERT INTO pairing_claims(id,invitation_id,request_id,request_fingerprint,agent_id,token_hash,token_expiry,reported_provider_kind,reported_runtime_kind) VALUES(?1,?2,?3,?4,?5,'',0,?6,?7)",params![id,request.invitation_id,request.request_id,fingerprint,agent,request.provider_kind,runtime]).map_err(failure)?;
         tx.execute(
             "UPDATE pairing_invitations SET state='used' WHERE id=?1",
@@ -632,4 +638,36 @@ async fn status(
 pub fn recover(store: &Store) -> Result<(), String> {
     let connection = store.connect()?;
     connection.execute_batch("UPDATE pairing_invitations SET state='revoked' WHERE state='pending'; UPDATE pairing_claims SET state='failed',reason_code='instance_mismatch',reason='应用已重启，请重新生成邀请。' WHERE state='validating'; UPDATE agents SET registration_state='failed',availability='unavailable',error='应用已重启，请重新邀请。' WHERE registration_state IN ('pending','validating'); UPDATE agents SET availability='checking' WHERE registration_state='active' AND enabled=1;").map_err(|e|e.to_string())
+}
+
+fn resolve_agent_display_name(
+    tx: &rusqlite::Transaction<'_>,
+    requested: &str,
+    provider_kind: &str,
+) -> Result<String, rusqlite::Error> {
+    let trimmed = requested.trim();
+    if !trimmed.is_empty() && trimmed != "新 Agent" {
+        return Ok(trimmed.to_owned());
+    }
+    let base = match provider_kind {
+        "gemini" => "Gemini",
+        "codex" => "Codex",
+        "deepseek" => "DeepSeek",
+        other => other,
+    };
+    let mut stmt = tx.prepare("SELECT display_name FROM agents WHERE registration_state!='revoked'")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !existing.iter().any(|item| item.eq_ignore_ascii_case(base)) {
+        return Ok(base.to_owned());
+    }
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{base} {index}");
+        if !existing.iter().any(|item| item.eq_ignore_ascii_case(&candidate)) {
+            return Ok(candidate);
+        }
+        index += 1;
+    }
 }

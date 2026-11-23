@@ -50,6 +50,7 @@ impl Store {
             include_str!("../../migrations/014_group_sessions.sql"),
             include_str!("../../migrations/015_agent_registry.sql"),
             include_str!("../../migrations/016_generic_pairing_gemini.sql"),
+            include_str!("../../migrations/017_private_sessions.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
@@ -156,7 +157,7 @@ impl Store {
         let parent = PathBuf::from(home)
             .join("Documents")
             .join("Codex")
-            .join("AI-gent")
+            .join("AgentCrew")
             .join(app_name);
         Ok(parent)
     }
@@ -348,7 +349,7 @@ mod tests {
         let path = temp.path().join("personal.sqlite");
         let store = Store::open(path.clone()).unwrap();
         let id = store
-            .personal_conversation_id(&temp.path().join("Documents/Codex/AI-gent"))
+            .personal_conversation_id(&temp.path().join("Documents/Codex/AgentCrew"))
             .unwrap();
         let root = store.conversation_root(&id).unwrap();
         assert!(Path::new(&root).is_dir());
@@ -362,7 +363,7 @@ mod tests {
         let store = Store::open(path).unwrap();
         assert_eq!(
             store
-                .personal_conversation_id(&temp.path().join("Documents/Codex/AI-gent"))
+                .personal_conversation_id(&temp.path().join("Documents/Codex/AgentCrew"))
                 .unwrap(),
             id
         );
@@ -393,7 +394,7 @@ mod tests {
         std::fs::create_dir(old.join("nested")).unwrap();
         std::fs::write(old.join("nested/artifact.txt"), "keep me").unwrap();
         store.connect().unwrap().execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status) VALUES(?1,'same-thread','model','version','provider','running')",[&id]).unwrap();
-        let official = temp.path().join("Documents/Codex/AI-gent");
+        let official = temp.path().join("Documents/Codex/AgentCrew");
         assert!(store.personal_conversation_id(&official).is_err());
         assert_eq!(store.conversation_root(&id).unwrap(), old.to_str().unwrap());
         store
@@ -435,7 +436,7 @@ mod tests {
             .personal_conversation_id(&temp.path().join("workspaces"))
             .unwrap();
         let old = store.conversation_root(&id).unwrap();
-        let official = temp.path().join("Documents/Codex/AI-gent");
+        let official = temp.path().join("Documents/Codex/AgentCrew");
         std::fs::create_dir_all(official.join("codex-personal")).unwrap();
         std::fs::write(official.join("codex-personal/existing.txt"), "existing").unwrap();
         assert!(store.personal_conversation_id(&official).is_err());

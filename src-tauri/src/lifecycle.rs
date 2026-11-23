@@ -25,7 +25,7 @@ impl Lifecycle {
             .open(directory.join("instance.lock"))
             .map_err(|e| e.to_string())?;
         file.try_lock()
-            .map_err(|_| "此数据目录已有 AI-gent 实例运行，请打开已有窗口。".to_owned())?;
+            .map_err(|_| "此数据目录已有 AgentCrew 实例运行，请打开已有窗口。".to_owned())?;
         Ok(Self {
             exiting: AtomicBool::new(false),
             tray_ready: AtomicBool::new(false),
@@ -45,14 +45,14 @@ pub fn pause(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
 }
 
 pub fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "打开 AI-gent", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "打开 AgentCrew", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "暂停全部派发", true, None::<&str>)?;
     let resume = MenuItem::with_id(app, "resume", "继续全部派发", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "彻底退出（停止当前执行）", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &pause, &resume, &quit])?;
     let mut builder = TrayIconBuilder::new()
-        .tooltip("AI-gent · 本机协作")
-        .title("AI-gent")
+        .tooltip("AgentCrew · 本机协作")
+        .title("AgentCrew")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {

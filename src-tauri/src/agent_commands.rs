@@ -40,11 +40,11 @@ pub fn pairing_cancel(store: tauri::State<'_, Store>, id: String) -> Result<(), 
 #[tauri::command]
 pub async fn agent_probe(app: tauri::AppHandle, agent: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let gate = app.state::<crate::deepseek::ExecutionGate>();
-        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         let store = app.state::<Store>();
         let kind = agents::ensure_enabled(&store, &agent)?;
-        crate::deepseek::ensure_idle(&store)?;
+        if kind == "deepseek" {
+            crate::deepseek::ensure_idle(&store)?;
+        }
         let result = agents::probe(&app, &store, &kind);
         agents::record_probe(&store, &agent, &result)?;
         result
@@ -58,10 +58,14 @@ fn conversation(
     agent: &str,
     group: Option<&str>,
     project: Option<&str>,
+    session: Option<&str>,
 ) -> Result<String, String> {
     if let Some(group) = group {
         store.group(group)?;
         Ok(group.to_owned())
+    } else if let Some(session) = session {
+        store.verify_private_session(agent, session)?;
+        Ok(session.to_owned())
     } else {
         agents::private_conversation(store, agent, project)
     }
@@ -73,10 +77,11 @@ pub async fn agent_snapshot(
     agent: String,
     group_id: Option<String>,
     project_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store=app.state::<Store>();
-        let id=conversation(&store,&agent,group_id.as_deref(),project_id.as_deref())?;
+        let id=conversation(&store,&agent,group_id.as_deref(),project_id.as_deref(),session_id.as_deref())?;
         if id==crate::deepseek::PERSONAL && group_id.is_none() { return app.state::<crate::deepseek::Runtime>().snapshot(&store); }
         let mut snapshot=app.state::<crate::codex::Runtime>().snapshot(&store,&id)?;
         let members=if group_id.is_some() {store.group(&id)?.members} else {vec![agent.clone()]};
@@ -113,6 +118,7 @@ pub async fn agent_send(
     app: tauri::AppHandle,
     agent: String,
     project_id: Option<String>,
+    session_id: Option<String>,
     model: String,
     text: String,
     reasoning_effort: Option<String>,
@@ -133,7 +139,10 @@ pub async fn agent_send(
         }
         crate::collaboration::manual_send(&store, &model, &text)?;
         crate::deepseek::ensure_idle(&store)?;
-        let id = agents::private_conversation(&store, &agent, project_id.as_deref())?;
+        let id = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        if session_id.is_some() {
+            store.ensure_private_session_open(&id)?;
+        }
         let runtime = agents::binding(&store, &agent, &id)?;
         let kind = agents::ensure_enabled(&store, &agent)?;
         crate::reasoning::save(&store, &runtime, &kind, &model, reasoning_effort.as_deref())?;
@@ -152,12 +161,13 @@ pub async fn agent_cancel(
     agent: String,
     project_id: Option<String>,
     group_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let gate = app.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         let store = app.state::<Store>();
-        let id = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref())?;
+        let id = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
         agents::cancel(&app, &store, &agent, &id)
     })
     .await
@@ -170,6 +180,7 @@ pub async fn agent_approve(
     agent: String,
     project_id: Option<String>,
     group_id: Option<String>,
+    session_id: Option<String>,
     id: String,
     allow: bool,
 ) -> Result<Value, String> {
@@ -181,7 +192,7 @@ pub async fn agent_approve(
         if !matches!(kind.as_str(), "codex" | "gemini") {
             return Err("此运行组件不提供交互审批。".into());
         }
-        let logical = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref())?;
+        let logical = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
         let runtime = agents::binding(&store, &agent, &logical)?;
         if kind == "gemini" {
             app.state::<crate::gemini::Runtime>()

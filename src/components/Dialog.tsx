@@ -4,8 +4,14 @@ export default function Dialog({ title, children, onClose, wide = false }: { tit
   const ref = useRef<HTMLDialogElement>(null);
   const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const close = useRef(onClose); close.current = onClose;
-  useEffect(() => { const element = ref.current; element?.showModal(); return () => { element?.close(); returnFocus.current?.focus(); }; }, []);
-  return <dialog ref={ref} className={`dialog ${wide ? "dialog-wide" : ""}`} aria-label={title} onCancel={event => { event.preventDefault(); close.current(); }} onClick={event => {
+  useEffect(() => {
+    const element = ref.current;
+    element?.showModal();
+    const target = element?.querySelector<HTMLElement>("[autofocus], input:not([type=hidden]), textarea, select") ?? element;
+    target?.focus();
+    return () => { element?.close(); returnFocus.current?.focus(); };
+  }, []);
+  return <dialog ref={ref} tabIndex={-1} className={`dialog ${wide ? "dialog-wide" : ""}`} aria-label={title} onCancel={event => { event.preventDefault(); close.current(); }} onClick={event => {
     if (event.target !== event.currentTarget) return;
     const rect = event.currentTarget.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close.current();
