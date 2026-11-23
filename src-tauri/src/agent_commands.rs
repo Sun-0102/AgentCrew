@@ -1,4 +1,4 @@
-use crate::{agents, storage::Store};
+use crate::{agents, providers, storage::Store};
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -55,10 +55,11 @@ pub async fn agent_probe(app: tauri::AppHandle, agent: String) -> Result<Value, 
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<Store>();
         let kind = agents::ensure_enabled(&store, &agent)?;
-        if kind == "deepseek" {
-            crate::deepseek::ensure_idle(&store)?;
+        let adapter = providers::resolve(&kind)?;
+        if adapter.is_busy(&store) {
+            return Err("当前有任务正在执行，请等待完成后再重新检测。".into());
         }
-        let result = agents::probe(&app, &store, &kind);
+        let result = adapter.probe(&app, &store);
         agents::record_probe(&store, &agent, &result)?;
         result
     })
@@ -106,14 +107,16 @@ pub async fn agent_snapshot(
             if session["status"].as_str().is_some_and(crate::codex::active) { selected=member.clone(); }
             sessions.insert(member.clone(),session);
             let kind=agents::provider(&store,&member)?;
-            if matches!(kind.as_str(),"codex"|"gemini") {
-                let runtime=if member=="codex" {id.clone()} else {
-                    use rusqlite::OptionalExtension;
-                    let binding=store.connect()?.query_row("SELECT runtime_conversation_id FROM agent_sessions WHERE agent_id=?1 AND conversation_id=?2",params![member,id],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())?;
-                    let Some(binding)=binding else {continue;}; binding
-                };
-                let items=if kind=="gemini" {app.state::<crate::gemini::Runtime>().approvals(&runtime)?} else {app.state::<crate::codex::Runtime>().snapshot(&store,&runtime)?["approvals"].as_array().cloned().unwrap_or_default()};
-                for item in items {let mut item=item;item["agent_id"]=json!(member);approvals.push(item);}
+            if let Ok(adapter) = providers::resolve(&kind) {
+                if adapter.supports_approval() {
+                    let runtime=if member=="codex" {id.clone()} else {
+                        use rusqlite::OptionalExtension;
+                        let binding=store.connect()?.query_row("SELECT runtime_conversation_id FROM agent_sessions WHERE agent_id=?1 AND conversation_id=?2",params![member,id],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())?;
+                        let Some(binding)=binding else {continue;}; binding
+                    };
+                    let items=adapter.approvals(&app,&store,&runtime)?;
+                    for item in items {let mut item=item;item["agent_id"]=json!(member);approvals.push(item);}
+                }
             }
         }
         snapshot["session"]=sessions.get(&selected).cloned().unwrap_or(Value::Null);
@@ -208,18 +211,13 @@ pub async fn agent_approve(
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         let store = app.state::<Store>();
         let kind = agents::ensure_enabled(&store, &agent)?;
-        if !matches!(kind.as_str(), "codex" | "gemini") {
+        let adapter = providers::resolve(&kind)?;
+        if !adapter.supports_approval() {
             return Err("此运行组件不提供交互审批。".into());
         }
         let logical = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
         let runtime = agents::binding(&store, &agent, &logical)?;
-        if kind == "gemini" {
-            app.state::<crate::gemini::Runtime>()
-                .approve(&store, &runtime, &id, allow)
-        } else {
-            app.state::<crate::codex::Runtime>()
-                .approve(&store, &runtime, &id, allow)
-        }
+        adapter.approve(&app, &store, &runtime, &id, allow)
     })
     .await
     .map_err(|e| e.to_string())?

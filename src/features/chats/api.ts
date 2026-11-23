@@ -40,8 +40,45 @@ export interface Snapshot {
 // In runtime commands groupId identifies the selected execution conversation, including the default session.
 export interface Scope { projectId: string | null; groupId: string | null; sessionId?: string | null; agent?: string }
 export const emptySnapshot: Snapshot = { session: null, messages: [], approvals: [] };
-export interface Agent { id: string; name: string; description: string; provider_kind: string; runtime_kind?: string; available: boolean; connected: boolean; registration_state: string; availability: string; enabled: boolean; runtime_version?: string | null; error?: string | null }
-export interface DiscoveryItem { provider_kind: string; display_name: string; status: "connected" | "needs_auth" | "unavailable"; version: string | null; executable: string | null; model_count: number; message: string }
+export interface ProviderCapabilities {
+  resume?: boolean;
+  cancel?: boolean;
+  approval?: boolean;
+  tools?: boolean;
+  streaming?: boolean;
+  acp?: boolean;
+}
+export interface Agent {
+  id: string;
+  name: string;
+  description: string;
+  provider_kind: string;
+  runtime_kind?: string;
+  runtime_label?: string;
+  available: boolean;
+  connected: boolean;
+  registration_state: string;
+  availability: string;
+  enabled: boolean;
+  runtime_version?: string | null;
+  executable_path?: string | null;
+  capabilities?: ProviderCapabilities;
+  error?: string | null;
+}
+export interface DiscoveryItem {
+  provider_kind: string;
+  display_name: string;
+  runtime_kind?: string;
+  runtime_label?: string;
+  status: "connected" | "needs_auth" | "unavailable";
+  version: string | null;
+  executable: string | null;
+  auth?: string | null;
+  model_count: number;
+  capabilities?: ProviderCapabilities;
+  message: string;
+  auth_hint?: string | null;
+}
 export let agents: Agent[] = (desktop ? [] : ["codex", "deepseek"]).map(id => ({ id, name: id === "codex" ? "Codex" : "DeepSeek", description: "本机运行组件", provider_kind: id, available: !desktop, connected: !desktop, registration_state: "active", availability: desktop ? "checking" : "ready", enabled: true }));
 const registryListeners = new Set<() => void>();
 let registryRequest: Promise<void> | undefined;
@@ -176,8 +213,9 @@ export async function updateGroupMembers(groupId: string, add: string[], remove:
   return saveGroup(group.name, members, group.project_id, groupId);
 }
 export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>("agent_snapshot", { ...scope, agent: scope.agent ?? "codex" }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? scope.sessionId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
-export const probeCodex = () => invoke<Probe>("agent_probe", {agent:"codex"});
-export const probeDeepSeek = () => invoke<Probe>("agent_probe", {agent:"deepseek"});
+export const probeAgent = (agent: string) => invoke<Probe>("agent_probe", { agent });
+export const probeCodex = () => probeAgent("codex");
+export const probeDeepSeek = () => probeAgent("deepseek");
 export const running = (status?: string) => ["starting", "running", "waiting_approval", "cancel_requested", "stopping"].includes(status ?? "");
 export const statusLabels: Record<string, string> = { idle: "就绪", starting: "正在启动", running: "正在处理", waiting_approval: "等待你批准", cancel_requested: "正在取消", stopping: "清理进程中", completed: "本轮完成", cancelled: "已取消", failed: "执行失败", interrupted: "执行已中断" };
 export function clock(value: string | null) { return value ? new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : ""; }

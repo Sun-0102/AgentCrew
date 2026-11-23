@@ -15,6 +15,7 @@ mod lifecycle;
 mod pairing;
 mod private_sessions;
 mod process;
+mod providers;
 mod reasoning;
 mod skills;
 mod speed;

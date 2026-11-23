@@ -1,16 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import ConnectedChat from "./features/chats/ConnectedChat";
 import PairingDialog, { type Invitation } from "./features/chats/PairingDialog";
+import SettingsDialog from "./features/chats/SettingsDialog";
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addProject, getAppInfo, listProjects, type AppInfo, type Project } from "./features/projects/api";
-import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getSnapshot, probeCodex, probeDeepSeek, running, saveGroupSession, savePrivateSession, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
+import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getSnapshot, probeAgent, probeCodex, probeDeepSeek, running, saveGroupSession, savePrivateSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
 import { discardSessionDraft } from "./features/chats/ChatStage";
 import GroupDialog from "./features/chats/GroupDialog";
 import { GroupSidebarList, GroupHub, SessionSidebar, SessionDialog, DeleteSessionDialog, type ChatSession } from "./features/chats/GroupSessions";
 import Icon from "./components/Icon";
 import Avatar from "./components/Avatar";
-import Dialog from "./components/Dialog";
 import appIcon from "./assets/app-icon.png";
 
 type Selection = { kind: "agent"; id: string } | { kind: "personal" } | { kind: "deepseek" } | { kind: "group"; id: string } | { kind: "project"; id: string };
@@ -69,6 +69,8 @@ export default function Workbench() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [probe, setProbe] = useState<Probe | null>(null);
   const [deepseekProbe, setDeepseekProbe] = useState<Probe | null>(null);
+  const [probesByAgent, setProbesByAgent] = useState<Record<string, Probe>>({});
+  const [probingByAgent, setProbingByAgent] = useState<Record<string, boolean>>({});
   const [deepseekConnecting, setDeepseekConnecting] = useState(desktop);
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [privatePreview, setPrivatePreview] = useState("");
@@ -272,7 +274,7 @@ export default function Workbench() {
   async function connect() {
     if (!desktop) { notify("请在桌面版中连接本机 Codex"); return; }
     setConnecting(true); setError(null);
-    try { const result = await probeCodex(); setProbe(result); notify(`已连接 Codex · ${result.models.length} 个模型`); }
+    try { const result = await probeCodex(); setProbe(result); setProbesByAgent(prev => ({ ...prev, codex: result })); notify(`已连接 Codex · ${result.models.length} 个模型`); }
     catch (cause) { setError(String(cause)); } finally { setConnecting(false); }
   }
   async function connectDeepseek() {
@@ -281,9 +283,31 @@ export default function Workbench() {
     try {
       const [result, saved] = await Promise.all([probeDeepSeek(), getSnapshot({ projectId: null, groupId: null, agent: "deepseek" })]);
       setDeepseekProbe(result);
+      setProbesByAgent(prev => ({ ...prev, deepseek: result }));
       void saved;
       notify(`DeepSeek Harness 已就绪 · ${result.models.length} 个内置目录模型`);
     } catch (cause) { setDeepseekProbe(null); setError(String(cause)); } finally { setDeepseekConnecting(false); }
+  }
+  async function probeSingleAgent(target: Agent) {
+    if (!desktop) { notify(`请在桌面版中检测 ${target.name}`); return; }
+    setProbingByAgent(prev => ({ ...prev, [target.id]: true }));
+    if (target.id === "codex") setConnecting(true);
+    if (target.id === "deepseek") setDeepseekConnecting(true);
+    setError(null);
+    try {
+      const result = await probeAgent(target.id);
+      setProbesByAgent(prev => ({ ...prev, [target.id]: result }));
+      if (target.id === "codex") setProbe(result);
+      if (target.id === "deepseek") setDeepseekProbe(result);
+      await refreshAgents();
+      notify(`${target.name} 检测完成 · ${result.models.length} 个模型`);
+    } catch (cause) {
+      setError(`${target.name} 检测失败：${String(cause)}`);
+    } finally {
+      setProbingByAgent(prev => ({ ...prev, [target.id]: false }));
+      if (target.id === "codex") setConnecting(false);
+      if (target.id === "deepseek") setDeepseekConnecting(false);
+    }
   }
   async function discoverLocalAgents(autoEnable = true, silent = false) {
     if (discovering) return;
@@ -292,17 +316,22 @@ export default function Workbench() {
     try {
       const results = await autoDiscoverAgents(autoEnable);
       setDiscoveryResults(results);
-      const codexItem = results.find(item => item.provider_kind === "codex");
-      const deepseekItem = results.find(item => item.provider_kind === "deepseek");
-      if (desktop && codexItem?.status === "connected") {
-        void probeCodex().then(setProbe).catch(() => {});
-      } else if (codexItem?.status === "unavailable") {
-        setProbe(null);
-      }
-      if (desktop && deepseekItem?.status === "connected") {
-        void probeDeepSeek().then(setDeepseekProbe).catch(() => {});
-      } else if (deepseekItem?.status === "unavailable") {
-        setDeepseekProbe(null);
+      if (desktop) {
+        const connectedKinds = results.filter(item => item.status === "connected").map(item => item.provider_kind);
+        await Promise.allSettled(
+          connectedKinds.map(async kind => {
+            try {
+              const result = await probeAgent(kind);
+              setProbesByAgent(prev => ({ ...prev, [kind]: result }));
+              if (kind === "codex") setProbe(result);
+              if (kind === "deepseek") setDeepseekProbe(result);
+            } catch {
+              // Keep discovery status even if detailed probe fails.
+            }
+          }),
+        );
+        if (results.find(item => item.provider_kind === "codex")?.status === "unavailable") setProbe(null);
+        if (results.find(item => item.provider_kind === "deepseek")?.status === "unavailable") setDeepseekProbe(null);
       }
       const connectedCount = results.filter(item => item.status === "connected").length;
       if (!silent) {
@@ -347,7 +376,23 @@ export default function Workbench() {
     {sessionDialog && (group || inAgent) && <SessionDialog key={sessionDialog === "new" ? `${group?.id ?? selectedAgent}:new` : sessionDialog.id} groupId={group?.id} agentId={group ? undefined : selectedAgent} existing={sessionDialog === "new" ? undefined : sessionDialog} onClose={() => setSessionDialog(null)} onSaved={saved => { if ("group_id" in saved) { sessionsRevision.current += 1; setSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectSession(saved); setGroups(current => current.map(g => g.id === saved.group_id ? { ...g, session_count: sessionDialog === "new" ? (g.session_count ?? 1) + 1 : g.session_count } : g)); } else { privateSessionsRevision.current += 1; setPrivateSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectPrivateSession(saved); } setSessionDialog(null); notify(sessionDialog === "new" ? "已创建会话" : "会话名称已更新"); }} />}
     {deleteSession && <DeleteSessionDialog session={deleteSession} onClose={() => setDeleteSession(null)} onDeleted={sessionDeleted} />}
     {pairing && <PairingDialog invitation={invitation} onInvitation={setInvitation} onClose={()=>setPairing(false)}/> }
-    {settings && <Dialog title="成员接入与设置" onClose={() => setSettings(false)} wide><p className="dialog-intro">自动检测并连接本机已安装的 Agent，连接成功后将自动显示在侧边栏；也可手动添加自定义 Agent。</p><div className="pairing-actions"><button className="primary" disabled={discovering || !desktop} onClick={() => void discoverLocalAgents(true)}>{discovering ? "正在检测本机 Agent…" : "自动检测并连接本机 Agent"}</button><button className="outline-button" onClick={()=>{setSettings(false);setPairing(true);}}>添加 Agent</button><button className="outline-button" onClick={()=>void toggleDispatch()}>{paused?"继续全部派发":"暂停全部派发"}</button></div><div className="field-caption"><span>本机自动检测结果</span></div><div className="discovery-list" role="group" aria-label="本机自动检测结果">{discovering && !discoveryResults.length ? <div className="discovery-empty">正在静默检测本机已安装的 Agent…</div> : discoveryResults.length ? discoveryResults.map(item => <div className="discovery-item" key={item.provider_kind}><Avatar agent={item.provider_kind} /><div><strong>{item.display_name}</strong><p>{item.message}{item.version ? ` · v${item.version}` : ""}</p></div><span className={`discovery-status ${item.status}`}>{item.status === "connected" ? "已自动连接" : item.status === "needs_auth" ? "需原厂登录" : "未检测到"}</span></div>) : <div className="discovery-empty">点击上方「自动检测并连接本机 Agent」扫描本机已安装的组件。</div>}</div><div className="field-caption"><span>Agent 成员表</span></div><div className="settings-registry" role="group" aria-label="Agent 成员表">{agents.filter(a=>a.registration_state!=="revoked").map(a=>{const isCodex=a.id==="codex",isDeepseek=a.id==="deepseek";const detail=a.registration_state!=="active"?(a.registration_state==="validating"?"正在检查":"接入失败"):isCodex?(probe?`${probe.auth ?? "本机配置"} · ${probe.models.length} 个模型`:connecting?"正在检测…":a.description):isDeepseek?(deepseekProbe?`Harness · ${deepseekProbe.models.length} 个模型`:deepseekConnecting?"正在连接…":a.description):a.description;return <div className="connection-card" key={a.id}><Avatar agent={a.id}/><div><strong>{a.name}{a.connected && <span className="sidebar-visible-badge">侧边栏已显示</span>}</strong><p>{detail}</p></div>{a.registration_state==="active" && isCodex && <button className="outline-button" disabled={connecting || !desktop} onClick={connect}>{connecting?"连接中…":probe?"重新检测":"连接"}</button>}{a.registration_state==="active" && isDeepseek && <button className="outline-button" disabled={deepseekConnecting || !desktop} onClick={connectDeepseek}>{deepseekConnecting?"连接中…":deepseekProbe?"重新检测":"连接"}</button>}{a.registration_state==="active" && <button className="outline-button" onClick={()=>void invoke("agent_update",{agent:a.id,enabled:!a.enabled,revoke:false}).then(refreshAgents).catch(cause=>setError(String(cause)))}>{a.enabled?"停用":"启用"}</button>}<button className="outline-button" onClick={()=>void invoke("agent_update",{agent:a.id,enabled:false,revoke:true}).then(refreshAgents).catch(cause=>setError(String(cause)))}>移除</button></div>;})}</div>{(probe || deepseekProbe || info) && <details className="runtime-details"><summary>运行环境与本地数据位置</summary>{probe && <code>Codex ({probe.version}): {probe.executable}</code>}{deepseekProbe && <code>DeepSeek (Harness {deepseekProbe.version}): {deepseekProbe.executable}</code>}{info && <code>DB: {info.database_path}</code>}</details>}<div className="dialog-footer"><span>AgentCrew · v{info?.version ?? "0.1.0"}</span><button className="primary" onClick={() => setSettings(false)}>完成<Icon name="check" size={16} /></button></div></Dialog>}
+    {settings && (
+      <SettingsDialog
+        agents={agents}
+        discoveryResults={discoveryResults}
+        discovering={discovering}
+        probes={{ ...probesByAgent, ...(probe ? { codex: probe } : {}), ...(deepseekProbe ? { deepseek: deepseekProbe } : {}) }}
+        probing={{ ...probingByAgent, codex: !!(probingByAgent.codex || connecting), deepseek: !!(probingByAgent.deepseek || deepseekConnecting) }}
+        paused={paused}
+        info={info}
+        onDiscover={() => void discoverLocalAgents(true)}
+        onProbeAgent={agent => void probeSingleAgent(agent)}
+        onOpenPairing={() => { setSettings(false); setPairing(true); }}
+        onToggleDispatch={() => void toggleDispatch()}
+        onError={setError}
+        onClose={() => setSettings(false)}
+      />
+    )}
     {toast && <div className="toast" role="status"><Icon name="check" size={16} />{toast}</div>}
   </div>;
 }
