@@ -4,14 +4,14 @@ import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
 import { useAgents, saveGroup, deleteGroup, getGroupSessions, type Group, type GroupSession } from "./api";
 import type { Project } from "../projects/api";
-export default function GroupDialog({ existing, projects, onSaved, onDeleted, onClose }: { existing?: Group; projects: Project[]; onSaved: (group: Group) => void; onDeleted: (group: Group, sessions: GroupSession[]) => void; onClose: () => void }) {
+export default function GroupDialog({ existing, initialDelete = false, projects, onSaved, onDeleted, onClose }: { existing?: Group; initialDelete?: boolean; projects: Project[]; onSaved: (group: Group) => void; onDeleted: (group: Group, sessions: GroupSession[]) => void; onClose: () => void }) {
   const agents = useAgents().filter(agent => agent.available);
   const [name, setName] = useState(existing?.name ?? "");
   const [members, setMembers] = useState(existing?.members ?? (agents[0] ? [agents[0].id] : []));
   const [projectId, setProjectId] = useState(existing?.project_id ?? "");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(initialDelete);
   const [deleting, setDeleting] = useState(false);
   const busy = saving || deleting;
   const close = () => { if (!busy) onClose(); };
@@ -36,7 +36,7 @@ export default function GroupDialog({ existing, projects, onSaved, onDeleted, on
     <p className="field-help">将删除群内全部会话、消息、摘要和任务记录。保留项目文件、群工作目录、图片缓存及原厂会话文件。</p>
     <p className="field-help">请先完成或取消群内所有任务，包括暂停或停止中的任务。</p>
     {error && <div className="inline-error" role="alert">{error}</div>}
-    <div className="dialog-footer"><span /><div className="session-dialog-actions"><button type="button" className="outline-button" disabled={busy} onClick={() => { setConfirmDelete(false); setError(null); }}>返回</button><button type="button" className="primary danger-button" disabled={busy} onClick={() => void remove()}>{deleting ? "正在删除…" : "确认删除群"}</button></div></div>
+    <div className="dialog-footer"><span /><div className="session-dialog-actions"><button type="button" className="outline-button" disabled={busy} onClick={() => { if (initialDelete) close(); else { setConfirmDelete(false); setError(null); } }}>{initialDelete ? "取消" : "返回"}</button><button type="button" className="primary danger-button" disabled={busy} onClick={() => void remove()}>{deleting ? "正在删除…" : "确认删除群"}</button></div></div>
   </Dialog>;
   return <Dialog title={existing ? "群聊设置" : "创建协作群"} onClose={close}>
     <div className="invite-type"><Icon name="shield" size={18} /><span>你自己的 Agent</span><span className="label-chip">本机</span></div>

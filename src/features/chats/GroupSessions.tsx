@@ -27,6 +27,26 @@ function preview(session: ChatSession) {
   return session.status && ["running", "paused", "cancelling"].includes(session.status) ? taskLabels[session.status] : session.preview ?? "等待第一条消息";
 }
 
+export function GroupSidebarList({ groups, projects, selectedId, onSelect, onSettings, onDelete }: { groups: Group[]; projects: Project[]; selectedId?: string; onSelect: (id: string) => void; onSettings: (group: Group) => void; onDelete: (group: Group) => void }) {
+  const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const click = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".group-row-menu")) close(); };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); triggerRef.current?.focus(); } };
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    document.addEventListener("click", click); document.addEventListener("keydown", key); window.addEventListener("resize", close); window.addEventListener("scroll", close, true);
+    return () => { document.removeEventListener("click", click); document.removeEventListener("keydown", key); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
+  }, [menu]);
+  const target = groups.find(g => g.id === menu?.id);
+  return <div className="group-sidebar-list">{groups.map(g => <div className={`group-sidebar-row ${g.id === selectedId ? "active" : ""}`} key={g.id}>
+    <button className="group-sidebar-select" aria-pressed={g.id === selectedId} onClick={() => { setMenu(null); onSelect(g.id); }}><Avatar agent="group" /><span className="group-sidebar-copy"><strong title={g.name}>{g.name}</strong><small>{g.project_id ? `关联项目 · ${projects.find(p => p.id === g.project_id)?.name ?? "本地项目"}` : "未关联项目 · 群专用目录"}</small></span><span className="group-sidebar-count">{g.session_count ?? 1}</span></button>
+    <button className="group-row-menu" aria-label={`${g.name}的群操作`} title="群操作" aria-expanded={menu?.id === g.id} aria-controls={menu?.id === g.id ? "group-row-actions" : undefined} onClick={e => { triggerRef.current = e.currentTarget; const rect = e.currentTarget.getBoundingClientRect(); setMenu(menu?.id === g.id ? null : { id: g.id, top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 110)), left: Math.max(8, Math.min(rect.right - 155, window.innerWidth - 163)) }); }}><Icon name="more" size={16} /></button>
+  </div>)}{menu && target && createPortal(<div id="group-row-actions" className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="群操作"><button onClick={() => { setMenu(null); onSettings(target); }}>群设置</button><hr /><button className="destructive-action" onClick={() => { setMenu(null); onDelete(target); }}>删除群</button></div>, document.body)}</div>;
+}
+
 export function GroupHub({ groups, projects, onSelect, onCreate }: { groups: Group[]; projects: Project[]; onSelect: (group: Group) => void; onCreate: () => void }) {
   const [query, setQuery] = useState("");
   const projectName = (group: Group) => projects.find(p => p.id === group.project_id)?.name ?? (group.project_id ? "关联项目" : "未关联项目");

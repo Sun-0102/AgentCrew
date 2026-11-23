@@ -44,10 +44,13 @@
 .group-sidebar-heading button { display: flex; gap: 4px; align-items: center; border: 0; background: transparent; color: inherit; padding: 0; font-size: 11px; }
 .group-sidebar-heading button:hover { color: var(--accent); }
 .group-sidebar-list { padding: 0 10px; overflow-y: auto; min-height: 0; }
-.group-sidebar-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 1px solid transparent; background: none; padding: 13px 9px; border-radius: 10px; margin: 3px 0; }
+.group-sidebar-row { display: flex; align-items: center; gap: 0; width: 100%; text-align: left; border: 1px solid transparent; background: none; padding: 0; border-radius: 10px; margin: 3px 0; }
 .group-sidebar-row:hover { background: #f1f5f9; }
 .group-sidebar-row.active { background: #e0e7ff; border-color: #c7d2fe; }
-.group-sidebar-row > .avatar { height: 32px; width: 32px; border-radius: 10px; background: #e0e7ff; }
+.group-sidebar-select > .avatar { height: 32px; width: 32px; border-radius: 10px; background: #e0e7ff; }
+.group-sidebar-select { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; text-align: left; border: 0; background: none; padding: 13px 4px 13px 9px; border-radius: 10px; }
+.group-row-menu { display: grid; place-items: center; flex-shrink: 0; width: 26px; height: 28px; margin-right: 5px; border: 0; border-radius: 5px; background: transparent; color: #64748b; padding: 0; }
+.group-row-menu:hover, .group-row-menu[aria-expanded=true] { background: #c7d2fe; color: var(--accent); }
 .group-sidebar-copy { min-width: 0; flex: 1; }
 .group-sidebar-copy strong { font-weight: 500; font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-sidebar-copy small { display: block; font-size: 11px; color: #64748b; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
