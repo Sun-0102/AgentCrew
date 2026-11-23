@@ -4,6 +4,8 @@ import { memo, useEffect, useState, type ComponentProps } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import Dialog from "../../components/Dialog";
+import { useAgents } from "./api";
+import { remarkMentions } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const localAttachment = /^ai-gent-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -42,8 +44,10 @@ const components: NonNullable<ComponentProps<typeof Markdown>["components"]> = {
   },
 };
 
-export default memo(function MessageBody({ text }: { text: string }) {
-  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm]} urlTransform={(url, key) =>
+export default memo(function MessageBody({ text, members }: { text: string; members?: string[] }) {
+  const registry = useAgents();
+  const mentionAgents = members ? registry.filter(agent => members.includes(agent.id)) : registry;
+  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) =>
     key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url)) ? url : defaultUrlTransform(url)
   } components={components}>{text}</Markdown></div>;
 });

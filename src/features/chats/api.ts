@@ -67,7 +67,7 @@ export async function autoDiscoverAgents(autoEnable = true): Promise<DiscoveryIt
   return results;
 }
 export function useAgents() {
-  return useSyncExternalStore(listener => { registryListeners.add(listener); return () => { registryListeners.delete(listener); }; }, () => agents);
+  return useSyncExternalStore(listener => { registryListeners.add(listener); return () => { registryListeners.delete(listener); }; }, () => agents, () => agents);
 }
 export function loadAgents() { return registryRequest ??= refreshAgents().catch(error => { registryRequest = undefined; throw error; }); }
 export const agentName = (id: string) => agents.find(agent => agent.id === id)?.name ?? id;

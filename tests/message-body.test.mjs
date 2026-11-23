@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
-const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+const server = await createServer({ server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true }, appType: "custom" });
 after(() => server.close());
 const { default: MessageBody } = await server.ssrLoadModule("/src/features/chats/MessageBody.tsx");
 const { default: ChatStage } = await server.ssrLoadModule("/src/features/chats/ChatStage.tsx");
@@ -85,4 +85,26 @@ test("folds progress across tools and preserves speaker and status boundaries", 
   } finally {
     delete globalThis.localStorage;
   }
+});
+
+
+test("highlights agent mentions and uses orange styling for the current user", () => {
+  const html = render("@Codex 请复核。@DeepSeek 请检查。@你 请确认。@我 @用户 @user");
+  assert.equal((html.match(/class="message-mention"/g) ?? []).length, 2);
+  assert.equal((html.match(/class="message-mention message-mention-self"/g) ?? []).length, 4);
+  assert.match(html, /title="Codex · 智能体">@Codex<\/span>/);
+  assert.match(html, /title="当前用户">@你<\/span>/);
+});
+
+test("keeps quoted mentions, code, links, emails, unknown names and escaped text plain", () => {
+  for (const text of ['> @Codex 请检查', '`@Codex`', '```\n@Codex\n```', '“**@Codex** 请复核”', '"@你"', '[ @Codex ](https://example.com)', 'name@Codex.com', '@Unknown @CodexExtra @Codex-foo', String.raw`\@Codex`]) {
+    assert.doesNotMatch(render(text), /class="message-mention/, text);
+  }
+  assert.match(render('“历史提及 @Codex” **@DeepSeek** 请检查'), /class="message-mention"[^>]*>@DeepSeek/);
+});
+
+test("only decorates members of the current conversation", () => {
+  const html = renderToStaticMarkup(createElement(MessageBody, { text: "@Codex @DeepSeek @你", members: ["codex"] }));
+  assert.equal((html.match(/class="message-mention"/g) ?? []).length, 1);
+  assert.match(html, /<\/span> @DeepSeek /);
 });
