@@ -571,24 +571,43 @@ fn tick_member(
     snapshot: &impl Fn(&Task) -> Result<Value, String>,
     send: &impl Fn(&Task, &str) -> Result<(), String>,
 ) -> Result<(), String> {
-    if current.thread_id.is_some() {
+    if current.status == "running" || current.thread_id.is_some() {
         let session = snapshot(current)?;
-        if session["thread_id"].as_str() != current.thread_id.as_deref()
-            || (current.turn_id.is_some()
-                && session["turn_id"].as_str() != current.turn_id.as_deref())
+        let session_thread = session["thread_id"].as_str().filter(|id| !id.is_empty());
+        let session_turn = session["turn_id"].as_str().filter(|id| !id.is_empty());
+        if current.thread_id.is_none() {
+            if let Some(thread) = session_thread {
+                let connection = store.connect()?;
+                connection
+                    .execute(
+                        "UPDATE group_task_members SET thread_id=?3,turn_id=COALESCE(turn_id,?4) WHERE task_id=?1 AND agent=?2",
+                        params![current.id, current.current_agent, thread, session_turn],
+                    )
+                    .map_err(|e| e.to_string())?;
+                connection
+                    .execute(
+                        "UPDATE agent_attempts SET native_run_id=?3 WHERE native_run_id='' AND id IN (SELECT attempt_id FROM group_task_inputs WHERE task_id=?1 AND target_agent=?2 AND message_id=?4)",
+                        params![
+                            current.id,
+                            current.current_agent,
+                            thread,
+                            current.pending_source_message
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+            } else if session["status"].as_str().is_some_and(codex::active) {
+                return Ok(());
+            }
+        } else if session_thread != current.thread_id.as_deref()
+            || (current.turn_id.is_some() && session_turn != current.turn_id.as_deref())
         {
             return Err("会话或轮次标识不匹配，未接收旧回执".into());
-        }
-        if current.turn_id.is_none() && session["turn_id"].is_string() {
+        } else if current.turn_id.is_none() && session_turn.is_some() {
             store
                 .connect()?
                 .execute(
                     "UPDATE group_task_members SET turn_id=?3 WHERE task_id=?1 AND agent=?2",
-                    params![
-                        current.id,
-                        current.current_agent,
-                        session["turn_id"].as_str()
-                    ],
+                    params![current.id, current.current_agent, session_turn],
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -692,12 +711,16 @@ fn tick_member(
         return Err(error);
     }
     let session = snapshot(&current)?;
-    let thread = session["thread_id"].as_str().ok_or("执行未返回会话标识")?;
+    let thread = session["thread_id"].as_str().filter(|id| !id.is_empty());
+    let turn = session["turn_id"].as_str().filter(|id| !id.is_empty());
+    if thread.is_none() && !session["status"].as_str().is_some_and(codex::active) {
+        return Err("执行未返回会话标识".into());
+    }
     let tx = connection
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
-    tx.execute("UPDATE group_task_members SET status='running',sequence_start=?3,thread_id=?4,turn_id=?5 WHERE task_id=?1 AND agent=?2",params![current.id,current.current_agent,start,thread,session["turn_id"].as_str()]).map_err(|e|e.to_string())?;
-    tx.execute("UPDATE agent_attempts SET phase='running',native_run_id=?3 WHERE id IN (SELECT attempt_id FROM group_task_inputs WHERE task_id=?1 AND target_agent=?2 AND status='selected')",params![current.id,current.current_agent,thread]).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE group_task_members SET status='running',sequence_start=?3,thread_id=?4,turn_id=?5 WHERE task_id=?1 AND agent=?2",params![current.id,current.current_agent,start,thread,turn]).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE agent_attempts SET phase='running',native_run_id=?3 WHERE id IN (SELECT attempt_id FROM group_task_inputs WHERE task_id=?1 AND target_agent=?2 AND status='selected')",params![current.id,current.current_agent,thread.unwrap_or("")]).map_err(|e|e.to_string())?;
     tx.execute("UPDATE group_task_inputs SET status='delivered' WHERE task_id=?1 AND target_agent=?2 AND status='selected'",params![current.id,current.current_agent]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())

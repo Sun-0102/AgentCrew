@@ -662,10 +662,14 @@ impl Runtime {
         let root = root.to_str().ok_or("Gemini 工作目录无效")?;
         let install = Installation::find()?;
         let previous = session(store, conversation)?;
-        let existing_thread = previous["thread_id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned);
+        let existing_thread = if role == "assignment" {
+            None
+        } else {
+            previous["thread_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        };
         if existing_thread.is_some()
             && (previous["runtime_version"] != install.version
                 || previous["workspace_path"] != root)

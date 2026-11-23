@@ -106,9 +106,21 @@ impl ProcessJob {
     }
     pub(crate) fn terminate(&self) -> Result<(),String> {
         if self.stopped.swap(true,Ordering::SeqCst) {return Ok(());}
-        if unsafe {libc::kill(-self.group,libc::SIGTERM)}!=0 && std::io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH) {self.stopped.store(false,Ordering::SeqCst);return Err("无法停止应用管理的进程组。".into());}
+        let term=unsafe {libc::kill(-self.group,libc::SIGTERM)};
+        if term!=0 {
+            if std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH) {return Ok(());}
+            self.stopped.store(false,Ordering::SeqCst);
+            return Err("无法停止应用管理的进程组。".into());
+        }
         std::thread::sleep(Duration::from_millis(200));
-        if unsafe {libc::kill(-self.group,libc::SIGKILL)}!=0 && std::io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH) {self.stopped.store(false,Ordering::SeqCst);return Err("无法清理应用管理的进程组。".into());}
+        if unsafe {libc::kill(-self.group,libc::SIGKILL)}!=0 {
+            let err=std::io::Error::last_os_error().raw_os_error();
+            // On macOS, killpg(SIGKILL) can return EPERM once the group has exited to a zombie state after SIGTERM.
+            if !matches!(err,Some(libc::ESRCH)|Some(libc::EPERM)) {
+                self.stopped.store(false,Ordering::SeqCst);
+                return Err("无法清理应用管理的进程组。".into());
+            }
+        }
         Ok(())
     }
 }
@@ -662,7 +674,7 @@ impl Runtime {
             .map_err(|e| e.to_string())?;
         transaction
             .execute(
-                "INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status,turn_id,error) VALUES(?1,?2,?3,'','','starting',NULL,NULL) ON CONFLICT(conversation_id) DO UPDATE SET status='starting',model=excluded.model,turn_id=NULL,error=NULL",
+                "INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status,turn_id,error) VALUES(?1,?2,?3,'','','starting',NULL,NULL) ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,status='starting',model=excluded.model,turn_id=NULL,error=NULL",
                 params![conversation_id, placeholder_thread, model],
             )
             .map_err(|e| e.to_string())?;
