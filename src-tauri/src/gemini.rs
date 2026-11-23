@@ -795,7 +795,15 @@ impl Runtime {
                     .map_err(|e| e.to_string())?
                     .insert(request_id, send);
                 *client_slot.lock().map_err(|e| e.to_string())? = Some(client.clone());
-                if let Err(error) = client.write(json!({"jsonrpc":"2.0","id":request_id,"method":"session/prompt","params":{"sessionId":id,"prompt":[{"type":"text","text":text_owned}]}})) {
+                let mut prompt_blocks = vec![json!({"type":"text","text":text_owned})];
+                for attachment_id in crate::attachments::extract_ids(&text_owned) {
+                    if let Ok((mime, data)) = crate::attachments::read_base64(&store, &attachment_id) {
+                        if mime.starts_with("image/") {
+                            prompt_blocks.push(json!({"type":"image","data":data,"mimeType":mime}));
+                        }
+                    }
+                }
+                if let Err(error) = client.write(json!({"jsonrpc":"2.0","id":request_id,"method":"session/prompt","params":{"sessionId":id,"prompt":prompt_blocks}})) {
                     let _ = client.stop();
                     return Err(error);
                 }

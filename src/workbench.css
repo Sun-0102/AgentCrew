@@ -304,10 +304,12 @@ button { -webkit-tap-highlight-color: transparent; }
 .reply-preview p { margin: 5px 0 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reply-preview .icon-button { width: 18px; height: 18px; }
 .attachment-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.attachment-chip { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f1f5f9; color: #475569; font-size: 13px; max-width: 100%; }
+.attachment-chip { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f1f5f9; color: #475569; font-size: 13px; max-width: 100%; }
+.attachment-thumb { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; flex-shrink: 0; border: 1px solid #cbd5e1; }
 .attachment-chip > span { overflow-wrap: anywhere; }
-.attachment-chip small { display: block; font-size: 13px; color: var(--muted); margin-top: 3px; }
+.attachment-chip small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 .attachment-chip button { background: transparent; border: 0; padding: 2px; color: #64748b; }
+.composer.dragging { border-color: #4f46e5; background: #eef2ff55; }
 .mention-control { position: relative; }
 .mention-menu { position: absolute; width: 235px; bottom: 41px; left: 0; padding: 8px; border: 1px solid #cbd5e1; background: #ffffff; box-shadow: 0 12px 30px #0f172a1a; border-radius: 11px; z-index: 10; animation: menuIn 160ms ease-out; }
 .menu-caption { font-size: 13px; color: var(--muted); padding: 6px 9px 9px; }

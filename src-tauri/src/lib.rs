@@ -1,5 +1,6 @@
 mod agent_commands;
 mod agents;
+mod attachments;
 mod codex;
 mod codex_sidebar;
 mod collaboration;
@@ -102,6 +103,8 @@ pub fn run() {
             commands::skills_list,
             commands::skills_prepare,
             commands::image_read,
+            commands::attachment_save,
+            commands::attachment_read,
             commands::project_list,
             commands::project_add,
             commands::codex_probe,

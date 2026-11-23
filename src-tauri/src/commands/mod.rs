@@ -50,6 +50,29 @@ pub async fn image_read(app: tauri::AppHandle, id: String) -> Result<String, Str
 }
 
 #[tauri::command]
+pub async fn attachment_save(
+    app: tauri::AppHandle,
+    name: String,
+    mime_type: String,
+    data: String,
+) -> Result<crate::attachments::SavedAttachment, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::attachments::save(&app.state::<Store>(), &name, &mime_type, &data)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn attachment_read(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::attachments::read_data_url(&app.state::<Store>(), &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn app_info(store: State<'_, Store>) -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),

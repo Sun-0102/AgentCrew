@@ -738,7 +738,15 @@ impl Runtime {
                     client.loaded.lock().unwrap().insert(thread.clone());
                     thread
                 };
-                if let Err(error) = client.request("turn/start", json!({"threadId":thread,"model":model_owned,"effort":effort,"serviceTierForTurn":tier,"input":[{"type":"text","text":text_owned,"text_elements":[]}]})) {
+                let mut turn_input = vec![json!({"type":"text","text":text_owned,"text_elements":[]})];
+                for attachment_id in crate::attachments::extract_ids(&text_owned) {
+                    if let Ok(file) = crate::attachments::find(&store, &attachment_id) {
+                        if file.is_image {
+                            turn_input.push(json!({"type":"localImage","path":file.path.to_string_lossy()}));
+                        }
+                    }
+                }
+                if let Err(error) = client.request("turn/start", json!({"threadId":thread,"model":model_owned,"effort":effort,"serviceTierForTurn":tier,"input":turn_input})) {
                     let _ = client.update_status(&thread, "interrupted", Some(&error));
                     return Err(error);
                 }

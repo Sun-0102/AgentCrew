@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
 import Avatar from "../../components/Avatar";
@@ -12,6 +12,7 @@ import { activeMention, insertMention, messageRecipients } from "./mentions";
 import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
 import { skillPrefix, requestedSkills, type Skill } from "./skills";
+import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type Message, type Probe, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -28,7 +29,6 @@ interface Props {
   session?: GroupSession | PrivateSession; onGroups?: () => void; onRenameSession?: () => void; onArchiveSession?: () => void; sessionSaving?: boolean;
   onDeleteSession?: () => void; onGroupUpdated?: (group: Group) => void;
 }
-interface Attachment { name: string; text: string; size: number }
 interface Reply { author: string; text: string }
 const drafts = new Map<string, { text: string; files: Attachment[]; reply: Reply | null }>();
 export function discardSessionDraft(session: GroupSession | PrivateSession) {
@@ -47,6 +47,7 @@ export default function ChatStage(p: Props) {
   const [files, setFiles] = useState<Attachment[]>(() => drafts.get(scopeKey)?.files ?? []);
   const [reply, setReply] = useState<Reply | null>(() => drafts.get(scopeKey)?.reply ?? null);
   const [sending, setSending] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [optimistic, setOptimistic] = useState<(Message & { scopeKey: string; baselineCount: number })[]>([]);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,15 +106,51 @@ export default function ChatStage(p: Props) {
     if (members.includes(recipient) && recipient !== agent) onAgent(recipient);
   }, [recipient, agent, members.join(","), composingBlocked]);
   async function copy(value: string) { try { await navigator.clipboard.writeText(value); notify("已复制消息"); } catch { notify("复制失败，请选择文字后手动复制"); } }
-  async function attach(event: ChangeEvent<HTMLInputElement>) {
+  async function addFiles(items: File[]) {
+    if (!items.length) return;
     try {
-      const items = Array.from(event.target.files ?? []);
-      if (files.length + items.length > 3) throw new Error("一次最多添加 3 个文本附件。");
-      if ([...files, ...items].reduce((sum, file) => sum + file.size, 0) > 60000) throw new Error("文本附件合计请控制在 60 KB 内。");
-      const incoming = await Promise.all(items.map(async file => ({ name: file.name, size: file.size, text: await file.text() })));
-      setFiles(current => [...current, ...incoming]); setError(null);
+      const incoming = await prepareAttachments(items, files.length);
+      setFiles(current => [...current, ...incoming]);
+      setError(null);
     } catch (cause) { setError(String(cause)); }
+  }
+  async function attach(event: ChangeEvent<HTMLInputElement>) {
+    await addFiles(Array.from(event.target.files ?? []));
     event.target.value = "";
+  }
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (composingBlocked) return;
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const pastedFiles = clipboard.files.length
+      ? Array.from(clipboard.files)
+      : Array.from(clipboard.items).filter(item => item.kind === "file").map(item => item.getAsFile()).filter((f): f is File => !!f);
+    const plainText = clipboard.getData("text/plain");
+    if (pastedFiles.length) {
+      if (!plainText) event.preventDefault();
+      void addFiles(pastedFiles);
+      return;
+    }
+    if (plainText && isLargeTextPaste(plainText)) {
+      event.preventDefault();
+      if (files.length >= MAX_ATTACHMENTS) {
+        setError(`一次最多添加 ${MAX_ATTACHMENTS} 个附件。`);
+        return;
+      }
+      try {
+        const attachment = createTextPasteAttachment(plainText, files.length + 1);
+        setFiles(current => [...current, attachment]);
+        setError(null);
+        notify("超长文本已自动折叠为文本附件");
+      } catch (cause) { setError(String(cause)); }
+    }
+  }
+  function handleDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (composingBlocked) return;
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    if (dropped.length) void addFiles(dropped);
   }
   const skillsOpen = skillQuery !== null;
   useEffect(() => {
@@ -146,25 +183,35 @@ export default function ChatStage(p: Props) {
     requestAnimationFrame(() => { input.current?.focus(); input.current?.setSelectionRange(next.length, next.length); });
   }
   async function send() {
-    if (!text.trim() || composingBlocked || !ready) return;
+    if ((!text.trim() && !files.length) || composingBlocked || !ready) return;
     if (!desktop) { notify("请在桌面版中发送消息，浏览器预览不会调用 Agent"); return; }
     const targetAgent = recipient;
     if (!members.includes(targetAgent)) { setError("这个 Agent 不在当前群里，请先邀请成员。"); return; }
     const draftText = text;
     const draftFiles = files;
     const draftReply = reply;
-    let content = draftText.trim();
-    if (draftReply) content = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${content}`;
+    const baseText = draftText.trim() || (draftFiles.every(file => file.isImage) ? "请查看以下图片：" : "请查看以下附件：");
+    let optimisticContent = baseText;
+    if (draftReply) optimisticContent = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${optimisticContent}`;
     for (const file of draftFiles) {
-      const fence = "`".repeat((file.text.match(/`+/g) ?? []).reduce((size, run) => Math.max(size, run.length + 1), 3));
-      content += `\n\n文本附件：${file.name}\n${fence}\n${file.text}\n${fence}`;
+      optimisticContent += file.isImage && file.previewUrl
+        ? `\n\n![${file.name}](${file.previewUrl})`
+        : `\n\n附件：${file.name}（${formatAttachmentSize(file.size)}）`;
     }
     const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const baselineCount = userMessageCount;
     setText(""); setFiles([]); setReply(null); setSkillQuery(null); setMentions(false);
-    setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: content, created_at: new Date().toISOString(), agent: targetAgent }]);
+    setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: optimisticContent, created_at: new Date().toISOString(), agent: targetAgent }]);
     setSending(true); setError(null); nearBottom.current = true;
     try {
+      let content = baseText;
+      if (draftReply) content = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${content}`;
+      for (const file of draftFiles) {
+        const saved = await invoke<SavedAttachment>("attachment_save", { name: file.name, mimeType: file.mimeType, data: file.dataBase64 });
+        content += saved.is_image
+          ? `\n\n![${saved.name}](ai-gent-attachment:${saved.id})`
+          : `\n\n附件：${saved.name}（${formatAttachmentSize(saved.size)}）\n文件路径：${saved.path}`;
+      }
       const names = requestedSkills(draftText);
       if (names.length) content += await invoke<string>("skills_prepare", { ...scope, agents: recipients, names });
       if (group) {
@@ -219,14 +266,14 @@ export default function ChatStage(p: Props) {
           {(attention || snapshot.approvals.length > 0) && <button type="button" className="status-detail-button" onClick={() => setPanel("evidence")}>{snapshot.approvals.length ? "查看请求" : "查看详情"}</button>}
         </div>
         {group && (busy || taskControllable || attention) && <GroupMemberStatus snapshot={snapshot} members={members} />}
-        <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
+        <form className={`composer ${dragging ? "dragging" : ""}`} onDragOver={event => { event.preventDefault(); if (!composingBlocked) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={handleDrop} onSubmit={event => { event.preventDefault(); void send(); }}>
           {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
-          {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}><Icon name="file" size={18} /><span>{file.name}<small>{(file.size / 1024).toFixed(1)} KB · 文本</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
+          {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}>{file.isImage && file.previewUrl ? <img className="attachment-thumb" src={file.previewUrl} alt={file.name} /> : <Icon name="file" size={18} />}<span>{file.name}<small>{formatAttachmentSize(file.size)} · {file.isImage ? "图片" : "文件"}</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
           {skillsOpen && <div className="skill-suggestions" id="skill-suggestions" role="listbox" aria-label="技能列表">
             <div className="menu-caption">{agentName(agent)} · 技能 {skillsLoading ? "" : `(${skills.length})`}</div>
             {skillsLoading ? <p role="status">正在读取本地和运行时技能…</p> : skillsError ? <p role="alert">{skillsError}</p> : !skillItems.length ? <p role="status">{desktop ? "没有匹配的技能。请检查搜索词或当前 Agent 的技能配置。" : "请在桌面版中读取本地技能。"}</p> : skillItems.map((skill, index) => <button type="button" role="option" id={`skill-option-${index}`} aria-selected={index === Math.min(skillIndex, skillItems.length - 1)} key={skill.name} disabled={composingBlocked} onMouseDown={event => event.preventDefault()} onClick={() => chooseSkill(skill)}><strong>/{skill.name}<small className="skill-source">{skill.source}</small></strong><span>{skill.description || "本地技能"}</span></button>)}
           </div>}
-          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart)} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
+          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart)} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
             if (skillsOpen) {
               if (event.key === "Escape") { event.preventDefault(); setSkillQuery(null); return; }
@@ -249,7 +296,7 @@ export default function ChatStage(p: Props) {
               } else void send();
             }
           }} />
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple accept=".txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.html,.css,.yaml,.yml,.log" onChange={attach} tabIndex={-1} aria-label="选择文本附件" /><button className="icon-button" type="button" title="添加文本附件，合计不超过 60 KB" aria-label="添加文本附件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control"><button className={`icon-button ${mentions ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => setMentions(!mentions)}><Icon name="at" size={19} /></button>{mentions && <div className="mention-menu"><div className="menu-caption">选择要 @ 的成员</div>{members.map(id => <button type="button" key={id} disabled={composingBlocked} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}</div><span className="toolbar-divider" />{group && members.length > 1 && <label className="model-picker agent-model-picker" title="切换要配置模型的成员"><Avatar agent={agent} small /><select aria-label="切换配置模型的成员" value={agent} onChange={event => p.onAgent(event.target.value)}>{members.map(id => <option key={id} value={id}>{agentName(id)}</option>)}</select><Icon name="down" size={13} /></label>}<label className="model-picker"><span className="sr-only">选择模型</span><select aria-label="选择模型" value={model} onChange={event => onModel(event.target.value)} disabled={!probe || busy || taskControllable}>{!probe && <option value="">{connecting ? "正在连接…" : "选择模型"}</option>}{probe?.models.map(m => <option key={m.model} value={m.model}>{m.displayName}</option>)}</select><Icon name="down" size={13} /></label><ReasoningPicker key={`${agent}:${model}`} model={probe?.models.find(m => m.model === model)} value={p.reasoningEffort} disabled={busy || taskControllable || !probe} onChange={p.onReasoningEffort} />{provider === "codex" && <button type="button" className={`icon-button fast-mode-toggle ${fastMode ? "active" : ""}`} aria-label={fastMode ? "关闭快速模式" : "开启快速模式"} aria-pressed={fastMode} title={!fastSpeed && !fastMode ? "当前模型不支持快速模式" : fastMode ? "快速模式已开启，点击切回标准速度" : "开启快速模式，消耗更多额度"} disabled={!probe || (!fastSpeed && !fastMode) || busy || taskControllable} onClick={() => p.onServiceTier?.(fastMode ? "default" : fastSpeed!.id)}><Icon name="bolt" size={18} /></button>}</div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || !text.trim() || !desktop}><Icon name="send" size={21} /></button>}</div></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control"><button className={`icon-button ${mentions ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => setMentions(!mentions)}><Icon name="at" size={19} /></button>{mentions && <div className="mention-menu"><div className="menu-caption">选择要 @ 的成员</div>{members.map(id => <button type="button" key={id} disabled={composingBlocked} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}</div><span className="toolbar-divider" />{group && members.length > 1 && <label className="model-picker agent-model-picker" title="切换要配置模型的成员"><Avatar agent={agent} small /><select aria-label="切换配置模型的成员" value={agent} onChange={event => p.onAgent(event.target.value)}>{members.map(id => <option key={id} value={id}>{agentName(id)}</option>)}</select><Icon name="down" size={13} /></label>}<label className="model-picker"><span className="sr-only">选择模型</span><select aria-label="选择模型" value={model} onChange={event => onModel(event.target.value)} disabled={!probe || busy || taskControllable}>{!probe && <option value="">{connecting ? "正在连接…" : "选择模型"}</option>}{probe?.models.map(m => <option key={m.model} value={m.model}>{m.displayName}</option>)}</select><Icon name="down" size={13} /></label><ReasoningPicker key={`${agent}:${model}`} model={probe?.models.find(m => m.model === model)} value={p.reasoningEffort} disabled={busy || taskControllable || !probe} onChange={p.onReasoningEffort} />{provider === "codex" && <button type="button" className={`icon-button fast-mode-toggle ${fastMode ? "active" : ""}`} aria-label={fastMode ? "关闭快速模式" : "开启快速模式"} aria-pressed={fastMode} title={!fastSpeed && !fastMode ? "当前模型不支持快速模式" : fastMode ? "快速模式已开启，点击切回标准速度" : "开启快速模式，消耗更多额度"} disabled={!probe || (!fastSpeed && !fastMode) || busy || taskControllable} onClick={() => p.onServiceTier?.(fastMode ? "default" : fastSpeed!.id)}><Icon name="bolt" size={18} /></button>}</div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name="send" size={21} /></button>}</div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</span></div>
       </div>
     </div>{panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>

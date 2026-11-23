@@ -578,11 +578,18 @@ impl Runtime {
             .unwrap_or_else(|| format!("ai-gent-deepseek-{}", uuid::Uuid::new_v4()));
         let logical = crate::agents::logical_identity(store, conversation)?;
         let group_conversation = logical.as_ref().map(|(_, id)| id.as_str()).unwrap_or(conversation);
-        let prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
+        let mut prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
             text.to_owned()
         } else {
             format!("你是 AgentCrew 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
         };
+        for attachment_id in crate::attachments::extract_ids(text) {
+            if let Ok(file) = crate::attachments::find(store, &attachment_id) {
+                if file.is_image {
+                    prompt.push_str(&format!("\n[图片附件路径: {}]", file.path.display()));
+                }
+            }
+        }
         let mut connection = store.connect()?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO deepseek_sessions(conversation_id,thread_id,model,runtime_version,workspace_path,status) VALUES(?1,?2,?3,?4,?5,'starting') ON CONFLICT(conversation_id) DO UPDATE SET thread_id=excluded.thread_id,model=excluded.model,runtime_version=excluded.runtime_version,workspace_path=excluded.workspace_path,status='starting',error=NULL",params![conversation,thread,model,install.version,workspace]).map_err(|e|e.to_string())?;
