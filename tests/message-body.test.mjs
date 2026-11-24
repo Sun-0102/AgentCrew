@@ -108,3 +108,12 @@ test("only decorates members of the current conversation", () => {
   assert.equal((html.match(/class="message-mention"/g) ?? []).length, 1);
   assert.match(html, /<\/span> @DeepSeek /);
 });
+
+test("renders agentcrew-dispatch blocks as visible handoff cards", () => {
+  const html = render("先出方案。\n```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"修改 UsageDashboard.tsx 为折线图\",\"return_to_sender\":true}\n```");
+  assert.match(html, /class="message-dispatch-card"/);
+  assert.match(html, /@Codex/);
+  assert.match(html, /派发任务/);
+  assert.match(html, /完成后回传验收/);
+  assert.match(html, /修改 UsageDashboard\.tsx 为折线图/);
+});

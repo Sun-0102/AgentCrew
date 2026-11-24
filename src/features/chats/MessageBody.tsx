@@ -1,6 +1,6 @@
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { memo, useEffect, useState, type ComponentProps } from "react";
+import { Children, isValidElement, memo, useEffect, useState, type ComponentProps } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import Dialog from "../../components/Dialog";
@@ -32,8 +32,61 @@ function LocalImage({ id, alt, command = "image_read" }: { id: string; alt: stri
     : <span role="status">{image?.id === id && image.error ? image.error : "正在读取图片…"}</span>;
 }
 
+interface DispatchItem {
+  to: string;
+  instruction: string;
+  return_to_sender?: boolean;
+}
+
+function parseDispatchItems(raw: string): DispatchItem[] | null {
+  try {
+    const parsed = JSON.parse(raw.trim()) as unknown;
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    const items = list.filter(
+      (item): item is DispatchItem =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        typeof (item as DispatchItem).to === "string" &&
+        typeof (item as DispatchItem).instruction === "string" &&
+        (item as DispatchItem).instruction.trim().length > 0,
+    );
+    return items.length > 0 ? items : null;
+  } catch {
+    return null;
+  }
+}
+
+function DispatchCards({ raw }: { raw: string }) {
+  const registry = useAgents();
+  const items = parseDispatchItems(raw);
+  if (!items) {
+    return <div className="message-dispatch-card message-dispatch-pending">正在整理派发指令…</div>;
+  }
+  return <div className="message-dispatch-list">{items.map((item, index) => {
+    const targetKey = item.to.trim().replace(/^@/, "").toLowerCase();
+    const agent = registry.find(a => a.id.toLowerCase() === targetKey || a.name.toLowerCase() === targetKey);
+    const label = agent ? agent.name : item.to.trim().replace(/^@/, "");
+    return <div className="message-dispatch-card" key={`${targetKey}-${index}`}>
+      <div className="message-dispatch-head">
+        <span className="message-mention">@{label}</span>
+        <span className="message-dispatch-badge">派发任务</span>
+        {item.return_to_sender !== false && <span className="message-dispatch-return">完成后回传验收</span>}
+      </div>
+      <div className="message-dispatch-body">{item.instruction}</div>
+    </div>;
+  })}</div>;
+}
+
 const components: NonNullable<ComponentProps<typeof Markdown>["components"]> = {
   table: ({ children }) => <div className="message-table" role="region" aria-label="消息表格" tabIndex={0}><table>{children}</table></div>,
+  pre: ({ node: _node, children, ...props }) => {
+    const child = Children.toArray(children)[0];
+    if (isValidElement<{ className?: string; children?: unknown }>(child) && typeof child.props.className === "string" && child.props.className.split(/\s+/).includes("language-agentcrew-dispatch")) {
+      const raw = typeof child.props.children === "string" ? child.props.children : Array.isArray(child.props.children) ? child.props.children.join("") : "";
+      return <DispatchCards raw={raw} />;
+    }
+    return <pre {...props}>{children}</pre>;
+  },
   a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
   img: ({ node: _node, src, alt, ...props }) => {
     const imageId = src?.match(localImage)?.[1];

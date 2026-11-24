@@ -320,6 +320,13 @@ button { -webkit-tap-highlight-color: transparent; }
 .message-body code { font-family: Consolas,"Cascadia Code",monospace; font-size: 13px; background: #f1f5f9; padding: 2px 5px; border-radius: 4px; }
 .message-body pre { overflow-x: auto; max-height: 350px; padding: 13px; margin: 10px 0; white-space: pre; background: #f1f5f9; border-radius: 7px; line-height: 1.8; }
 .message-body pre code { background: transparent; padding: 0; }
+.message-dispatch-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.message-dispatch-card { border: 1px solid #d9d5f7; border-radius: 9px; background: #f7f6ff; padding: 10px 12px; }
+.message-dispatch-pending { color: #5b5e71; font-size: 13px; }
+.message-dispatch-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+.message-dispatch-badge { color: #4338ca; font-weight: 650; }
+.message-dispatch-return { color: #64748b; background: #eef2ff; padding: 1px 6px; border-radius: 4px; }
+.message-dispatch-body { font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; color: #1e293b; }
 .message-body blockquote { border-left: 2px solid #94a3b8; margin: 0 0 8px; padding: 4px 10px; color: #475569; font-size: 14px; background: #f1f5f9; }
 .system-message { display: flex; gap: 12px; align-items: center; justify-content: center; font-size: 13px; color: #64748b; width: 100%; max-width: 600px; margin: 10px auto 22px; }
 .system-message > span { height: 1px; background: #e2e8f0; max-width: 85px; flex: 1; }

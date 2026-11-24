@@ -71,7 +71,7 @@ fn unaddressed_request_starts_both_and_single_mention_cannot_wake_the_other() {
         assert_eq!(*providers.starts.borrow(),recipients);
         let current = member_task(&store,"task","deepseek").unwrap();
         if recipients.len() == 1 {
-            assert!(current.pending_prompt.contains("不转交或唤醒其他成员"));
+            assert!(current.pending_prompt.contains("正文中普通 @ 不会唤醒对方"));
             providers.finish(&store,&group,"deepseek","@Codex 请继续");
             assert!(!providers.tick(&store));
             assert_eq!(*providers.starts.borrow(),["deepseek"]);
@@ -282,4 +282,86 @@ fn installed_providers_execute_in_parallel() {
     codex_runtime.shutdown();
     deepseek_runtime.shutdown();
     result.unwrap();
+}
+
+#[test]
+fn structured_dispatch_routes_to_worker_and_returns_to_lead() {
+    let (_dir, store, group) = fixture();
+    store.connect().unwrap().execute("DELETE FROM group_task_inputs", []).unwrap();
+    store.connect().unwrap().execute("UPDATE group_task_members SET model='model'", []).unwrap();
+    let text = "请 @DeepSeek 统筹改成折线图";
+    let recipients = message_recipients(text, &store.group(&group).unwrap().members);
+    assert_eq!(recipients, ["deepseek"]);
+    for agent in &recipients {
+        enqueue(&store, agent, "req-1");
+    }
+    store.connect().unwrap().execute("UPDATE group_task_inputs SET text=?1", [text]).unwrap();
+    let providers = Providers::default();
+    assert!(providers.tick(&store));
+    assert_eq!(*providers.starts.borrow(), ["deepseek"]);
+
+    // Lead dispatches to codex with structured block; prose @Codex is ignored unless dispatched.
+    providers.finish(
+        &store,
+        &group,
+        "deepseek",
+        "我先出方案。\n```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"修改 UsageDashboard.tsx 为折线图\",\"return_to_sender\":true}\n```",
+    );
+    let ticked = providers.tick(&store);
+    let t = task(&store, "task").unwrap();
+    let m = member_task(&store, "task", "deepseek").unwrap();
+    assert!(ticked, "status={}, error={:?}, member_error={:?}", t.status, t.error, m.error);
+    assert!(providers.tick(&store));
+    assert_eq!(*providers.starts.borrow(), ["deepseek", "codex"]);
+    let codex_task = member_task(&store, "task", "codex").unwrap();
+    assert!(codex_task.pending_prompt.contains("修改 UsageDashboard.tsx 为折线图"));
+    assert!(!codex_task.pending_prompt.contains("[[dispatch:return_to="));
+
+    // Worker finishes WITHOUT @-mentioning anyone; system automatically returns receipt to Lead (deepseek).
+    providers.finish(&store, &group, "codex", "已修改 UsageDashboard.tsx。");
+    assert!(providers.tick(&store));
+    assert_eq!(*providers.starts.borrow(), ["deepseek", "codex", "deepseek"]);
+    let lead_review = member_task(&store, "task", "deepseek").unwrap();
+    assert!(lead_review.pending_prompt.contains("【执行回执】codex 已完成你派发的任务"));
+
+    // Lead accepts without dispatching again -> task naturally finishes to idle.
+    providers.finish(&store, &group, "deepseek", "已验收通过，折线图修改正确。");
+    assert!(!providers.tick(&store));
+    assert_eq!(task(&store, "task").unwrap().status, "idle");
+    assert_eq!(latest(&store, &group).unwrap().unwrap().queued_count, 0);
+}
+
+#[test]
+fn structured_dispatch_pauses_at_hop_limit() {
+    let (_dir, store, group) = fixture();
+    store.connect().unwrap().execute("DELETE FROM group_task_inputs", []).unwrap();
+    store.connect().unwrap().execute("UPDATE group_task_members SET model='model'", []).unwrap();
+    enqueue(&store, "deepseek", "req-loop");
+    store.connect().unwrap().execute("UPDATE group_task_inputs SET text='@DeepSeek 开始'", []).unwrap();
+    let providers = Providers::default();
+    assert!(providers.tick(&store));
+
+    // 3 round trips = 6 hops (deepseek -> codex -> deepseek ...).
+    for _ in 0..3 {
+        providers.finish(
+            &store,
+            &group,
+            "deepseek",
+            "```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"继续修改\",\"return_to_sender\":true}\n```",
+        );
+        assert!(providers.tick(&store));
+        assert!(providers.tick(&store));
+        providers.finish(&store, &group, "codex", "改好了。");
+        assert!(providers.tick(&store));
+    }
+    // 7th hop attempt should pause the task instead of dispatching forever.
+    providers.finish(
+        &store,
+        &group,
+        "deepseek",
+        "```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"再改一次\",\"return_to_sender\":true}\n```",
+    );
+    providers.tick(&store);
+    assert_eq!(task(&store, "task").unwrap().status, "paused");
+    assert_eq!(latest(&store, &group).unwrap().unwrap().queued_count, 0);
 }
