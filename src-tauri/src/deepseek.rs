@@ -15,7 +15,6 @@ use std::{
 };
 
 type Reply = Result<Value, String>;
-const VERSION: &str = "0.2.1-rc.2";
 pub const PERSONAL: &str = "deepseek-personal";
 const PROFILE: &str = "ai-gent-sdk";
 const RUNTIME_PATCH: &str = "- id: session-log-deepseek\n  disabled: true\n- id: sandbox-policy\n  config:\n    mode: workspace-write\n    workspaceRoot: !!js process.cwd()\n- id: approval\n  config:\n    policy: ask\n";
@@ -96,11 +95,8 @@ impl Installation {
             .bounded_output()
             .map_err(|_| "无法读取 Harness 版本")?;
         installation.version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() || installation.version != VERSION {
-            return Err(format!(
-                "当前 Harness 版本为 {}，此适配器已验证版本为 {VERSION}。请先验证版本兼容性。",
-                installation.version
-            ));
+        if !output.status.success() || installation.version.is_empty() {
+            return Err("无法读取 Harness 版本。".into());
         }
         Ok(installation)
     }
@@ -606,9 +602,6 @@ impl Runtime {
         } else {
             session(store, conversation)?
         };
-        if !existing.is_null() && existing["runtime_version"] != install.version {
-            return Err("Harness 版本已变化，请先核对历史会话兼容性。".into());
-        }
         let workspace = if conversation == PERSONAL {
             let path = runtime_dir(store)?.join("workspace");
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;

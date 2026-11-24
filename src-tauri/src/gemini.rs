@@ -703,11 +703,8 @@ impl Runtime {
                 .filter(|id| !id.is_empty())
                 .map(str::to_owned)
         };
-        if existing_thread.is_some()
-            && (previous["runtime_version"] != install.version
-                || previous["workspace_path"] != root)
-        {
-            return Err("Gemini 运行版本或工作目录与历史不一致，未恢复错误会话。".into());
+        if existing_thread.is_some() && previous["workspace_path"] != root {
+            return Err("Gemini 工作目录与历史不一致，未恢复错误会话。".into());
         }
 
         let turn = uuid::Uuid::new_v4().to_string();

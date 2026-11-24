@@ -823,16 +823,35 @@ impl Runtime {
                         .as_str()
                         .ok_or("会话 ID 无效")?
                         .to_owned();
-                    if existing["runtime_version"] != client.version {
-                        return Err("Codex 版本已变化。请核对兼容性后再恢复此会话。".into());
-                    }
+                    let version_changed = existing["runtime_version"] != client.version;
                     if !client.loaded.lock().unwrap().contains(&thread) {
-                        let response = client.request("thread/resume", json!({"threadId":thread,"cwd":root_owned,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))?;
+                        let response = client
+                            .request("thread/resume", json!({"threadId":thread,"cwd":root_owned,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))
+                            .map_err(|cause| {
+                                if version_changed {
+                                    format!(
+                                        "Codex 已升级至 {}，无法恢复旧版本会话（{}），请新建会话继续。原因：{cause}",
+                                        client.version,
+                                        existing["runtime_version"].as_str().unwrap_or("未知")
+                                    )
+                                } else {
+                                    cause
+                                }
+                            })?;
                         validate_context(&response, &root_owned)?;
                         if response["modelProvider"] != existing["provider"] {
                             return Err("恢复会话的模型服务不一致".into());
                         }
                         client.loaded.lock().unwrap().insert(thread.clone());
+                    }
+                    if version_changed {
+                        store
+                            .connect()?
+                            .execute(
+                                "UPDATE codex_sessions SET runtime_version=?2, error=NULL WHERE conversation_id=?1",
+                                params![conversation_owned, client.version],
+                            )
+                            .map_err(|e| e.to_string())?;
                     }
                     thread
                 } else {
@@ -951,18 +970,36 @@ impl Runtime {
 
 fn sync_personal_thread(client: &Client, store: &Store, existing: &Value) -> Result<(), String> {
     let thread = existing["thread_id"].as_str().ok_or("私聊会话 ID 无效")?;
+    let version_changed = existing["runtime_version"] != client.version;
     if client.loaded.lock().unwrap().contains(thread) {
+        if version_changed {
+            store
+                .connect()?
+                .execute(
+                    "UPDATE codex_sessions SET runtime_version=?1 WHERE conversation_id='codex-personal'",
+                    [&client.version],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         return crate::codex_sidebar::sync(
             &store.path,
             thread,
             &store.conversation_root("codex-personal")?,
         );
     }
-    if existing["runtime_version"] != client.version {
-        return Err("Codex 版本已变化，请先核对会话兼容性。".into());
-    }
     let root = store.conversation_root("codex-personal")?;
-    let response = client.request("thread/resume",json!({"threadId":thread,"cwd":root,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))?;
+    let response = client
+        .request("thread/resume",json!({"threadId":thread,"cwd":root,"modelProvider":existing["provider"],"sandbox":"danger-full-access","approvalPolicy":"never"}))
+        .map_err(|cause| {
+            if version_changed {
+                format!(
+                    "Codex 已升级至 {}，历史私聊会话无法自动同步，可新建会话继续。原因：{cause}",
+                    client.version
+                )
+            } else {
+                cause
+            }
+        })?;
     validate_context(&response, &root)?;
     if response["modelProvider"] != existing["provider"] {
         return Err("私聊模型服务不匹配".into());
@@ -975,7 +1012,19 @@ fn sync_personal_thread(client: &Client, store: &Store, existing: &Value) -> Res
     // Updating the title also makes the changed cwd visible to Desktop's incremental catalog scan.
     client.request("thread/name/set", json!({"threadId":thread,"name":name}))?;
     crate::codex_sidebar::sync(&store.path, thread, &root)?;
-    store.connect()?.execute("UPDATE codex_sessions SET error=NULL WHERE conversation_id='codex-personal' AND (error LIKE '同步官方最近列表失败：%' OR error LIKE '任务已结束；同步官方最近列表失败：%')",[]).map_err(|e|e.to_string())?;
+    let conn = store.connect()?;
+    conn.execute(
+        "UPDATE codex_sessions SET error=NULL WHERE conversation_id='codex-personal' AND (error LIKE '同步官方最近列表失败：%' OR error LIKE '任务已结束；同步官方最近列表失败：%' OR error LIKE 'Codex 版本已变化%')",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    if version_changed {
+        conn.execute(
+            "UPDATE codex_sessions SET runtime_version=?1 WHERE conversation_id='codex-personal'",
+            [&client.version],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     client.loaded.lock().unwrap().insert(thread.to_owned());
     Ok(())
 }
