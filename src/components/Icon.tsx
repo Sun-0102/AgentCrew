@@ -28,6 +28,10 @@ const paths = {
   diff: "M12 5v6M9 8h6M9 17h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z",
   alert: "M12 8v4M12 16h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z",
   chart: "M4 19h16M7 16v-5M12 16V8M17 16v-8",
+  sidebarClose: "M3 4h18v16H3V4ZM9 4v16M15.5 9l-3 3 3 3",
+  sidebarOpen: "M3 4h18v16H3V4ZM9 4v16M12.5 9l3 3-3 3",
+  chevronsLeft: "m11 17-5-5 5-5M18 17l-5-5 5-5",
+  chevronsRight: "m13 17 5-5-5-5M6 17l5-5-5-5",
 };
 export type IconName = keyof typeof paths;
 export default function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

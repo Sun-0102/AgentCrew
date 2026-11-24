@@ -25,6 +25,7 @@ type Props = Pick<
   | "sessionSaving"
   | "onDeleteSession"
   | "onGroupUpdated"
+  | "sidebarControls"
 > & {
   probes: Record<string, Probe>;
   connectingByAgent: Record<string, boolean>;

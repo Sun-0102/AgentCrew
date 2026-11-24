@@ -62,7 +62,7 @@ export function GroupHub({ groups, projects, onSelect, onCreate }: { groups: Gro
   </div></section>;
 }
 
-export function SessionSidebar<T extends ChatSession>({ sessions, selected, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete }: { sessions: T[]; selected?: T; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T) => void; onArchive: (session: T) => void; onDelete: (session: T) => void }) {
+export function SessionSidebar<T extends ChatSession>({ sessions, selected, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete, onCollapse }: { sessions: T[]; selected?: T; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T) => void; onArchive: (session: T) => void; onDelete: (session: T) => void; onCollapse?: () => void }) {
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(selected?.archived ?? false);
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
@@ -82,7 +82,7 @@ export function SessionSidebar<T extends ChatSession>({ sessions, selected, load
   const menuSession = filtered.find(s => s.id === menu?.id);
   const menuBusy = !!menuSession?.status && ["running", "paused", "cancelling"].includes(menuSession.status);
   return <aside className="group-session-sidebar" aria-label="会话列表">
-    <div className="session-heading"><h2>会话 <span className="session-count">{sessions.filter(s => !s.archived).length}</span></h2><Icon name="chat" size={18} /></div>
+    <div className="session-heading"><h2>会话 <span className="session-count">{sessions.filter(s => !s.archived).length}</span></h2>{onCollapse ? <button type="button" className="sidebar-collapse-btn" title="收起会话列表" aria-label="收起会话列表" onClick={onCollapse}><Icon name="chevronsLeft" size={15} /></button> : <Icon name="chat" size={18} />}</div>
     <button className="session-new" onClick={onCreate}><Icon name="plus" size={18} />新建会话</button>
     <label className="session-search"><Icon name="search" size={15} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} /></label>
     <div className="session-filters"><button className={!archived ? "active" : ""} aria-pressed={!archived} onClick={() => setArchived(false)}>进行中</button><button className={archived ? "active" : ""} aria-pressed={archived} onClick={() => setArchived(true)}>已归档</button></div>
