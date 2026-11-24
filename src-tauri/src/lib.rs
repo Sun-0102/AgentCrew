@@ -21,6 +21,7 @@ mod skills;
 mod speed;
 mod storage;
 mod task_results;
+mod usage;
 
 use tauri::Manager;
 
@@ -134,13 +135,19 @@ pub fn run() {
             commands::group_task_control,
             commands::group_task_list,
             commands::group_task_result,
-            commands::group_task_export
+            commands::group_task_export,
+            commands::usage_dashboard
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
+        .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                lifecycle::show_main_window(app);
+            }
+            tauri::RunEvent::Exit => {
                 lifecycle::shutdown(app);
             }
+            _ => {}
         });
 }

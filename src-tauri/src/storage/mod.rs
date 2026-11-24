@@ -51,6 +51,7 @@ impl Store {
             include_str!("../../migrations/015_agent_registry.sql"),
             include_str!("../../migrations/016_generic_pairing_gemini.sql"),
             include_str!("../../migrations/017_private_sessions.sql"),
+            include_str!("../../migrations/018_usage_records.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
@@ -339,7 +340,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            18
         );
     }
 

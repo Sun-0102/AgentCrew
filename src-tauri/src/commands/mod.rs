@@ -593,3 +593,8 @@ pub async fn group_task_export(app: tauri::AppHandle, group_id: String, task_id:
         Ok(Value::Null)
     }).await
 }
+
+#[tauri::command]
+pub async fn usage_dashboard(app: tauri::AppHandle, days: Option<u32>) -> Result<Value, String> {
+    codex_call(app, move |codex, store| crate::usage::dashboard(store, codex, days.unwrap_or(7))).await
+}

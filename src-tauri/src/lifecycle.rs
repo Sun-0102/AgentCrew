@@ -44,6 +44,14 @@ pub fn pause(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
     Ok(())
 }
 
+pub fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "打开 AgentCrew", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "暂停全部派发", true, None::<&str>)?;
@@ -55,13 +63,7 @@ pub fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .title("AgentCrew")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
-            }
+            "show" => show_main_window(app),
             "pause" | "resume" => {
                 let paused = event.id.as_ref() == "pause";
                 let app = app.clone();

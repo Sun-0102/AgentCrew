@@ -318,6 +318,19 @@ impl Client {
                     } else {
                         "assistant"
                     };
+                    if role == "assistant" {
+                        let reasoning = reasoning_text(message);
+                        if !reasoning.is_empty() {
+                            let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
+                            append_message(
+                                &connection,
+                                &self.conversation,
+                                &format!("reasoning:{id}"),
+                                "thinking",
+                                &reasoning,
+                            )?;
+                        }
+                    }
                     let text = message_text(message);
                     if !text.is_empty() {
                         let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
@@ -342,6 +355,41 @@ impl Client {
                 }
                 "turn/end" => {
                     let reason = data["reason"]["kind"].as_str().unwrap_or("unknown");
+                    let u = &data["usage"];
+                    let inp = u["inputTokens"]
+                        .as_i64()
+                        .or_else(|| u["prompt_tokens"].as_i64())
+                        .unwrap_or(0);
+                    let out = u["outputTokens"]
+                        .as_i64()
+                        .or_else(|| u["completion_tokens"].as_i64())
+                        .unwrap_or(0);
+                    let cached = u["cachedTokens"]
+                        .as_i64()
+                        .or_else(|| u["prompt_cache_hit_tokens"].as_i64())
+                        .unwrap_or(0);
+                    let model_name: String = connection
+                        .query_row(
+                            "SELECT COALESCE(model, '') FROM deepseek_sessions WHERE thread_id=?1",
+                            [&self.thread],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default();
+                    crate::usage::record(
+                        &self.database,
+                        "deepseek",
+                        "deepseek",
+                        &model_name,
+                        &self.conversation,
+                        inp,
+                        out,
+                        cached,
+                        if reason == "completed" {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
+                    );
                     if reason != "completed" {
                         set_status(
                             &store,
@@ -426,6 +474,20 @@ fn message_text(message: &Value) -> String {
                 .filter_map(|b| b["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
+        })
+        .unwrap_or_default()
+}
+fn reasoning_text(message: &Value) -> String {
+    message["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| matches!(b["type"].as_str(), Some("reasoning" | "thinking")))
+                .filter_map(|b| b["text"].as_str().or_else(|| b["reasoning"].as_str()))
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
         })
         .unwrap_or_default()
 }

@@ -216,6 +216,7 @@ struct Client {
     session_id: Mutex<String>,
     turn_id: Mutex<String>,
     message_id: Mutex<Option<String>>,
+    thought_id: Mutex<Option<String>>,
     capabilities: Mutex<Value>,
     current_model: Mutex<String>,
     cached_models: Mutex<Option<Vec<Value>>>,
@@ -275,6 +276,7 @@ impl Client {
             session_id: Mutex::new(String::new()),
             turn_id: Mutex::new(String::new()),
             message_id: Mutex::new(None),
+            thought_id: Mutex::new(None),
             capabilities: Mutex::new(Value::Null),
             current_model: Mutex::new(String::new()),
             cached_models: Mutex::new(None),
@@ -464,7 +466,20 @@ impl Client {
             return Ok(());
         }
         match update["sessionUpdate"].as_str() {
+            Some("agent_thought_chunk") => {
+                let text = update["content"]["text"]
+                    .as_str()
+                    .or_else(|| update["text"].as_str())
+                    .unwrap_or("");
+                if !text.is_empty() {
+                    *self.message_id.lock().map_err(|e| e.to_string())? = None;
+                    let mut item = self.thought_id.lock().map_err(|e| e.to_string())?;
+                    let id = item.get_or_insert_with(|| format!("gemini:thought:{}", uuid::Uuid::new_v4()));
+                    connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'thinking',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text||excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+                }
+            }
             Some("agent_message_chunk") if update["content"]["type"] == "text" => {
+                *self.thought_id.lock().map_err(|e| e.to_string())? = None;
                 let text = update["content"]["text"].as_str().unwrap_or("");
                 let mut item = self.message_id.lock().map_err(|e| e.to_string())?;
                 let id = item.get_or_insert_with(|| format!("gemini:{}", uuid::Uuid::new_v4()));
@@ -472,12 +487,20 @@ impl Client {
             }
             Some("tool_call" | "tool_call_update") => {
                 *self.message_id.lock().map_err(|e| e.to_string())? = None;
+                *self.thought_id.lock().map_err(|e| e.to_string())? = None;
                 let id = format!(
                     "gemini:{turn}:{}",
                     update["toolCallId"]
                         .as_str()
                         .ok_or("Gemini 工具事件缺少标识")?
                 );
+                let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+            }
+            Some("plan") => {
+                *self.message_id.lock().map_err(|e| e.to_string())? = None;
+                *self.thought_id.lock().map_err(|e| e.to_string())? = None;
+                let id = format!("gemini:{turn}:plan");
                 let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
                 connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
             }
@@ -834,6 +857,17 @@ impl Runtime {
             drop(_operation);
 
             let outcome = receive.recv_timeout(Duration::from_secs(24 * 60 * 60));
+            let (usage_inp, usage_out, usage_cached) = match &outcome {
+                Ok(Ok(result)) => {
+                    let u = &result["usage"];
+                    (
+                        u["inputTokens"].as_i64().unwrap_or(0),
+                        u["outputTokens"].as_i64().unwrap_or(0),
+                        u["cachedReadTokens"].as_i64().unwrap_or(0),
+                    )
+                }
+                _ => (0, 0, 0),
+            };
             let (status, reason): (&str, Option<String>) = match outcome {
                 Ok(Ok(result)) if result["stopReason"] == "end_turn" => ("completed", None),
                 Ok(Ok(result)) if result["stopReason"] == "cancelled" => ("cancelled", None),
@@ -850,6 +884,25 @@ impl Runtime {
                     Some("Gemini 执行未得到可确认的完成结果，请核对文件后处理。".into()),
                 ),
             };
+            let usage_status = if reason
+                .as_deref()
+                .is_some_and(|r| r.contains("quota_exhausted"))
+            {
+                "quota_exhausted"
+            } else {
+                status
+            };
+            crate::usage::record(
+                &store.path,
+                "gemini",
+                "gemini",
+                &model_owned,
+                &conversation_owned,
+                usage_inp,
+                usage_out,
+                usage_cached,
+                usage_status,
+            );
             let _ = set_status(
                 &store,
                 &conversation_owned,

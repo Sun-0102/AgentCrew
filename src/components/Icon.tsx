@@ -24,6 +24,10 @@ const paths = {
   bolt: "m13 2-9 12h7l-1 8 10-12h-7l1-8Z",
   reset: "M4 4v6h6M4 10a8 8 0 1 1 1 8",
   spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z",
+  thought: "M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.7.5 1 1.2 1 2.1h5c0-.9.3-1.6 1-2.1A6 6 0 0 0 12 3Z",
+  diff: "M12 5v6M9 8h6M9 17h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z",
+  alert: "M12 8v4M12 16h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z",
+  chart: "M4 19h16M7 16v-5M12 16V8M17 16v-8",
 };
 export type IconName = keyof typeof paths;
 export default function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

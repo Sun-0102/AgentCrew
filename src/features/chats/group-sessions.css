@@ -125,7 +125,8 @@
 .session-chat .composer-area { padding: 8px 28px 16px; }
 .session-chat .composer { border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; padding: 12px 14px; }
 .session-chat .composer:focus-within { border-color: #6366f1; box-shadow: 0 0 0 3px #4f46e514; }
-.session-chat .composer textarea { min-height: 61px; font-size: 13px; line-height: 1.7; }
+.session-chat .composer-editor { font-size: 13px; line-height: 1.7; }
+.session-chat .composer textarea { min-height: 61px; }
 .session-chat .send-button { width: 30px; height: 30px; border-radius: 8px; }
 .session-chat .composer-footer { font-size: 10px; padding-top: 9px; color: #64748b; }
 .session-chat .chat-status { font-size: 11px; padding: 0 2px 10px; color: #64748b; }

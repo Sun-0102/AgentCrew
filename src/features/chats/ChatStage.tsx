@@ -7,7 +7,7 @@ import TaskResults from "./TaskResults";
 import TaskActivity from "./TaskActivity";
 import { replyBlocks } from "./activity";
 import ModelConfigPopover from "./ModelConfigPopover";
-import { activeMention, insertMention, messageRecipients } from "./mentions";
+import { activeMention, insertMention, mentionSegments, messageRecipients } from "./mentions";
 import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
 import { skillPrefix, requestedSkills, type Skill } from "./skills";
@@ -62,6 +62,25 @@ export default function ChatStage(p: Props) {
     return () => { document.removeEventListener("click", click); document.removeEventListener("keydown", key); };
   }, [sessionMenu]);
   const [mentions, setMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const dismissedMentionRef = useRef<number | null>(null);
+  const mentionControlRef = useRef<HTMLDivElement>(null);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!mentions) return;
+    const onPointerDown = (event: MouseEvent) => {
+      const targetNode = event.target as Node;
+      if (
+        mentionMenuRef.current?.contains(targetNode) ||
+        mentionControlRef.current?.contains(targetNode) ||
+        input.current?.contains(targetNode)
+      ) return;
+      setMentions(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [mentions]);
   const [skillQuery, setSkillQuery] = useState<string | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -75,12 +94,34 @@ export default function ChatStage(p: Props) {
   const executingAgent = snapshot.agent ?? agent;
   const feed = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const highlight = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const nearBottom = useRef(true);
   const members = group?.members ?? [agent];
+  const mentionItems = (() => {
+    const q = mentionQuery.trim().toLowerCase();
+    if (!q) return members;
+    const score = (id: string) => {
+      const name = agentName(id).toLowerCase();
+      const kind = providerKind(id).toLowerCase();
+      const lid = id.toLowerCase();
+      if (name.startsWith(q) || lid.startsWith(q) || kind.startsWith(q)) return 0;
+      if (name.includes(q) || lid.includes(q) || kind.includes(q)) return 1;
+      return 2;
+    };
+    return members
+      .map(id => ({ id, rank: score(id) }))
+      .filter(item => item.rank < 2)
+      .sort((a, b) => a.rank - b.rank)
+      .map(item => item.id);
+  })();
+  const mentionsOpen = mentions && mentionItems.length > 0;
+  const activeMentionIndex = Math.min(mentionIndex, Math.max(0, mentionItems.length - 1));
   const busy = sending || running(snapshot.session?.status) || Object.values(snapshot.sessions ?? {}).some(session => running(session?.status)) || taskActive;
   const composingBlocked = !!p.session?.archived || sending || (group ? task?.status === "cancelling" : busy);
   const recipients = group ? messageRecipients(text, members) : [agent];
+  const { segments: mentionParts, matched: matchedMentions } = mentionSegments(text, members);
+  const mentionTone = matchedMentions.length > 1 ? "multi" : matchedMentions.length === 1 ? providerKind(matchedMentions[0]) : "";
   const namedTarget = recipients.length === 1 ? recipients[0] : agent;
   const recipient = namedTarget;
   const ready = group ? recipients.every(id => members.includes(id) && !!p.collaborationModels[id as string]) : !!probe && (!probe.requires_auth || !!probe.auth) && !!model;
@@ -164,8 +205,32 @@ export default function ChatStage(p: Props) {
       .finally(() => { if (!disposed) setSkillsLoading(false); });
     return () => { disposed = true; };
   }, [scopeKey, agent, skillsOpen]);
-  function updateCommands(value: string, cursor: number) {
-    setMentions(!!activeMention(value, cursor));
+  function updateCommands(value: string, cursor: number, opts?: { isDelete?: boolean; fromSelect?: boolean }) {
+    const match = activeMention(value, cursor);
+    if (!match) {
+      dismissedMentionRef.current = null;
+      setMentions(false);
+      setMentionQuery("");
+      setMentionIndex(0);
+    } else {
+      setMentionQuery(match.query);
+      if (!opts?.fromSelect) setMentionIndex(0);
+      if (opts?.isDelete) {
+        // Never pop open the @ menu when deleting backwards into an existing mention.
+        if (!mentions) {
+          dismissedMentionRef.current = match.start;
+        } else if (dismissedMentionRef.current === match.start) {
+          setMentions(false);
+        }
+      } else if (opts?.fromSelect) {
+        if (dismissedMentionRef.current === match.start) setMentions(false);
+      } else {
+        if (dismissedMentionRef.current !== match.start) {
+          dismissedMentionRef.current = null;
+          setMentions(true);
+        }
+      }
+    }
     setSkillQuery(skillPrefix(value.slice(0, cursor))?.[1] ?? null);
     setSkillIndex(0);
   }
@@ -234,15 +299,20 @@ export default function ChatStage(p: Props) {
   function quote(message: Message) { setReply({ author: author(message), text: message.text }); input.current?.focus(); }
   function editText(event: ChangeEvent<HTMLTextAreaElement>) {
     const field = event.currentTarget;
+    const inputType = (event.nativeEvent as InputEvent | undefined)?.inputType ?? "";
+    const isDelete = inputType.startsWith("delete") || field.value.length < text.length;
     setText(field.value);
-    updateCommands(field.value, field.selectionStart);
+    updateCommands(field.value, field.selectionStart, { isDelete });
   }
   function chooseMention(id: string) {
     const name = mentionName(id);
     const field = input.current;
     const next = insertMention(text, field?.selectionStart ?? text.length, field?.selectionEnd ?? text.length, name);
+    dismissedMentionRef.current = null;
     setText(next.text);
     setMentions(false);
+    setMentionQuery("");
+    setMentionIndex(0);
     setSkillQuery(null);
     requestAnimationFrame(() => {
       input.current?.focus();
@@ -263,14 +333,27 @@ export default function ChatStage(p: Props) {
           {(attention || snapshot.approvals.length > 0) && <button type="button" className="status-detail-button" onClick={() => setPanel("evidence")}>{snapshot.approvals.length ? "查看请求" : "查看详情"}</button>}
         </div>
         {group && (busy || taskControllable || attention) && <GroupMemberStatus snapshot={snapshot} members={members} />}
-        <form className={`composer ${dragging ? "dragging" : ""}`} onDragOver={event => { event.preventDefault(); if (!composingBlocked) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={handleDrop} onSubmit={event => { event.preventDefault(); void send(); }}>
+        <form className={`composer ${dragging ? "dragging" : ""} ${mentionTone ? `has-mention has-mention-${mentionTone}` : ""}`} onDragOver={event => { event.preventDefault(); if (!composingBlocked) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={handleDrop} onSubmit={event => { event.preventDefault(); void send(); }}>
           {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
           {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}>{file.isImage && file.previewUrl ? <img className="attachment-thumb" src={file.previewUrl} alt={file.name} /> : <Icon name="file" size={18} />}<span>{file.name}<small>{formatAttachmentSize(file.size)} · {file.isImage ? "图片" : "文件"}</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
           {skillsOpen && <div className="skill-suggestions" id="skill-suggestions" role="listbox" aria-label="技能列表">
             <div className="menu-caption">{agentName(agent)} · 技能 {skillsLoading ? "" : `(${skills.length})`}</div>
             {skillsLoading ? <p role="status">正在读取本地和运行时技能…</p> : skillsError ? <p role="alert">{skillsError}</p> : !skillItems.length ? <p role="status">{desktop ? "没有匹配的技能。请检查搜索词或当前 Agent 的技能配置。" : "请在桌面版中读取本地技能。"}</p> : skillItems.map((skill, index) => <button type="button" role="option" id={`skill-option-${index}`} aria-selected={index === Math.min(skillIndex, skillItems.length - 1)} key={skill.name} disabled={composingBlocked} onMouseDown={event => event.preventDefault()} onClick={() => chooseSkill(skill)}><strong>/{skill.name}<small className="skill-source">{skill.source}</small></strong><span>{skill.description || "本地技能"}</span></button>)}
           </div>}
-          <label className="sr-only" htmlFor="chat-input">输入消息</label><textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart)} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
+          {mentionsOpen && <div className="mention-menu" id="mention-menu" role="listbox" aria-label="选择要 @ 的成员" ref={mentionMenuRef}><div className="menu-caption">选择要 @ 的成员</div>{mentionItems.map((id, index) => <button type="button" role="option" id={`mention-option-${index}`} aria-selected={index === activeMentionIndex} key={id} disabled={composingBlocked} onMouseEnter={() => setMentionIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}
+          <label className="sr-only" htmlFor="chat-input">输入消息</label>
+          <div className="composer-editor">
+            <div className="composer-highlight" ref={highlight} aria-hidden="true">
+              {mentionParts.map((part, index) =>
+                part.agentId ? (
+                  <mark key={index} className={`composer-mention is-${part.provider ?? "default"}`}>{part.text}</mark>
+                ) : (
+                  <span key={index}>{part.text}</span>
+                ),
+              )}
+              {text.endsWith("\n") ? "\u200b" : null}
+            </div>
+            <textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onScroll={event => { if (highlight.current) { highlight.current.scrollTop = event.currentTarget.scrollTop; highlight.current.scrollLeft = event.currentTarget.scrollLeft; } }} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart, { fromSelect: true })} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
             if (skillsOpen) {
               if (event.key === "Escape") { event.preventDefault(); setSkillQuery(null); return; }
@@ -284,16 +367,31 @@ export default function ChatStage(p: Props) {
                 if (event.key === "Enter") { event.preventDefault(); return; }
               }
             }
-            if (mentions && event.key === "Escape") { event.preventDefault(); setMentions(false); return; }
+            if (mentionsOpen) {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                dismissedMentionRef.current = activeMention(text, event.currentTarget.selectionStart)?.start ?? null;
+                setMentions(false);
+                return;
+              }
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setMentionIndex(index => (index + (event.key === "ArrowDown" ? 1 : -1) + mentionItems.length) % mentionItems.length);
+                return;
+              }
+              if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+                event.preventDefault();
+                chooseMention(mentionItems[activeMentionIndex]);
+                return;
+              }
+            }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              if (mentions) {
-                const query = activeMention(text, event.currentTarget.selectionStart)?.query ?? "";
-                chooseMention(members.find(id => query ? id.startsWith(query) : id === target) ?? members[0]);
-              } else void send();
+              void send();
             }
           }} />
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control"><button className={`icon-button ${mentions ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => setMentions(!mentions)}><Icon name="at" size={19} /></button>{mentions && <div className="mention-menu"><div className="menu-caption">选择要 @ 的成员</div>{members.map(id => <button type="button" key={id} disabled={composingBlocked} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}</div><span className="toolbar-divider" /><ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name="send" size={21} /></button>}</div></div>
+          </div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div><span className="toolbar-divider" /><ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name="send" size={21} /></button>}</div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</span></div>
       </div>
     </div>{panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>
@@ -318,7 +416,7 @@ export default function ChatStage(p: Props) {
         {provider === "deepseek" && <p className="panel-caption">DeepSeek 按消息更新，按当前运行时提供的工具执行任务。</p>}
         <div className="execution-status"><strong>执行详情</strong><small>{records.length} 条记录</small></div>
         {records.length ? records.map(record => <details className="panel-tool" key={record.id}>
-          <summary><Icon name={record.role === "workspace" ? "folder" : record.role === "assignment" ? "at" : "terminal"} size={15} /><span>{record.role === "workspace" ? "工作目录变更" : record.role === "assignment" ? `${author(record)} · 交接详情` : record.role === "system" ? "状态记录" : `${author(record)} · 工具记录`}</span><Icon name="down" size={13} /></summary><pre>{record.text}</pre>
+          <summary><Icon name={record.role === "workspace" ? "folder" : record.role === "assignment" ? "at" : record.role === "thinking" ? "thought" : "terminal"} size={15} /><span>{record.role === "workspace" ? "工作目录变更" : record.role === "assignment" ? `${author(record)} · 交接详情` : record.role === "system" ? "状态记录" : record.role === "thinking" ? `${author(record)} · 思考过程` : `${author(record)} · 工具记录`}</span><Icon name="down" size={13} /></summary><pre>{record.text}</pre>
         </details>) : <p className="panel-caption">暂无执行记录。</p>}
         {(project || snapshot.session?.workspace_path) && <div className="project-context"><span>{project ? "当前项目" : "本群工作目录"}</span>{project && <strong>{project.name}</strong>}<code>{project?.primary_root ?? snapshot.session?.workspace_path}</code></div>}
       </>}

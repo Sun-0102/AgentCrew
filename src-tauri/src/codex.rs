@@ -28,6 +28,7 @@ struct Client {
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
     approvals: Mutex<HashMap<String, Value>>,
     loaded: Mutex<HashSet<String>>,
+    token_usage: Mutex<HashMap<String, (i64, i64, i64)>>,
     next_id: AtomicU64,
     healthy: AtomicBool,
     database: PathBuf,
@@ -239,6 +240,7 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::new()),
+            token_usage: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database,
@@ -384,26 +386,100 @@ impl Client {
             "item/agentMessage/delta" => {
                 connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'assistant',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, p["itemId"].as_str().unwrap_or(""), p["delta"].as_str().unwrap_or("")]).map_err(|e| e.to_string())?;
             }
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                let item_id = p["itemId"].as_str().unwrap_or("");
+                let delta = p["delta"].as_str().unwrap_or("");
+                if !item_id.is_empty() && !delta.is_empty() {
+                    connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'thinking',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, format!("reasoning:{item_id}"), delta]).map_err(|e| e.to_string())?;
+                }
+            }
+            "item/reasoning/summaryPartAdded" => {
+                let item_id = p["itemId"].as_str().unwrap_or("");
+                if !item_id.is_empty() {
+                    connection.execute("UPDATE codex_messages SET text=CASE WHEN text='' OR text LIKE '%' || char(10) || char(10) THEN text ELSE text || char(10) || char(10) END WHERE conversation_id=(SELECT conversation_id FROM codex_sessions WHERE thread_id=?1) AND item_id=?2", params![thread, format!("reasoning:{item_id}")]).map_err(|e| e.to_string())?;
+                }
+            }
+            "item/commandExecution/outputDelta" => {
+                let item_id = p["itemId"].as_str().unwrap_or("");
+                let delta = p["delta"].as_str().unwrap_or("");
+                if !item_id.is_empty() && !delta.is_empty() {
+                    connection.execute("UPDATE codex_messages SET text=text || ?3 WHERE conversation_id=(SELECT conversation_id FROM codex_sessions WHERE thread_id=?1) AND item_id=?2", params![thread, item_id, delta]).map_err(|e| e.to_string())?;
+                }
+            }
             "item/started" | "item/completed" => {
                 let item = &p["item"];
                 let kind = item["type"].as_str().unwrap_or("");
+                let mut item_id = item["id"].as_str().unwrap_or("").to_owned();
+                let mut role = if matches!(kind, "agentMessage" | "imageGeneration") {
+                    "assistant"
+                } else {
+                    "tool"
+                };
                 let text = match kind {
                     "agentMessage" if method == "item/completed" => {
                         item["text"].as_str().unwrap_or("").to_owned()
                     }
-                    "commandExecution" => format!(
-                        "命令：{}\n状态：{}\n{}",
-                        item["command"].as_str().unwrap_or(""),
-                        item["status"].as_str().unwrap_or(""),
-                        item["aggregatedOutput"].as_str().unwrap_or("")
-                    ),
+                    "reasoning" => {
+                        let summary = extract_reasoning_text(item);
+                        if summary.is_empty() {
+                            return Ok(());
+                        }
+                        item_id = format!("reasoning:{item_id}");
+                        role = "thinking";
+                        summary
+                    }
+                    "commandExecution" => {
+                        let mut header = format!(
+                            "命令：{}\n状态：{}",
+                            item["command"].as_str().unwrap_or(""),
+                            item["status"].as_str().unwrap_or(""),
+                        );
+                        if let Some(code) = item["exitCode"].as_i64() {
+                            header.push_str(&format!("\n退出码：{code}"));
+                        }
+                        if let Some(ms) = item["durationMs"].as_u64() {
+                            header.push_str(&format!("\n耗时：{ms}ms"));
+                        }
+                        format!("{header}\n{}", item["aggregatedOutput"].as_str().unwrap_or(""))
+                    }
                     "fileChange" => format!("文件变更：{}", item["changes"]),
+                    "mcpToolCall" => format!(
+                        "MCP 工具：{}/{}\n状态：{}\n{}",
+                        item["server"].as_str().unwrap_or(""),
+                        item["tool"].as_str().unwrap_or(""),
+                        item["status"].as_str().unwrap_or(""),
+                        serde_json::to_string(&json!({
+                            "arguments": item["arguments"],
+                            "result": item["result"],
+                            "error": item["error"],
+                        }))
+                        .unwrap_or_default()
+                    ),
+                    "webSearch" => format!(
+                        "联网搜索：{}\n状态：{}",
+                        item["query"].as_str().unwrap_or(""),
+                        item["status"]
+                            .as_str()
+                            .unwrap_or(if method == "item/completed" { "completed" } else { "inProgress" })
+                    ),
                     "imageGeneration" if method == "item/completed" => {
                         generated_image_message(&Store { path: self.database.clone() }, item)
                     }
                     _ => return Ok(()),
                 };
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, item["id"].as_str().unwrap_or(""), if matches!(kind, "agentMessage" | "imageGeneration") { "assistant" } else { "tool" }, text]).map_err(|e| e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, item_id, role, text]).map_err(|e| e.to_string())?;
+            }
+            "thread/tokenUsage/updated" => {
+                let last = &p["tokenUsage"]["last"];
+                let inp = last["inputTokens"].as_i64().unwrap_or(0);
+                let out = last["outputTokens"].as_i64().unwrap_or(0);
+                let cached = last["cachedInputTokens"].as_i64().unwrap_or(0);
+                if inp > 0 || out > 0 {
+                    self.token_usage
+                        .lock()
+                        .unwrap()
+                        .insert(thread.to_owned(), (inp, out, cached));
+                }
             }
             "turn/completed" => {
                 let status = match p["turn"]["status"].as_str() {
@@ -420,6 +496,29 @@ impl Client {
                     _ => "failed",
                 };
                 self.update_status(thread, status, p["turn"]["error"]["message"].as_str())?;
+                let (inp, out, cached) = self
+                    .token_usage
+                    .lock()
+                    .unwrap()
+                    .remove(thread)
+                    .unwrap_or((0, 0, 0));
+                if let Ok((conv_id, model_name)) = connection.query_row(
+                    "SELECT conversation_id, COALESCE(model, '') FROM codex_sessions WHERE thread_id=?1",
+                    [thread],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                ) {
+                    crate::usage::record(
+                        &self.database,
+                        "codex",
+                        "codex",
+                        &model_name,
+                        &conv_id,
+                        inp,
+                        out,
+                        cached,
+                        status,
+                    );
+                }
                 self.approvals
                     .lock()
                     .unwrap()
@@ -578,6 +677,10 @@ fn mark_startup_failed(store: &Store, conversation_id: &str, error: &str) {
 impl Runtime {
     pub(crate) fn skills(&self, store: &Store, workspace: &Path) -> Reply {
         self.client(store)?.request("skills/list", json!({"cwds":[workspace],"forceReload":true}))
+    }
+
+    pub fn rate_limits(&self, store: &Store) -> Reply {
+        self.client(store)?.request("account/rateLimits/read", json!({}))
     }
 
     fn client(&self, store: &Store) -> Result<Arc<Client>, String> {
@@ -904,6 +1007,39 @@ fn validate_context(response: &Value, root: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn extract_reasoning_text(item: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["summary", "content"] {
+        if let Some(arr) = item[key].as_array() {
+            for entry in arr {
+                let text = entry
+                    .as_str()
+                    .or_else(|| entry["text"].as_str())
+                    .or_else(|| entry["summary_text"].as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !text.is_empty() {
+                    parts.push(text.to_owned());
+                }
+            }
+        } else if let Some(text) = item[key].as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_owned());
+            }
+        }
+    }
+    if parts.is_empty() {
+        if let Some(text) = item["text"].as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_owned());
+            }
+        }
+    }
+    parts.join("\n\n")
+}
+
 fn generated_image_message(store: &Store, item: &Value) -> String {
     if item["status"] != "completed" || !item["failure"].is_null() {
         return "图片生成未完成，请重试。".into();
@@ -956,6 +1092,7 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::from(["thread".to_owned()])),
+            token_usage: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database: store.path.clone(),

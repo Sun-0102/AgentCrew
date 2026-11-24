@@ -1,0 +1,1468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentCrew · 额度与用量看板原型 (T3 Code 风格)</title>
+  <style>
+    :root {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #0f172a;
+      background: #f8fafc;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+      --canvas: #f8fafc;
+      --surface: #ffffff;
+      --sidebar: #f1f5f9;
+      --rail: #f8fafc;
+      --line: #e2e8f0;
+      --muted: #64748b;
+      --accent: #4f46e5;
+      --accent-soft: #eef2ff;
+      --codex: #4f46e5;
+      --deepseek: #0891b2;
+      --gemini: #10b981;
+      --warn: #d97706;
+      --warn-soft: #fef3c7;
+      --danger: #dc2626;
+      --danger-soft: #fee2e2;
+      --ok: #10b981;
+      --ok-soft: #d1fae5;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    button { font: inherit; cursor: pointer; color: inherit; }
+    button:active { transform: translateY(1px); }
+
+    .app-shell {
+      display: grid;
+      grid-template-rows: 51px minmax(0, 1fr);
+      height: 100dvh;
+      min-height: 620px;
+      overflow: hidden;
+    }
+
+    /* Topbar - matches AgentCrew */
+    .app-topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+      padding: 0 15px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 650;
+      font-size: 16px;
+      letter-spacing: -0.3px;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .brand-edition {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 2px 7px;
+      border-radius: 6px;
+      margin-left: 6px;
+    }
+    .brand small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 400;
+      margin-top: 1px;
+    }
+
+    .top-nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      background: #e2e8f0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+    }
+    .top-nav button {
+      border: 0;
+      background: transparent;
+      padding: 6px 20px;
+      border-radius: 9px;
+      color: #475569;
+      font-size: 13px;
+      white-space: nowrap;
+      transition: all 150ms;
+    }
+    .top-nav button.active {
+      background: #ffffff;
+      color: #0f172a;
+      font-weight: 600;
+      box-shadow: 0 1px 3px #0f172a0f;
+    }
+    .top-nav button:hover:not(.active) {
+      background: #cbd5e166;
+    }
+
+    .topbar-end {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: flex-end;
+      position: relative;
+    }
+    .quota-pill-btn {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      font-size: 12px;
+      color: #334155;
+      transition: border-color 150ms, background 150ms;
+    }
+    .quota-pill-btn:hover {
+      border-color: #cbd5e1;
+      background: #f1f5f9;
+    }
+    .local-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #f1f5f9;
+      font-size: 12px;
+      color: #475569;
+    }
+    .profile-button {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 0;
+      background: var(--accent);
+      color: #ffffff;
+      font-size: 13px;
+    }
+
+    /* Quick-Peek Popover (like Antigravity screenshot + T3 Code summary) */
+    .quick-popover {
+      position: absolute;
+      top: 44px;
+      right: 44px;
+      width: 300px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 16px 36px -8px #0f172a22, 0 4px 12px -2px #0f172a0d;
+      padding: 14px 16px;
+      z-index: 50;
+      display: none;
+    }
+    .quick-popover.open { display: block; animation: popIn 140ms ease-out; }
+    @keyframes popIn {
+      from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .popover-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .popover-group { margin-bottom: 12px; }
+    .popover-group-name {
+      font-size: 13px;
+      font-weight: 650;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .popover-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+    .popover-row-label { color: #334155; }
+    .popover-row-sub { color: var(--muted); font-size: 11px; margin-top: 1px; }
+    .popover-row-val {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-variant-numeric: tabular-nums;
+      color: #0f172a;
+      font-weight: 500;
+    }
+    .ring-svg { width: 20px; height: 20px; transform: rotate(-90deg); }
+    .popover-footer {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .popover-link {
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 0;
+    }
+    .popover-link:hover { text-decoration: underline; }
+
+    /* Workbench grid */
+    .workbench {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 67px 272px minmax(0, 1fr);
+    }
+    .app-shell.usage-mode .top-nav {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .app-shell.usage-mode .workbench {
+      grid-template-columns: 67px minmax(0, 1fr);
+    }
+    .app-shell.usage-mode .conversation-sidebar {
+      display: none;
+    }
+
+    /* Left Rail */
+    .agent-rail {
+      background: var(--rail);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      padding: 14px 7px 12px;
+      gap: 8px;
+    }
+    .rail-button {
+      border: 1px solid transparent;
+      background: transparent;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      padding: 8px 1px;
+      font-size: 11px;
+      color: #475569;
+    }
+    .rail-button:hover { background: #f1f5f9; }
+    .rail-button.active {
+      background: #ffffff;
+      border-color: #cbd5e1;
+      color: var(--accent);
+      box-shadow: 0 2px 3px #0f172a0a;
+    }
+    .rail-icon {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+    }
+    .rail-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      font-weight: 700;
+      position: relative;
+    }
+    .rail-avatar i {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      background: #10b981;
+      border: 2px solid var(--rail);
+      border-radius: 50%;
+      bottom: -1px;
+      right: -1px;
+    }
+    .rail-rule { height: 1px; background: #e2e8f0; margin: 0 15px; }
+    .rail-spacer { flex: 1; }
+    .rail-version { text-align: center; font-size: 10px; color: var(--muted); }
+
+    /* Sidebar */
+    .conversation-sidebar {
+      background: var(--sidebar);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sidebar-profile {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 14px 13px;
+    }
+    .avatar-me {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    .sidebar-profile strong { display: block; font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+    .sidebar-profile small { display: block; font-size: 12px; color: var(--muted); }
+    .sidebar-list { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
+    .list-heading {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 6px 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .conv-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 10px;
+      border: 1px solid transparent;
+      background: transparent;
+      border-radius: 13px;
+      text-align: left;
+      margin-bottom: 6px;
+    }
+    .conv-item:hover { background: #e2e8f066; }
+    .conv-item.selected { background: #e0e7ff; border-color: #c7d2fe; }
+    .agent-badge {
+      width: 36px;
+      height: 36px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .bg-codex { background: #e0e7ff; color: #4338ca; }
+    .bg-deepseek { background: #ecfeff; color: #0891b2; }
+    .bg-gemini { background: #d1fae5; color: #047857; }
+    .bg-group { background: #e0e7ff; color: #4f46e5; }
+    .conv-text { flex: 1; min-width: 0; }
+    .conv-title { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13.5px; }
+    .conv-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; display: inline-block; }
+
+    /* Sidebar Mini Quota Card */
+    .sidebar-quota-card {
+      margin: 0 12px 10px;
+      padding: 10px 12px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: border-color 150ms, box-shadow 150ms;
+    }
+    .sidebar-quota-card:hover {
+      border-color: #c7d2fe;
+      box-shadow: 0 2px 8px #4f46e510;
+    }
+    .sq-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 8px;
+    }
+    .sq-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11.5px;
+      margin-bottom: 5px;
+    }
+    .sq-row:last-child { margin-bottom: 0; }
+    .sq-name { width: 64px; color: var(--muted); }
+    .sq-bar {
+      flex: 1;
+      height: 5px;
+      background: #e2e8f0;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .sq-fill { height: 100%; border-radius: 99px; }
+    .sq-val { width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 11px; }
+
+    .sidebar-footer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      min-height: 36px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    /* Main Usage Dashboard Workspace (T3 Code Style + AgentCrew Theme) */
+    .main-workspace {
+      background: var(--canvas);
+      overflow-y: auto;
+      padding: 24px 32px 40px;
+      min-width: 0;
+    }
+    .usage-container {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    .usage-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .usage-header h1 {
+      margin: 0;
+      font-size: 21px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .kbd-hint {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 7px;
+    }
+    .usage-header p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .usage-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .segmented {
+      display: inline-flex;
+      background: #e2e8f0;
+      padding: 3px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+    .segmented button {
+      border: 0;
+      background: transparent;
+      padding: 5px 12px;
+      border-radius: 7px;
+      font-size: 12.5px;
+      color: #475569;
+    }
+    .segmented button.active {
+      background: #ffffff;
+      color: #0f172a;
+      font-weight: 600;
+      box-shadow: 0 1px 2px #0f172a0d;
+    }
+    .btn-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 9px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      font-size: 12.5px;
+      font-weight: 500;
+      color: #334155;
+    }
+    .btn-outline:hover { background: #f1f5f9; }
+
+    /* T3 Code style Tabs: Limits vs Overview */
+    .usage-tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 22px;
+    }
+    .usage-tabs button {
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      padding: 10px 16px;
+      font-size: 13.5px;
+      color: var(--muted);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .usage-tabs button.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      font-weight: 650;
+    }
+    .tab-badge {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 99px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Window Cards (T3 Code Limits Tab) */
+    .window-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    @media (max-width: 900px) {
+      .window-grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 650;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-sub {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .pool-bar-wrap {
+      margin-bottom: 14px;
+    }
+    .pool-bar-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 6px;
+      color: #334155;
+    }
+    .pool-bar {
+      height: 10px;
+      background: #f1f5f9;
+      border-radius: 99px;
+      overflow: hidden;
+      display: flex;
+      border: 1px solid #e2e8f0;
+    }
+    .pool-seg { height: 100%; transition: width 300ms ease; }
+    .limit-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .limit-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+    .limit-item-info { flex: 1; min-width: 0; }
+    .limit-item-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .limit-item-name {
+      font-weight: 600;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .tag {
+      font-size: 10.5px;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-weight: 500;
+    }
+    .tag-live { background: var(--ok-soft); color: #065f46; }
+    .tag-api { background: #ecfeff; color: #0e7490; }
+    .tag-local { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+    .limit-pct {
+      font-variant-numeric: tabular-nums;
+      font-weight: 650;
+      font-size: 13px;
+    }
+    .progress-track {
+      height: 6px;
+      background: #e2e8f0;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-fill { height: 100%; border-radius: 99px; }
+    .limit-item-foot {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-top: 5px;
+    }
+
+    /* Provider Cards Grid */
+    .section-title {
+      font-size: 13.5px;
+      font-weight: 650;
+      color: #334155;
+      margin: 0 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .provider-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 1020px) {
+      .provider-grid { grid-template-columns: 1fr; }
+    }
+    .provider-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .provider-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .provider-head h3 { margin: 0; font-size: 15px; font-weight: 650; }
+    .provider-head small { color: var(--muted); font-size: 11.5px; display: block; margin-top: 1px; }
+    .status-pill {
+      margin-left: auto;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 99px;
+      font-weight: 600;
+    }
+    .status-ok { background: var(--ok-soft); color: #065f46; }
+    .status-warn { background: var(--warn-soft); color: #92400e; }
+    .provider-metric-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12.5px;
+      padding: 6px 0;
+      border-bottom: 1px dashed #e2e8f0;
+    }
+    .provider-metric-row:last-of-type { border-bottom: 0; }
+    .provider-note {
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: var(--muted);
+      background: #f8fafc;
+      border-radius: 8px;
+      padding: 8px 10px;
+      border: 1px solid #e2e8f0;
+    }
+
+    /* Overview Tab (KPIs + Chart + Table) */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 960px) {
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      padding: 15px 16px;
+    }
+    .kpi-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .kpi-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.4px; }
+    .kpi-sub { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+      margin-bottom: 20px;
+    }
+    .chart-legend {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #475569;
+    }
+    .legend-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      margin-right: 5px;
+    }
+    .bar-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 14px;
+      height: 170px;
+      padding: 20px 8px 4px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 8px;
+    }
+    .bar-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100%;
+      justify-content: flex-end;
+      position: relative;
+      cursor: pointer;
+    }
+    .bar-stack {
+      width: 100%;
+      max-width: 38px;
+      display: flex;
+      flex-direction: column-reverse;
+      border-radius: 6px 6px 2px 2px;
+      overflow: hidden;
+      transition: transform 150ms, filter 150ms;
+    }
+    .bar-col:hover .bar-stack {
+      transform: translateY(-2px);
+      filter: brightness(1.06);
+    }
+    .bar-tooltip {
+      position: absolute;
+      bottom: calc(100% + 6px);
+      background: #0f172a;
+      color: #fff;
+      font-size: 11px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 120ms;
+      z-index: 10;
+    }
+    .bar-col:hover .bar-tooltip { opacity: 1; }
+    .bar-x-labels {
+      display: flex;
+      gap: 14px;
+      padding: 0 8px;
+    }
+    .bar-x-labels span {
+      flex: 1;
+      text-align: center;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: left;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    td {
+      padding: 12px;
+      border-bottom: 1px solid #f1f5f9;
+      font-variant-numeric: tabular-nums;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .num { text-align: right; }
+
+    .hidden { display: none !important; }
+    .spin { animation: spin 700ms linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="app-shell usage-mode" id="appShell">
+    <!-- Topbar -->
+    <header class="app-topbar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div>
+          <span>AgentCrew<span class="brand-edition">桌面版</span></span>
+          <small>多端协同 · 智能体工作台</small>
+        </div>
+      </div>
+
+      <nav class="top-nav">
+        <button type="button" id="navChat" onclick="setView('chat')">对话</button>
+        <button type="button" id="navWorkspace" onclick="setView('chat')">工作空间</button>
+      </nav>
+
+      <div class="topbar-end">
+        <button type="button" class="quota-pill-btn" id="quickBtn" title="快速查看额度">
+          <span class="dot"></span>
+          <span>Codex 78% · DS ¥42.8</span>
+          <span style="color:var(--muted)">▾</span>
+        </button>
+        <span class="local-badge">本机工作台</span>
+        <button type="button" class="profile-button">我</button>
+
+        <!-- Quick-peek popover (Antigravity / T3 Code style compact view) -->
+        <div class="quick-popover" id="quickPopover">
+          <div class="popover-title">
+            <span>使用量速览</span>
+            <span style="font-weight:400">刚更新</span>
+          </div>
+
+          <div class="popover-group">
+            <div class="popover-group-name">
+              <span>Codex (ChatGPT Plus)</span>
+              <span class="tag tag-live">实时</span>
+            </div>
+            <div class="popover-row">
+              <div>
+                <div class="popover-row-label">5 小时限额</div>
+                <div class="popover-row-sub">2 小时 41 分后重置</div>
+              </div>
+              <div class="popover-row-val">
+                <span>78% 剩余</span>
+                <svg class="ring-svg" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="#e2e8f0" stroke-width="3"/>
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="#4f46e5" stroke-width="3" stroke-dasharray="56.5" stroke-dashoffset="12.4" stroke-linecap="round"/>
+                </svg>
+              </div>
+            </div>
+            <div class="popover-row">
+              <div>
+                <div class="popover-row-label">周限额</div>
+                <div class="popover-row-sub">5 天 14 小时后重置</div>
+              </div>
+              <div class="popover-row-val">
+                <span>92% 剩余</span>
+                <svg class="ring-svg" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="#e2e8f0" stroke-width="3"/>
+                  <circle cx="12" cy="12" r="9" fill="none" stroke="#4f46e5" stroke-width="3" stroke-dasharray="56.5" stroke-dashoffset="4.5" stroke-linecap="round"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          <div class="popover-group">
+            <div class="popover-group-name">
+              <span>DeepSeek API</span>
+              <span class="tag tag-api">余额</span>
+            </div>
+            <div class="popover-row">
+              <div>
+                <div class="popover-row-label">账户可用余额</div>
+                <div class="popover-row-sub">今日已消耗 ¥ 1.24</div>
+              </div>
+              <div class="popover-row-val">¥ 42.80</div>
+            </div>
+          </div>
+
+          <div class="popover-group" style="margin-bottom:4px">
+            <div class="popover-group-name">
+              <span>Gemini (ACP)</span>
+              <span class="tag tag-local">本地统计</span>
+            </div>
+            <div class="popover-row">
+              <div>
+                <div class="popover-row-label">运行状态</div>
+                <div class="popover-row-sub">今日 18 轮 · 未触发限流</div>
+              </div>
+              <div class="popover-row-val" style="color:#047857">正常</div>
+            </div>
+          </div>
+
+          <div class="popover-footer">
+            <span style="font-size:11px;color:var(--muted)">快捷键 ⌘U</span>
+            <button type="button" class="popover-link" onclick="setView('usage'); document.getElementById('quickPopover').classList.remove('open')">查看完整看板 →</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Workbench -->
+    <div class="workbench" id="workbench">
+      <!-- Left Rail -->
+      <aside class="agent-rail">
+        <button class="rail-button" id="railChat" type="button" onclick="setView('chat')">
+          <span class="rail-icon">💬</span>
+          <span>对话</span>
+        </button>
+        <button class="rail-button" type="button" onclick="setView('chat')">
+          <span class="rail-icon">👥</span>
+          <span>群聊</span>
+        </button>
+        <div class="rail-rule"></div>
+        <button class="rail-button" type="button" onclick="setView('chat')">
+          <span class="rail-avatar bg-codex">C<i></i></span>
+          <span>Codex</span>
+        </button>
+        <button class="rail-button" type="button" onclick="setView('chat')">
+          <span class="rail-avatar bg-deepseek">D<i></i></span>
+          <span>DeepSeek</span>
+        </button>
+        <button class="rail-button" type="button" onclick="setView('chat')">
+          <span class="rail-avatar bg-gemini">G<i></i></span>
+          <span>Gemini</span>
+        </button>
+        <div class="rail-spacer"></div>
+        <button class="rail-button active" id="railUsage" type="button" onclick="setView('usage')">
+          <span class="rail-icon">📊</span>
+          <span>额度</span>
+        </button>
+        <button class="rail-button" type="button">
+          <span class="rail-icon">⚙️</span>
+          <span>设置</span>
+        </button>
+        <span class="rail-version">v0.1.0</span>
+      </aside>
+
+      <!-- Conversation Sidebar -->
+      <aside class="conversation-sidebar">
+        <div class="sidebar-profile">
+          <div class="avatar-me">我</div>
+          <div>
+            <strong>我的工作台</strong>
+            <small>和自己的 Agent 一起工作</small>
+          </div>
+        </div>
+
+        <div class="sidebar-list">
+          <div class="list-heading"><span>私聊</span><span>3</span></div>
+          <button class="conv-item" type="button">
+            <div class="agent-badge bg-codex">C</div>
+            <div class="conv-text">
+              <div class="conv-title">Codex <span class="dot"></span></div>
+              <div class="conv-sub">独立私聊 · 5h 剩余 78%</div>
+            </div>
+          </button>
+          <button class="conv-item" type="button">
+            <div class="agent-badge bg-deepseek">D</div>
+            <div class="conv-text">
+              <div class="conv-title">DeepSeek <span class="dot"></span></div>
+              <div class="conv-sub">Harness · 余额 ¥42.80</div>
+            </div>
+          </button>
+          <button class="conv-item" type="button">
+            <div class="agent-badge bg-gemini">G</div>
+            <div class="conv-text">
+              <div class="conv-title">Gemini <span class="dot"></span></div>
+              <div class="conv-sub">ACP · 今日 18 轮正常</div>
+            </div>
+          </button>
+
+          <div class="list-heading" style="margin-top:14px"><span>协作群</span><span>2</span></div>
+          <button class="conv-item" type="button">
+            <div class="agent-badge bg-group">群</div>
+            <div class="conv-text">
+              <div class="conv-title">AgentCrew 架构评审</div>
+              <div class="conv-sub">3 位 Agent · 本周消耗 $4.82</div>
+            </div>
+          </button>
+          <button class="conv-item" type="button">
+            <div class="agent-badge bg-group">群</div>
+            <div class="conv-text">
+              <div class="conv-title">前端重构小组</div>
+              <div class="conv-sub">2 位 Agent · 本周消耗 $2.15</div>
+            </div>
+          </button>
+        </div>
+
+        <!-- Sidebar Mini Quota Card -->
+        <div class="sidebar-quota-card" onclick="setView('usage')">
+          <div class="sq-head">
+            <span>额度健康度</span>
+            <span style="color:var(--accent)">详情 ↗</span>
+          </div>
+          <div class="sq-row">
+            <span class="sq-name">Codex 5h</span>
+            <div class="sq-bar"><div class="sq-fill" style="width:78%;background:var(--codex)"></div></div>
+            <span class="sq-val">78%</span>
+          </div>
+          <div class="sq-row">
+            <span class="sq-name">DeepSeek</span>
+            <div class="sq-bar"><div class="sq-fill" style="width:85%;background:var(--deepseek)"></div></div>
+            <span class="sq-val">¥42.8</span>
+          </div>
+          <div class="sq-row">
+            <span class="sq-name">Gemini</span>
+            <div class="sq-bar"><div class="sq-fill" style="width:100%;background:var(--gemini)"></div></div>
+            <span class="sq-val" style="color:#047857">正常</span>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="dot"></span>
+          <span>记录保存在本机</span>
+        </div>
+      </aside>
+
+      <!-- Main Usage & Limits Dashboard -->
+      <main class="main-workspace">
+        <div class="usage-container hidden" id="chatPlaceholder" style="padding-top:60px;text-align:center;">
+          <div style="display:inline-grid;place-items:center;width:52px;height:52px;border-radius:16px;background:var(--accent-soft);color:var(--accent);font-size:24px;margin-bottom:14px;">💬</div>
+          <h2 style="margin:0 0 8px;font-size:18px;">对话工作区（原型示意）</h2>
+          <p style="margin:0 0 20px;color:var(--muted);font-size:13px;">顶部保持干净的「对话 | 工作空间」切换；左下角迷你卡片和右上角胶囊均可快速查看额度。</p>
+          <button type="button" class="btn-outline" onclick="setView('usage')">返回「额度与用量」完整看板 →</button>
+        </div>
+        <div class="usage-container" id="usageContainer">
+          <div class="usage-header">
+            <div>
+              <h1>使用量与额度看板 <span class="kbd-hint">⌘U</span></h1>
+              <p>参考 T3 Code Usage &amp; Limits 设计 · 实时聚合 Codex 限流窗口、DeepSeek 余额与本地多 Agent 消耗</p>
+            </div>
+            <div class="usage-controls">
+              <div class="segmented" id="rangeSwitch">
+                <button type="button" data-range="today">今日</button>
+                <button type="button" class="active" data-range="7d">近 7 天</button>
+                <button type="button" data-range="30d">近 30 天</button>
+              </div>
+              <button type="button" class="btn-outline" id="refreshBtn">
+                <span id="refreshIcon">↻</span> 刷新额度
+              </button>
+            </div>
+          </div>
+
+          <!-- T3 Code Tabs -->
+          <div class="usage-tabs">
+            <button type="button" class="active" data-tab="limits">
+              限额窗口 (Limits) <span class="tab-badge">实时</span>
+            </button>
+            <button type="button" data-tab="overview">
+              用量与折算成本 (Overview)
+            </button>
+          </div>
+
+          <!-- TAB 1: LIMITS (T3 Code Usage -> Limits) -->
+          <section id="tab-limits">
+            <div class="window-grid">
+              <!-- 5-Hour Rolling Window -->
+              <div class="card">
+                <div class="card-header">
+                  <div class="card-title">⏱ 5 小时滚动限额</div>
+                  <span class="card-sub">按最快恢复时间排序</span>
+                </div>
+                <div class="pool-bar-wrap">
+                  <div class="pool-bar-meta">
+                    <span>订阅配额占用分布</span>
+                    <span>已用 22% · 剩余 78%</span>
+                  </div>
+                  <div class="pool-bar">
+                    <div class="pool-seg" style="width:22%;background:var(--codex)" title="Codex 已用 22%"></div>
+                  </div>
+                </div>
+                <div class="limit-list">
+                  <div class="limit-item">
+                    <div class="agent-badge bg-codex">C</div>
+                    <div class="limit-item-info">
+                      <div class="limit-item-top">
+                        <span class="limit-item-name">Codex <span class="tag tag-live">app-server 实时</span></span>
+                        <span class="limit-pct" style="color:var(--codex)">78% 剩余</span>
+                      </div>
+                      <div class="progress-track">
+                        <div class="progress-fill" style="width:78%;background:var(--codex)"></div>
+                      </div>
+                      <div class="limit-item-foot">
+                        <span>2 小时 41 分钟后重置 (10:27)</span>
+                        <span>ChatGPT Plus</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="limit-item">
+                    <div class="agent-badge bg-gemini">G</div>
+                    <div class="limit-item-info">
+                      <div class="limit-item-top">
+                        <span class="limit-item-name">Gemini <span class="tag tag-local">ACP 健康状态</span></span>
+                        <span class="limit-pct" style="color:#047857">正常</span>
+                      </div>
+                      <div class="progress-track">
+                        <div class="progress-fill" style="width:100%;background:var(--gemini)"></div>
+                      </div>
+                      <div class="limit-item-foot">
+                        <span>近 5h 本地调用 11 轮 · 未触发 quota_exhausted</span>
+                        <span>agy acp</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Weekly Window -->
+              <div class="card">
+                <div class="card-header">
+                  <div class="card-title">📅 每周总额度 / 账户余额</div>
+                  <span class="card-sub">跨会话累计窗口</span>
+                </div>
+                <div class="pool-bar-wrap">
+                  <div class="pool-bar-meta">
+                    <span>Codex 周配额</span>
+                    <span>已用 8% · 剩余 92%</span>
+                  </div>
+                  <div class="pool-bar">
+                    <div class="pool-seg" style="width:8%;background:var(--codex)"></div>
+                  </div>
+                </div>
+                <div class="limit-list">
+                  <div class="limit-item">
+                    <div class="agent-badge bg-codex">C</div>
+                    <div class="limit-item-info">
+                      <div class="limit-item-top">
+                        <span class="limit-item-name">Codex 周限额 <span class="tag tag-live">app-server 实时</span></span>
+                        <span class="limit-pct" style="color:var(--codex)">92% 剩余</span>
+                      </div>
+                      <div class="progress-track">
+                        <div class="progress-fill" style="width:92%;background:var(--codex)"></div>
+                      </div>
+                      <div class="limit-item-foot">
+                        <span>5 天 14 小时后重置 (11-29 22:00)</span>
+                        <span>本周 48 轮</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="limit-item">
+                    <div class="agent-badge bg-deepseek">D</div>
+                    <div class="limit-item-info">
+                      <div class="limit-item-top">
+                        <span class="limit-item-name">DeepSeek 账户 <span class="tag tag-api">API 余额</span></span>
+                        <span class="limit-pct" style="color:var(--deepseek)">¥ 42.80</span>
+                      </div>
+                      <div class="progress-track">
+                        <div class="progress-fill" style="width:85%;background:var(--deepseek)"></div>
+                      </div>
+                      <div class="limit-item-foot">
+                        <span>按量计费无周上限 · 本周已消耗 ¥ 6.45</span>
+                        <span>60 RPM</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="section-title">
+              <span>各接入 Agent 额度明细</span>
+              <span style="font-size:12px;font-weight:400;color:var(--muted)">数据来源：Codex 协议直读 · DeepSeek API · Gemini 本地记录</span>
+            </h2>
+
+            <div class="provider-grid">
+              <div class="provider-card">
+                <div class="provider-head">
+                  <div class="agent-badge bg-codex">C</div>
+                  <div>
+                    <h3>Codex</h3>
+                    <small>codex-app-server · gpt-5.3-codex</small>
+                  </div>
+                  <span class="status-pill status-ok">额度充足</span>
+                </div>
+                <div class="provider-metric-row"><span>5 小时剩余</span><strong>78% (2h 41m 重置)</strong></div>
+                <div class="provider-metric-row"><span>周限额剩余</span><strong>92% (5d 14h 重置)</strong></div>
+                <div class="provider-metric-row"><span>本周消耗 (API 折算)</span><strong>$6.40</strong></div>
+                <div class="provider-note">通过 <code>account/rateLimits/read</code> 实时获取，与官方 CLI 限流窗口完全一致。</div>
+              </div>
+
+              <div class="provider-card">
+                <div class="provider-head">
+                  <div class="agent-badge bg-deepseek">D</div>
+                  <div>
+                    <h3>DeepSeek</h3>
+                    <small>deepseek-harness-sdk · deepseek-reasoner</small>
+                  </div>
+                  <span class="status-pill status-ok">余额充足</span>
+                </div>
+                <div class="provider-metric-row"><span>可用余额</span><strong>¥ 42.80</strong></div>
+                <div class="provider-metric-row"><span>今日 / 本周花费</span><strong>¥ 1.24 / ¥ 6.45</strong></div>
+                <div class="provider-metric-row"><span>缓存命中率</span><strong>71.4% (省 ¥ 3.10)</strong></div>
+                <div class="provider-note">通过 DeepSeek <code>/user/balance</code> 与每轮 SDK 返回的 Token 用量统计。</div>
+              </div>
+
+              <div class="provider-card">
+                <div class="provider-head">
+                  <div class="agent-badge bg-gemini">G</div>
+                  <div>
+                    <h3>Gemini</h3>
+                    <small>agy acp · gemini-3-pro</small>
+                  </div>
+                  <span class="status-pill status-ok">状态正常</span>
+                </div>
+                <div class="provider-metric-row"><span>剩余百分比</span><strong style="color:var(--muted)">ACP 暂未开放</strong></div>
+                <div class="provider-metric-row"><span>今日 / 本周轮次</span><strong>18 轮 / 64 轮</strong></div>
+                <div class="provider-metric-row"><span>最近限流时间</span><strong>无 (7 天内正常)</strong></div>
+                <div class="provider-note">当前 <code>agy acp</code> 未对外暴露账户百分比，若触发 <code>quota_exhausted</code> 会自动标记冷却状态。</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 2: OVERVIEW (T3 Code Usage) -->
+          <section id="tab-overview" class="hidden">
+            <div class="kpi-grid">
+              <div class="kpi-card">
+                <div class="kpi-label">API 等价折算费用 (<span class="range-label">近 7 天</span>)</div>
+                <div class="kpi-value" id="kpiCost">$12.48</div>
+                <div class="kpi-sub">含 Codex 订阅折算 + DeepSeek 实付</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">累计 Token 消耗</div>
+                <div class="kpi-value" id="kpiTokens">3.84M</div>
+                <div class="kpi-sub">输入 2.91M · 输出 0.93M</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">Prompt 缓存命中率</div>
+                <div class="kpi-value" id="kpiCache">64.2%</div>
+                <div class="kpi-sub">预计节省 $4.15 上下文费用</div>
+              </div>
+              <div class="kpi-card">
+                <div class="kpi-label">协作轮次</div>
+                <div class="kpi-value" id="kpiTurns">142 轮</div>
+                <div class="kpi-sub">群聊 88 轮 · 私聊 54 轮</div>
+              </div>
+            </div>
+
+            <div class="chart-card">
+              <div class="card-header">
+                <div class="card-title">每日折算成本趋势 (USD)</div>
+                <div class="chart-legend">
+                  <span><i class="legend-dot" style="background:var(--codex)"></i>Codex</span>
+                  <span><i class="legend-dot" style="background:var(--deepseek)"></i>DeepSeek</span>
+                  <span><i class="legend-dot" style="background:var(--gemini)"></i>Gemini (估算)</span>
+                </div>
+              </div>
+              <div class="bar-chart" id="barChart"></div>
+              <div class="bar-x-labels" id="barLabels"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">模型与会话维度明细</div>
+                <span class="card-sub">本地 SQLite usage_records 聚合</span>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Agent / 模型</th>
+                    <th>来源</th>
+                    <th class="num">轮次</th>
+                    <th class="num">输入 Token</th>
+                    <th class="num">输出 Token</th>
+                    <th class="num">缓存命中</th>
+                    <th class="num">折算费用</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>Codex</strong> · gpt-5.3-codex</td>
+                    <td>群聊 + 私聊</td>
+                    <td class="num">48</td>
+                    <td class="num">1,240,500</td>
+                    <td class="num">382,100</td>
+                    <td class="num">58%</td>
+                    <td class="num"><strong>$6.40</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>DeepSeek</strong> · deepseek-reasoner</td>
+                    <td>群聊 + 私聊</td>
+                    <td class="num">30</td>
+                    <td class="num">890,200</td>
+                    <td class="num">315,400</td>
+                    <td class="num">71%</td>
+                    <td class="num"><strong>$0.91</strong> (¥6.45)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Gemini</strong> · gemini-3-pro</td>
+                    <td>群聊 + 私聊</td>
+                    <td class="num">64</td>
+                    <td class="num">782,000</td>
+                    <td class="num">234,800</td>
+                    <td class="num">62%</td>
+                    <td class="num"><strong>$5.17</strong> (估算)</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Quick popover toggle
+    const quickBtn = document.getElementById("quickBtn");
+    const quickPopover = document.getElementById("quickPopover");
+    quickBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      quickPopover.classList.toggle("open");
+    });
+    document.addEventListener("click", (e) => {
+      if (!quickPopover.contains(e.target) && e.target !== quickBtn) {
+        quickPopover.classList.remove("open");
+      }
+    });
+
+    // Tab switching (Limits vs Overview)
+    const tabBtns = document.querySelectorAll(".usage-tabs button");
+    const tabLimits = document.getElementById("tab-limits");
+    const tabOverview = document.getElementById("tab-overview");
+    tabBtns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        tabBtns.forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const target = btn.dataset.tab;
+        tabLimits.classList.toggle("hidden", target !== "limits");
+        tabOverview.classList.toggle("hidden", target !== "overview");
+      });
+    });
+
+    // Range switching
+    const rangeData = {
+      today: { label: "今日", cost: "$2.14", tokens: "620K", cache: "68.5%", turns: "24 轮" },
+      "7d": { label: "近 7 天", cost: "$12.48", tokens: "3.84M", cache: "64.2%", turns: "142 轮" },
+      "30d": { label: "近 30 天", cost: "$48.90", tokens: "15.2M", cache: "61.8%", turns: "560 轮" },
+    };
+    document.querySelectorAll("#rangeSwitch button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#rangeSwitch button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const d = rangeData[btn.dataset.range];
+        document.querySelector(".range-label").textContent = d.label;
+        document.getElementById("kpiCost").textContent = d.cost;
+        document.getElementById("kpiTokens").textContent = d.tokens;
+        document.getElementById("kpiCache").textContent = d.cache;
+        document.getElementById("kpiTurns").textContent = d.turns;
+      });
+    });
+
+    // Render 7-day stacked bar chart
+    const days = [
+      { day: "11-18", codex: 0.9, deepseek: 0.15, gemini: 0.6 },
+      { day: "11-19", codex: 1.2, deepseek: 0.22, gemini: 0.9 },
+      { day: "11-20", codex: 0.7, deepseek: 0.10, gemini: 0.5 },
+      { day: "11-21", codex: 1.5, deepseek: 0.18, gemini: 1.1 },
+      { day: "11-22", codex: 0.8, deepseek: 0.12, gemini: 0.7 },
+      { day: "11-23", codex: 0.4, deepseek: 0.06, gemini: 0.5 },
+      { day: "今日",  codex: 0.9, deepseek: 0.17, gemini: 0.77 },
+    ];
+    const maxTotal = Math.max(...days.map((d) => d.codex + d.deepseek + d.gemini));
+    const chartEl = document.getElementById("barChart");
+    const labelsEl = document.getElementById("barLabels");
+    days.forEach((d) => {
+      const total = d.codex + d.deepseek + d.gemini;
+      const pct = (total / maxTotal) * 100;
+      const col = document.createElement("div");
+      col.className = "bar-col";
+      col.innerHTML = `
+        <div class="bar-tooltip">${d.day} · 合计 $${total.toFixed(2)}<br>Codex $${d.codex} / DS $${d.deepseek} / Gemini $${d.gemini}</div>
+        <div class="bar-stack" style="height:${pct}%">
+          <div style="height:${(d.codex / total) * 100}%;background:var(--codex)"></div>
+          <div style="height:${(d.deepseek / total) * 100}%;background:var(--deepseek)"></div>
+          <div style="height:${(d.gemini / total) * 100}%;background:var(--gemini)"></div>
+        </div>
+      `;
+      chartEl.appendChild(col);
+      const lbl = document.createElement("span");
+      lbl.textContent = d.day;
+      labelsEl.appendChild(lbl);
+    });
+
+    // Refresh animation
+    document.getElementById("refreshBtn").addEventListener("click", () => {
+      const icon = document.getElementById("refreshIcon");
+      icon.classList.add("spin");
+      setTimeout(() => icon.classList.remove("spin"), 650);
+    });
+
+    // Cmd/Ctrl + U shortcut
+    document.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "u") {
+        e.preventDefault();
+        quickPopover.classList.toggle("open");
+      }
+    });
+
+    function setView(view) {
+      const shell = document.getElementById("appShell");
+      const usageEl = document.getElementById("usageContainer");
+      const chatEl = document.getElementById("chatPlaceholder");
+      const navChat = document.getElementById("navChat");
+      const railChat = document.getElementById("railChat");
+      const railUsage = document.getElementById("railUsage");
+      const isUsage = view === "usage";
+      shell.classList.toggle("usage-mode", isUsage);
+      usageEl.classList.toggle("hidden", !isUsage);
+      chatEl.classList.toggle("hidden", isUsage);
+      navChat.classList.toggle("active", !isUsage);
+      railChat.classList.toggle("active", !isUsage);
+      railUsage.classList.toggle("active", isUsage);
+    }
+
+    function toastHint(msg) {
+      alert(msg);
+    }
+  </script>
+</body>
+</html>
