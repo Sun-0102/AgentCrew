@@ -106,7 +106,7 @@ export default function PairingDialog({ invitation, onInvitation, onClose }: {
     </>}
     {error && <p role="alert" className="inline-error">{error}</p>}
     <div className="dialog-footer">
-      <span>{copied ? "已生成并复制到剪贴板" : "一次性有效 · 非 API Key"}</span>
+      <span>{copied ? "已生成并复制到剪贴板" : ""}</span>
       <div className="pairing-actions">
         {invitation && state !== "active" && <button className="outline-button" disabled={busy} onClick={() => void cancel()}>取消邀请</button>}
         {(!invitation || !["active", "validating"].includes(state ?? "")) && (
