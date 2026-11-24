@@ -26,6 +26,7 @@ type Props = Pick<
   | "onDeleteSession"
   | "onGroupUpdated"
   | "sidebarControls"
+  | "onOpenGit"
 > & {
   probes: Record<string, Probe>;
   connectingByAgent: Record<string, boolean>;

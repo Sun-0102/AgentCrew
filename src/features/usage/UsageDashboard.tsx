@@ -234,8 +234,23 @@ export function SidebarQuotaCard({
               }}
             />
           </div>
-          <span className="sq-val" style={{ color: gemini.quotaExhaustedRecent ? "#dc2626" : "#047857" }}>
-            {gemini.quotaExhaustedRecent ? "受限" : gemini.connected ? "正常" : "离线"}
+          <span
+            className="sq-val"
+            style={{
+              color: gemini.quotaExhaustedRecent
+                ? "#dc2626"
+                : gemini.connected
+                  ? "#047857"
+                  : "var(--muted)",
+            }}
+          >
+            {gemini.quotaExhaustedRecent
+              ? "受限"
+              : gemini.connected
+                ? "正常"
+                : gemini.availability === "checking"
+                  ? "检测中"
+                  : "离线"}
           </span>
         </div>
       )}

@@ -6,7 +6,9 @@ mod codex_sidebar;
 mod collaboration;
 mod commands;
 mod deepseek;
+mod events;
 mod gemini;
+mod git;
 mod group_context;
 mod group_sessions;
 mod groups;
@@ -29,6 +31,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            events::init(app.handle().clone());
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             app.manage(lifecycle::Lifecycle::acquire(&data_dir)?);
@@ -56,6 +59,7 @@ pub fn run() {
                     let _guard=gate.0.lock().unwrap_or_else(|e|e.into_inner());
                     let store=bootstrap.state::<storage::Store>();
                     let _=agents::auto_discover(&bootstrap,&store,false);
+                    events::emit_agents_sync();
                 }
                 collaboration::start_scheduler(&bootstrap);
             });
@@ -136,7 +140,22 @@ pub fn run() {
             commands::group_task_list,
             commands::group_task_result,
             commands::group_task_export,
-            commands::usage_dashboard
+            commands::usage_dashboard,
+            git::git_overview,
+            git::git_file_diff,
+            git::git_stage,
+            git::git_unstage,
+            git::git_discard,
+            git::git_commit,
+            git::git_push,
+            git::git_checkout_branch,
+            git::git_create_pr,
+            git::git_worktree_create,
+            git::git_worktree_remove,
+            git::git_commits,
+            git::git_commit_files,
+            git::git_commit_file_diff,
+            git::git_open_url
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")

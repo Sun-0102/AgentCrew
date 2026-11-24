@@ -29,8 +29,22 @@ export interface TaskResult {
   steps: TaskStep[]; limitations: string[];
 }
 export const taskLabels: Record<string, string> = { idle: "等待新消息", running: "正在处理", paused: "已暂停接力", cancelling: "正在取消", cancelled: "已取消", interrupted: "协作已中断", blocked: "需要你处理", awaiting_review: "待你验收", completed: "已验收", manual: "已转手动指派" };
+export interface ContextUsage {
+  agentId: string;
+  providerKind: string;
+  model: string;
+  usedTokens: number;
+  contextWindow: number;
+  percent: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  source: "live" | "recorded" | "none";
+}
 export interface Snapshot {
+  conversation_id?: string;
   sessions?: Partial<Record<string, Snapshot["session"]>>;
+  context_usage?: Record<string, ContextUsage>;
   agent?: string;
   task?: GroupTask | null;
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;

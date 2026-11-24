@@ -382,8 +382,11 @@ pub async fn group_create(
     project_id: Option<String>,
 ) -> Result<Value, String> {
     codex_call(app, move |_, store| {
-        serde_json::to_value(store.create_group(&name, members, project_id)?)
-            .map_err(|e| e.to_string())
+        let created = store.create_group(&name, members, project_id)?;
+        let group_id = created.id.clone();
+        let value = serde_json::to_value(created).map_err(|e| e.to_string())?;
+        crate::events::emit_groups_sync(Some(&group_id));
+        Ok(value)
     })
     .await
 }
@@ -400,8 +403,10 @@ pub async fn group_update(
     codex_call(app, move |_, store| {
         let gate = admission.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        serde_json::to_value(store.update_group(&id, &name, members, project_id)?)
-            .map_err(|e| e.to_string())
+        let updated = store.update_group(&id, &name, members, project_id)?;
+        let value = serde_json::to_value(updated).map_err(|e| e.to_string())?;
+        crate::events::emit_groups_sync(Some(&id));
+        Ok(value)
     })
     .await
 }
@@ -467,7 +472,9 @@ pub async fn group_session_create(app: tauri::AppHandle, group_id: String, name:
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e|e.to_string())?;
-        serde_json::to_value(store.create_group_session(&group_id,&name)?).map_err(|e|e.to_string())
+        let value = serde_json::to_value(store.create_group_session(&group_id,&name)?).map_err(|e|e.to_string())?;
+        crate::events::emit_groups_sync(Some(&group_id));
+        Ok(value)
     }).await
 }
 
@@ -477,7 +484,9 @@ pub async fn group_session_update(app: tauri::AppHandle, group_id: String, id: S
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e|e.to_string())?;
-        serde_json::to_value(store.update_group_session(&group_id,&id,&name,archived)?).map_err(|e|e.to_string())
+        let value = serde_json::to_value(store.update_group_session(&group_id,&id,&name,archived)?).map_err(|e|e.to_string())?;
+        crate::events::emit_groups_sync(Some(&group_id));
+        Ok(value)
     }).await
 }
 
@@ -488,6 +497,7 @@ pub async fn group_session_delete(app: tauri::AppHandle, group_id: String, id: S
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e|e.to_string())?;
         store.delete_group_session(&group_id,&id)?;
+        crate::events::emit_groups_sync(Some(&group_id));
         Ok(Value::Null)
     }).await
 }
@@ -499,6 +509,7 @@ pub async fn group_delete(app: tauri::AppHandle, id: String) -> Result<Value, St
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         store.delete_group(&id)?;
+        crate::events::emit_groups_sync(Some(&id));
         Ok(Value::Null)
     }).await
 }
@@ -516,7 +527,9 @@ pub async fn private_session_create(app: tauri::AppHandle, agent_id: String, nam
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        serde_json::to_value(store.create_private_session(&agent_id, &name)?).map_err(|e| e.to_string())
+        let value = serde_json::to_value(store.create_private_session(&agent_id, &name)?).map_err(|e| e.to_string())?;
+        crate::events::emit_private_sessions_sync(Some(&agent_id));
+        Ok(value)
     }).await
 }
 
@@ -526,7 +539,9 @@ pub async fn private_session_update(app: tauri::AppHandle, agent_id: String, id:
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        serde_json::to_value(store.update_private_session(&agent_id, &id, &name, archived)?).map_err(|e| e.to_string())
+        let value = serde_json::to_value(store.update_private_session(&agent_id, &id, &name, archived)?).map_err(|e| e.to_string())?;
+        crate::events::emit_private_sessions_sync(Some(&agent_id));
+        Ok(value)
     }).await
 }
 
@@ -537,6 +552,7 @@ pub async fn private_session_delete(app: tauri::AppHandle, agent_id: String, id:
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         store.delete_private_session(&agent_id, &id)?;
+        crate::events::emit_private_sessions_sync(Some(&agent_id));
         Ok(Value::Null)
     }).await
 }
@@ -556,7 +572,9 @@ pub async fn group_members_update(app: tauri::AppHandle, group_id: String, add: 
         members.extend(add);
         members.sort();
         members.dedup();
-        serde_json::to_value(store.update_group(&group_id,&group.name,members,group.project_id)?).map_err(|e|e.to_string())
+        let value = serde_json::to_value(store.update_group(&group_id,&group.name,members,group.project_id)?).map_err(|e|e.to_string())?;
+        crate::events::emit_groups_sync(Some(&group_id));
+        Ok(value)
     }).await
 }
 
@@ -571,7 +589,9 @@ pub async fn group_task_control(
     codex_call(app, move |_, store| {
         let gate = handle.state::<crate::deepseek::ExecutionGate>();
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
-        crate::collaboration::control(&handle, store, &group_id, &task_id, &action)
+        let value = crate::collaboration::control(&handle, store, &group_id, &task_id, &action)?;
+        crate::events::emit_conversation_sync(&group_id);
+        Ok(value)
     })
     .await
 }

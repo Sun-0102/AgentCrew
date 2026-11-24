@@ -465,6 +465,7 @@ impl Client {
         if !active {
             return Ok(());
         }
+        let logical_cid = logical_conversation(&connection, &self.conversation);
         match update["sessionUpdate"].as_str() {
             Some("agent_thought_chunk") => {
                 let text = update["content"]["text"]
@@ -476,6 +477,7 @@ impl Client {
                     let mut item = self.thought_id.lock().map_err(|e| e.to_string())?;
                     let id = item.get_or_insert_with(|| format!("gemini:thought:{}", uuid::Uuid::new_v4()));
                     connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'thinking',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text||excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+                    crate::events::emit_delta(&logical_cid, id.as_str(), "thinking", Some("gemini"), "append", text);
                 }
             }
             Some("agent_message_chunk") if update["content"]["type"] == "text" => {
@@ -484,6 +486,7 @@ impl Client {
                 let mut item = self.message_id.lock().map_err(|e| e.to_string())?;
                 let id = item.get_or_insert_with(|| format!("gemini:{}", uuid::Uuid::new_v4()));
                 connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'assistant',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text||excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+                crate::events::emit_delta(&logical_cid, id.as_str(), "assistant", Some("gemini"), "append", text);
             }
             Some("tool_call" | "tool_call_update") => {
                 *self.message_id.lock().map_err(|e| e.to_string())? = None;
@@ -495,14 +498,16 @@ impl Client {
                         .ok_or("Gemini 工具事件缺少标识")?
                 );
                 let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),&text]).map_err(|e|e.to_string())?;
+                crate::events::emit_delta(&logical_cid, id, "tool", Some("gemini"), "replace", text);
             }
             Some("plan") => {
                 *self.message_id.lock().map_err(|e| e.to_string())? = None;
                 *self.thought_id.lock().map_err(|e| e.to_string())? = None;
                 let id = format!("gemini:{turn}:plan");
                 let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),text]).map_err(|e|e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),&text]).map_err(|e|e.to_string())?;
+                crate::events::emit_delta(&logical_cid, id, "tool", Some("gemini"), "replace", text);
             }
             _ => {}
         }
@@ -597,6 +602,19 @@ fn models(info: &Value) -> Result<Vec<Value>, String> {
 pub fn session(store: &Store, conversation: &str) -> Reply {
     store.connect()?.query_row("SELECT thread_id,turn_id,model,runtime_version,workspace_path,status,error FROM gemini_sessions WHERE conversation_id=?1",[conversation],|r|Ok(json!({"thread_id":r.get::<_,String>(0)?,"turn_id":r.get::<_,Option<String>>(1)?,"model":r.get::<_,String>(2)?,"runtime_version":r.get::<_,String>(3)?,"workspace_path":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"error":r.get::<_,Option<String>>(6)?}))).optional().map(|s|s.unwrap_or(Value::Null)).map_err(|e|e.to_string())
 }
+fn logical_conversation(connection: &rusqlite::Connection, conversation: &str) -> String {
+    if !conversation.starts_with("runtime:") {
+        return conversation.to_owned();
+    }
+    connection
+        .query_row(
+            "SELECT conversation_id FROM agent_sessions WHERE runtime_conversation_id=?1",
+            [conversation],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| conversation.to_owned())
+}
+
 fn set_status(
     store: &Store,
     conversation: &str,
@@ -605,6 +623,7 @@ fn set_status(
     error: Option<&str>,
 ) -> Result<(), String> {
     let mut connection = store.connect()?;
+    let logical_cid = logical_conversation(&connection, conversation);
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
@@ -612,7 +631,11 @@ fn set_status(
     if changed > 0 && matches!(status, "completed" | "failed" | "interrupted" | "cancelled") {
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'task_end',?3,'gemini')",params![conversation,format!("gemini:end:{turn}"),status]).map_err(|e|e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit().map_err(|e| e.to_string())?;
+    if changed > 0 {
+        crate::events::emit_conversation_sync(&logical_cid);
+    }
+    Ok(())
 }
 pub fn recover(store: &Store) -> Result<(), String> {
     store.connect()?.execute(&format!("UPDATE gemini_sessions SET status='interrupted',error='应用已重启，上次 Gemini 执行结果未知；请核对后处理。' WHERE status IN {ACTIVE}"),[]).map_err(|e|e.to_string())?;
@@ -710,6 +733,7 @@ impl Runtime {
         let turn = uuid::Uuid::new_v4().to_string();
         let placeholder_thread = existing_thread.clone().unwrap_or_default();
         let mut connection = store.connect()?;
+        let logical_cid = logical_conversation(&connection, conversation);
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
@@ -717,6 +741,7 @@ impl Runtime {
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'gemini')",params![conversation,format!("gemini:input:{turn}"),role,text]).map_err(|e|e.to_string())?;
         tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'task_start','running','gemini')",params![conversation,format!("gemini:start:{turn}")]).map_err(|e|e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(&logical_cid);
         drop(_operation);
 
         let client_slot = self.client.clone();

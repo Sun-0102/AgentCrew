@@ -388,6 +388,7 @@ async fn claim_impl(
                 _ => Err("validation_timeout".into()),
             };
             let _ = finish(&app.state::<Store>(), &claim_id, &agent_id, probe);
+            crate::events::emit_agents_sync();
         });
     }
     (StatusCode::ACCEPTED, Json(response)).into_response()

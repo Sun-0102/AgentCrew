@@ -395,17 +395,26 @@ pub fn start_scheduler(app: &tauri::AppHandle) {
             })();
             if let Ok(ids) = ids {
                 for id in ids {
-                    if let Err(error) = tick(&app, &id) {
-                        if let Ok(current) = task(&store, &id) {
-                            let _ = stop_members_with(&store, &id, &|member| {
-                                cancel_member(&app, &store, member)
-                            });
-                            let _ = change(
-                                &store,
-                                &current,
-                                "interrupted",
-                                &format!("自动协作停止：{error}。请核对执行记录后处理。"),
-                            );
+                    match tick(&app, &id) {
+                        Ok(true) => {
+                            if let Ok(current) = task(&store, &id) {
+                                crate::events::emit_conversation_sync(&current.conversation_id);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            if let Ok(current) = task(&store, &id) {
+                                let _ = stop_members_with(&store, &id, &|member| {
+                                    cancel_member(&app, &store, member)
+                                });
+                                let _ = change(
+                                    &store,
+                                    &current,
+                                    "interrupted",
+                                    &format!("自动协作停止：{error}。请核对执行记录后处理。"),
+                                );
+                                crate::events::emit_conversation_sync(&current.conversation_id);
+                            }
                         }
                     }
                 }

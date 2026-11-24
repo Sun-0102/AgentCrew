@@ -445,6 +445,19 @@ impl Client {
     }
 }
 
+fn logical_conversation(connection: &rusqlite::Connection, conversation: &str) -> String {
+    if !conversation.starts_with("runtime:") {
+        return conversation.to_owned();
+    }
+    connection
+        .query_row(
+            "SELECT conversation_id FROM agent_sessions WHERE runtime_conversation_id=?1",
+            [conversation],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| conversation.to_owned())
+}
+
 fn append_message(
     connection: &rusqlite::Connection,
     conversation: &str,
@@ -452,10 +465,17 @@ fn append_message(
     role: &str,
     text: &str,
 ) -> Result<(), String> {
-    if conversation == PERSONAL {
+    let emitted_id = if conversation == PERSONAL {
         connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,?2,?3) ON CONFLICT(item_id) DO NOTHING", params![id,role,text]).map_err(|e|e.to_string())?;
+        id.to_owned()
     } else {
-        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'deepseek') ON CONFLICT(conversation_id,item_id) DO NOTHING", params![conversation,format!("deepseek:{id}"),role,text]).map_err(|e|e.to_string())?;
+        let prefixed = format!("deepseek:{id}");
+        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'deepseek') ON CONFLICT(conversation_id,item_id) DO NOTHING", params![conversation,&prefixed,role,text]).map_err(|e|e.to_string())?;
+        prefixed
+    };
+    if matches!(role, "assistant" | "thinking" | "tool") {
+        let logical_cid = logical_conversation(connection, conversation);
+        crate::events::emit_delta(logical_cid, emitted_id, role, Some("deepseek"), "replace", text);
     }
     Ok(())
 }
@@ -499,11 +519,15 @@ fn set_status(
     let mut connection = store.connect()?;
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     let conversation: Option<String> = tx.query_row("SELECT conversation_id FROM deepseek_sessions WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')", params![thread, status], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
-    if let Some(conversation) = conversation.filter(|_| matches!(status, "completed" | "cancelled" | "failed" | "interrupted")) {
+    if let Some(conversation) = conversation.as_ref().filter(|_| matches!(status, "completed" | "cancelled" | "failed" | "interrupted")) {
         append_message(&tx, &conversation, &uuid::Uuid::new_v4().to_string(), "task_end", status)?;
     }
     tx.execute("UPDATE deepseek_sessions SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')",params![thread,status,error]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    if let Some(cid) = conversation.as_deref() {
+        let logical_cid = logical_conversation(&connection, cid);
+        crate::events::emit_conversation_sync(&logical_cid);
+    }
     Ok(())
 }
 
@@ -555,7 +579,7 @@ impl Runtime {
             .prepare("SELECT item_id,role,text,created_at FROM deepseek_messages ORDER BY sequence")
             .map_err(|e| e.to_string())?;
         let messages=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"role":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,String>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-        Ok(json!({"session":session(store, PERSONAL)?,"messages":messages,"approvals":[]}))
+        Ok(json!({"conversation_id":PERSONAL,"session":session(store, PERSONAL)?,"messages":messages,"approvals":[]}))
     }
     pub fn send(&self, store: &Store, model: &str, text: &str) -> Reply {
         self.send_to(store, PERSONAL, model, text)
@@ -657,6 +681,7 @@ impl Runtime {
         )?;
         append_message(&tx, conversation, &uuid::Uuid::new_v4().to_string(), "task_start", "running")?;
         tx.commit().map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(group_conversation);
         drop(_op);
 
         let client_slot = self.client.clone();

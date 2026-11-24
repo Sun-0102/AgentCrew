@@ -61,6 +61,7 @@ pub async fn agent_probe(app: tauri::AppHandle, agent: String) -> Result<Value, 
         }
         let result = adapter.probe(&app, &store);
         agents::record_probe(&store, &agent, &result)?;
+        crate::events::emit_agents_sync();
         result
     })
     .await
@@ -96,17 +97,29 @@ pub async fn agent_snapshot(
     tauri::async_runtime::spawn_blocking(move || {
         let store=app.state::<Store>();
         let id=conversation(&store,&agent,group_id.as_deref(),project_id.as_deref(),session_id.as_deref())?;
-        if id==crate::deepseek::PERSONAL && group_id.is_none() { return app.state::<crate::deepseek::Runtime>().snapshot(&store); }
+        if id==crate::deepseek::PERSONAL && group_id.is_none() {
+            let mut snapshot = app.state::<crate::deepseek::Runtime>().snapshot(&store)?;
+            let mut sessions = serde_json::Map::new();
+            sessions.insert("deepseek".into(), snapshot["session"].clone());
+            snapshot["context_usage"] = crate::usage::conversation_context(
+                &store,
+                &id,
+                &["deepseek".to_owned()],
+                &sessions,
+                None,
+            )?;
+            return Ok(snapshot);
+        }
         let mut snapshot=app.state::<crate::codex::Runtime>().snapshot(&store,&id)?;
         let members=if group_id.is_some() {store.group(&id)?.members} else {vec![agent.clone()]};
         let mut sessions=serde_json::Map::new();
         let mut approvals=Vec::new();
         let mut selected=agent.clone();
-        for member in members {
-            let session=agents::session(&app,&store,&member,&id)?;
+        for member in &members {
+            let session=agents::session(&app,&store,member,&id)?;
             if session["status"].as_str().is_some_and(crate::codex::active) { selected=member.clone(); }
             sessions.insert(member.clone(),session);
-            let kind=agents::provider(&store,&member)?;
+            let kind=agents::provider(&store,member)?;
             if let Ok(adapter) = providers::resolve(&kind) {
                 if adapter.supports_approval() {
                     let runtime=if member=="codex" {id.clone()} else {
@@ -119,10 +132,19 @@ pub async fn agent_snapshot(
                 }
             }
         }
+        let context_usage = crate::usage::conversation_context(
+            &store,
+            &id,
+            &members,
+            &sessions,
+            Some(&app.state::<crate::codex::Runtime>()),
+        )?;
+        snapshot["conversation_id"]=json!(id);
         snapshot["session"]=sessions.get(&selected).cloned().unwrap_or(Value::Null);
         snapshot["agent"]=json!(selected);
         snapshot["sessions"]=json!(sessions);
         snapshot["approvals"]=json!(approvals);
+        snapshot["context_usage"]=context_usage;
         if snapshot["session"].is_object() {snapshot["session"]["workspace_path"]=json!(store.conversation_root(&id)?);}
         if group_id.is_some() { snapshot["task"]=serde_json::to_value(crate::collaboration::latest(&store,&id)?).map_err(|e|e.to_string())?; }
         Ok(snapshot)
@@ -263,7 +285,7 @@ pub async fn agent_group_send(
                 )?;
             }
         }
-        crate::collaboration::start_instances(
+        let result = crate::collaboration::start_instances(
             &app,
             &store,
             &group_id,
@@ -272,7 +294,9 @@ pub async fn agent_group_send(
             models.get("deepseek").map(String::as_str).unwrap_or(""),
             &text,
             &models,
-        )
+        )?;
+        crate::events::emit_conversation_sync(&group_id);
+        Ok(result)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -292,6 +316,7 @@ pub async fn agent_update(
         let busy: bool=store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM group_task_members m JOIN group_tasks t ON t.id=m.task_id WHERE m.agent=?1 AND t.status IN ('running','paused','cancelling')) OR EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM gemini_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')) OR EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[&agent],|r|r.get(0)).map_err(|e|e.to_string())?;
         if busy {return Err("请先停止相关任务，再停用或移除成员。".into());}
         store.connect()?.execute("UPDATE agents SET enabled=?2,registration_state=CASE WHEN ?3 THEN 'revoked' ELSE registration_state END,availability=CASE WHEN ?2 THEN 'checking' ELSE 'disabled' END WHERE id=?1",params![agent,enabled && !revoke,revoke]).map_err(|e|e.to_string())?;
+        crate::events::emit_agents_sync();
         Ok(())
     }).await.map_err(|e|e.to_string())?
 }

@@ -22,13 +22,22 @@ pub struct Runtime {
     operation: Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct LiveTokenUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
+    pub total_tokens: i64,
+    pub context_window: Option<i64>,
+}
+
 struct Client {
     child: Mutex<Child>,
     input: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
     approvals: Mutex<HashMap<String, Value>>,
     loaded: Mutex<HashSet<String>>,
-    token_usage: Mutex<HashMap<String, (i64, i64, i64)>>,
+    token_usage: Mutex<HashMap<String, LiveTokenUsage>>,
     next_id: AtomicU64,
     healthy: AtomicBool,
     database: PathBuf,
@@ -364,12 +373,19 @@ impl Client {
         .connect()?;
         let current = connection
             .query_row(
-                "SELECT turn_id,status FROM codex_sessions WHERE thread_id=?1",
+                "SELECT conversation_id,turn_id,status FROM codex_sessions WHERE thread_id=?1",
                 [thread],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .ok();
-        if let Some((current_turn, status)) = current {
+        let conversation_id = current.as_ref().map(|(cid, _, _)| cid.clone());
+        if let Some((_, current_turn, status)) = current {
             let incoming = p["turnId"].as_str().or_else(|| p["turn"]["id"].as_str());
             if method == "turn/started" {
                 if status != "starting" {
@@ -382,21 +398,36 @@ impl Client {
         match method {
             "turn/started" => {
                 connection.execute("UPDATE codex_sessions SET status='running', turn_id=?2, error=NULL WHERE thread_id=?1", params![thread, p["turn"]["id"].as_str()]).map_err(|e| e.to_string())?;
+                if let Some(cid) = conversation_id.as_deref() {
+                    crate::events::emit_conversation_sync(cid);
+                }
             }
             "item/agentMessage/delta" => {
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'assistant',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, p["itemId"].as_str().unwrap_or(""), p["delta"].as_str().unwrap_or("")]).map_err(|e| e.to_string())?;
+                let item_id = p["itemId"].as_str().unwrap_or("");
+                let delta = p["delta"].as_str().unwrap_or("");
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'assistant',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, item_id, delta]).map_err(|e| e.to_string())?;
+                if let Some(cid) = conversation_id.as_deref() {
+                    crate::events::emit_delta(cid, item_id, "assistant", Some("codex"), "append", delta);
+                }
             }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 let item_id = p["itemId"].as_str().unwrap_or("");
                 let delta = p["delta"].as_str().unwrap_or("");
                 if !item_id.is_empty() && !delta.is_empty() {
-                    connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'thinking',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, format!("reasoning:{item_id}"), delta]).map_err(|e| e.to_string())?;
+                    let reasoning_id = format!("reasoning:{item_id}");
+                    connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'thinking',?3 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=text || excluded.text", params![thread, &reasoning_id, delta]).map_err(|e| e.to_string())?;
+                    if let Some(cid) = conversation_id.as_deref() {
+                        crate::events::emit_delta(cid, reasoning_id, "thinking", Some("codex"), "append", delta);
+                    }
                 }
             }
             "item/reasoning/summaryPartAdded" => {
                 let item_id = p["itemId"].as_str().unwrap_or("");
                 if !item_id.is_empty() {
                     connection.execute("UPDATE codex_messages SET text=CASE WHEN text='' OR text LIKE '%' || char(10) || char(10) THEN text ELSE text || char(10) || char(10) END WHERE conversation_id=(SELECT conversation_id FROM codex_sessions WHERE thread_id=?1) AND item_id=?2", params![thread, format!("reasoning:{item_id}")]).map_err(|e| e.to_string())?;
+                    if let Some(cid) = conversation_id.as_deref() {
+                        crate::events::emit_sync(&["snapshot"], Some(cid), None, None);
+                    }
                 }
             }
             "item/commandExecution/outputDelta" => {
@@ -404,6 +435,9 @@ impl Client {
                 let delta = p["delta"].as_str().unwrap_or("");
                 if !item_id.is_empty() && !delta.is_empty() {
                     connection.execute("UPDATE codex_messages SET text=text || ?3 WHERE conversation_id=(SELECT conversation_id FROM codex_sessions WHERE thread_id=?1) AND item_id=?2", params![thread, item_id, delta]).map_err(|e| e.to_string())?;
+                    if let Some(cid) = conversation_id.as_deref() {
+                        crate::events::emit_delta(cid, item_id, "tool", Some("codex"), "append", delta);
+                    }
                 }
             }
             "item/started" | "item/completed" => {
@@ -467,18 +501,37 @@ impl Client {
                     }
                     _ => return Ok(()),
                 };
-                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, item_id, role, text]).map_err(|e| e.to_string())?;
+                connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,?3,?4 FROM codex_sessions WHERE thread_id=?1 ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text", params![thread, &item_id, role, &text]).map_err(|e| e.to_string())?;
+                if let Some(cid) = conversation_id.as_deref() {
+                    crate::events::emit_delta(cid, item_id, role, Some("codex"), "replace", text);
+                }
             }
             "thread/tokenUsage/updated" => {
                 let last = &p["tokenUsage"]["last"];
                 let inp = last["inputTokens"].as_i64().unwrap_or(0);
                 let out = last["outputTokens"].as_i64().unwrap_or(0);
                 let cached = last["cachedInputTokens"].as_i64().unwrap_or(0);
-                if inp > 0 || out > 0 {
-                    self.token_usage
-                        .lock()
-                        .unwrap()
-                        .insert(thread.to_owned(), (inp, out, cached));
+                let total = last["totalTokens"].as_i64().unwrap_or(inp + out);
+                let context_window = p["tokenUsage"]["modelContextWindow"]
+                    .as_i64()
+                    .filter(|&w| w > 0);
+                if inp > 0 || out > 0 || total > 0 || context_window.is_some() {
+                    let mut map = self.token_usage.lock().unwrap();
+                    let prev_window = map.get(thread).and_then(|u| u.context_window);
+                    map.insert(
+                        thread.to_owned(),
+                        LiveTokenUsage {
+                            input_tokens: inp,
+                            output_tokens: out,
+                            cached_tokens: cached,
+                            total_tokens: total.max(inp + out),
+                            context_window: context_window.or(prev_window),
+                        },
+                    );
+                    drop(map);
+                    if let Some(cid) = conversation_id.as_deref() {
+                        crate::events::emit_sync(&["snapshot"], Some(cid), None, None);
+                    }
                 }
             }
             "turn/completed" => {
@@ -496,12 +549,13 @@ impl Client {
                     _ => "failed",
                 };
                 self.update_status(thread, status, p["turn"]["error"]["message"].as_str())?;
-                let (inp, out, cached) = self
+                let live = self
                     .token_usage
                     .lock()
                     .unwrap()
-                    .remove(thread)
-                    .unwrap_or((0, 0, 0));
+                    .get(thread)
+                    .copied()
+                    .unwrap_or_default();
                 if let Ok((conv_id, model_name)) = connection.query_row(
                     "SELECT conversation_id, COALESCE(model, '') FROM codex_sessions WHERE thread_id=?1",
                     [thread],
@@ -513,11 +567,12 @@ impl Client {
                         "codex",
                         &model_name,
                         &conv_id,
-                        inp,
-                        out,
-                        cached,
+                        live.input_tokens,
+                        live.output_tokens,
+                        live.cached_tokens,
                         status,
                     );
+                    crate::events::emit_sync(&["snapshot"], Some(&conv_id), None, None);
                 }
                 self.approvals
                     .lock()
@@ -543,6 +598,9 @@ impl Client {
                         ],
                     )
                     .map_err(|e| e.to_string())?;
+                if let Some(cid) = conversation_id.as_deref() {
+                    crate::events::emit_conversation_sync(cid);
+                }
             }
             _ => (),
         }
@@ -554,6 +612,13 @@ impl Client {
             path: self.database.clone(),
         }
         .connect()?;
+        let conversation_id: Option<String> = connection
+            .query_row(
+                "SELECT conversation_id FROM codex_sessions WHERE thread_id=?1",
+                [thread],
+                |row| row.get(0),
+            )
+            .ok();
         let tx = connection.transaction().map_err(|e| e.to_string())?;
         if matches!(status, "completed" | "cancelled" | "failed" | "interrupted") {
             tx.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'task_end',?3 FROM codex_sessions WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')", params![thread, uuid::Uuid::new_v4().to_string(), status]).map_err(|e| e.to_string())?;
@@ -564,6 +629,9 @@ impl Client {
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        if let Some(cid) = conversation_id.as_deref() {
+            crate::events::emit_conversation_sync(cid);
+        }
         Ok(())
     }
 
@@ -580,7 +648,17 @@ impl Client {
             })
             .connect()
             {
+                let cid: Option<String> = connection
+                    .query_row(
+                        "SELECT conversation_id FROM codex_sessions WHERE thread_id=?1",
+                        [thread],
+                        |row| row.get(0),
+                    )
+                    .ok();
                 let _ = connection.execute("UPDATE codex_sessions SET status='interrupted',error=?2 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')", params![thread,error]);
+                if let Some(cid) = cid.as_deref() {
+                    crate::events::emit_conversation_sync(cid);
+                }
             }
         }
         self.approvals.lock().unwrap().clear();
@@ -670,6 +748,9 @@ fn mark_startup_failed(store: &Store, conversation_id: &str, error: &str) {
                 );
             }
             let _ = tx.commit();
+            if changed > 0 {
+                crate::events::emit_conversation_sync(conversation_id);
+            }
         }
     }
 }
@@ -681,6 +762,13 @@ impl Runtime {
 
     pub fn rate_limits(&self, store: &Store) -> Reply {
         self.client(store)?.request("account/rateLimits/read", json!({}))
+    }
+
+    pub fn live_token_usage(&self, thread_id: &str) -> Option<LiveTokenUsage> {
+        let guard = self.client.lock().ok()?;
+        let client = guard.as_ref()?;
+        let usage = client.token_usage.lock().ok()?.get(thread_id).copied();
+        usage
     }
 
     fn client(&self, store: &Store) -> Result<Arc<Client>, String> {
@@ -789,6 +877,7 @@ impl Runtime {
             .map_err(|e| e.to_string())?;
         transaction.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'task_start','running')", params![conversation_id, uuid::Uuid::new_v4().to_string()]).map_err(|e| e.to_string())?;
         transaction.commit().map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(conversation_id);
         drop(_operation);
 
         let client_slot = self.client.clone();
@@ -904,6 +993,7 @@ impl Runtime {
         let client = self.client(store)?;
         // The completion notification, not this request's response, confirms cancellation.
         store.connect()?.execute("UPDATE codex_sessions SET status='cancel_requested' WHERE conversation_id=?1 AND status IN ('running','waiting_approval')", [conversation_id]).map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(conversation_id);
         let result = client.request("turn/interrupt", json!({"threadId":thread,"turnId":turn}));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while result.is_ok() && std::time::Instant::now() < deadline {
@@ -945,6 +1035,7 @@ impl Runtime {
         client.write(json!({"id":request["id"],"result":{"decision":if allow { "accept" } else { "decline" }}}))?;
         approvals.remove(id);
         store.connect()?.execute("UPDATE codex_sessions SET status='running' WHERE conversation_id=?1 AND status='waiting_approval'", [conversation_id]).map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(conversation_id);
         Ok(Value::Null)
     }
 
@@ -964,7 +1055,7 @@ impl Runtime {
                 }
             }
         }
-        Ok(json!({"session":s,"messages":messages,"approvals":approvals}))
+        Ok(json!({"conversation_id":conversation_id,"session":s,"messages":messages,"approvals":approvals}))
     }
 }
 

@@ -434,6 +434,148 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
     }))
 }
 
+pub fn estimate_context_window(provider_kind: &str, model: &str) -> i64 {
+    let lower = model.to_lowercase();
+    match provider_kind {
+        "codex" => {
+            if lower.contains("gpt-4.1") {
+                1_047_576
+            } else if lower.contains("o3") || lower.contains("o4") {
+                200_000
+            } else {
+                272_000
+            }
+        }
+        "gemini" => 1_048_576,
+        "deepseek" => {
+            if lower.contains("64k") {
+                65_536
+            } else {
+                128_000
+            }
+        }
+        _ => 128_000,
+    }
+}
+
+pub fn conversation_context(
+    store: &Store,
+    conversation_id: &str,
+    members: &[String],
+    sessions: &serde_json::Map<String, Value>,
+    codex_runtime: Option<&codex::Runtime>,
+) -> Result<Value, String> {
+    let conn = store.connect()?;
+    let mut result = serde_json::Map::new();
+    for member in members {
+        let provider_kind = agents::provider(store, member).unwrap_or_else(|_| member.clone());
+        let session_obj = sessions.get(member);
+        let session_model = session_obj
+            .and_then(|s| s.get("model"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let thread_id = session_obj
+            .and_then(|s| s.get("thread_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let runtime_conv_id: Option<String> = conn
+            .query_row(
+                "SELECT runtime_conversation_id FROM agent_sessions WHERE agent_id=?1 AND conversation_id=?2",
+                params![member, conversation_id],
+                |r| r.get(0),
+            )
+            .ok();
+        let alt_conv_id = runtime_conv_id.as_deref().unwrap_or(conversation_id);
+
+        // Query latest non-zero usage record for this conversation (logical or runtime id) and agent.
+        let latest_recorded: Option<(String, i64, i64, i64)> = conn
+            .query_row(
+                "SELECT model, input_tokens, output_tokens, cached_tokens
+                 FROM usage_records
+                 WHERE (conversation_id=?1 OR conversation_id=?2) AND (agent_id=?3 OR provider_kind=?4)
+                   AND (input_tokens > 0 OR output_tokens > 0 OR cached_tokens > 0)
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT 1",
+                params![conversation_id, alt_conv_id, member, provider_kind],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+
+        let live = if provider_kind == "codex" && !thread_id.is_empty() {
+            codex_runtime.and_then(|rt| rt.live_token_usage(thread_id))
+        } else {
+            None
+        };
+
+        let (model, input_tokens, output_tokens, cached_tokens, used_tokens, context_window, source) =
+            if let Some(live) = live {
+                let model = if !session_model.is_empty() {
+                    session_model
+                } else {
+                    latest_recorded
+                        .as_ref()
+                        .map(|r| r.0.clone())
+                        .unwrap_or_default()
+                };
+                let window = live
+                    .context_window
+                    .unwrap_or_else(|| estimate_context_window(&provider_kind, &model));
+                let used = live.total_tokens.max(live.input_tokens + live.output_tokens);
+                (
+                    model,
+                    live.input_tokens,
+                    live.output_tokens,
+                    live.cached_tokens,
+                    used,
+                    window,
+                    "live",
+                )
+            } else if let Some((rec_model, inp, out, cached)) = latest_recorded {
+                let model = if !session_model.is_empty() {
+                    session_model
+                } else {
+                    rec_model
+                };
+                let window = estimate_context_window(&provider_kind, &model);
+                // Gemini ACP reports cachedReadTokens separately from non-cached inputTokens.
+                let used = if provider_kind == "gemini" {
+                    (inp + cached + out).max(0)
+                } else {
+                    (inp + out).max(0)
+                };
+                (model, inp, out, cached, used, window, "recorded")
+            } else {
+                let window = estimate_context_window(&provider_kind, &session_model);
+                (session_model, 0, 0, 0, 0, window, "none")
+            };
+
+        let percent = if context_window > 0 && used_tokens > 0 {
+            (((used_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0).min(100.0)
+        } else {
+            0.0
+        };
+
+        result.insert(
+            member.clone(),
+            json!({
+                "agentId": member,
+                "providerKind": provider_kind,
+                "model": model,
+                "usedTokens": used_tokens,
+                "contextWindow": context_window,
+                "percent": percent,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cachedTokens": cached_tokens,
+                "source": source,
+            }),
+        );
+    }
+    Ok(Value::Object(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

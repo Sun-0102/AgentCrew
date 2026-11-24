@@ -32,6 +32,8 @@ const paths = {
   sidebarOpen: "M3 4h18v16H3V4ZM9 4v16M12.5 9l3 3-3 3",
   chevronsLeft: "m11 17-5-5 5-5M18 17l-5-5 5-5",
   chevronsRight: "m13 17 5-5-5-5M6 17l5-5-5-5",
+  gitBranch: "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM18 9a9 9 0 0 1-9 9",
+  external: "M14 4h6v6M10 14 20 4M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
 };
 export type IconName = keyof typeof paths;
 export default function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

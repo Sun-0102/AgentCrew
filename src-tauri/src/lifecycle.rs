@@ -41,6 +41,7 @@ pub fn pause(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
         .connect()?
         .execute("UPDATE app_controls SET paused=?1 WHERE id=1", [paused])
         .map_err(|e| e.to_string())?;
+    crate::events::emit_agents_sync();
     Ok(())
 }
 
