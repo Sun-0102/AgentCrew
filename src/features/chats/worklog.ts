@@ -30,6 +30,7 @@ export interface WorkLogItem {
   duration?: string;
   exitCode?: number;
   body?: string;
+  rawBody?: string;
   diffs?: FileDiffEntry[];
   plan?: PlanEntry[];
   createdAt: string | null;
@@ -345,14 +346,46 @@ export function parseWorkLogItem(message: Message, turnActive: boolean, isLast: 
     };
   }
 
+function extractAssignmentDisplay(text: string): { summary: string; rawBody?: string } {
+  const marker = "本轮投递内容：\n";
+  const start = text.indexOf(marker);
+  if (start === -1) {
+    return { summary: text };
+  }
+  let content = text.slice(start + marker.length);
+  const stopMarkers = [
+    "\n\n本群最近聊天",
+    "\n\n上一轮归档记录",
+    "\n\n程序采集的当前工作区依据",
+    "\n\n当前工作区依据",
+    "\n\n截断、非 Git",
+  ];
+  let end = content.length;
+  for (const stop of stopMarkers) {
+    const idx = content.indexOf(stop);
+    if (idx !== -1 && idx < end) end = idx;
+  }
+  content = content.slice(0, end).trim();
+  const userHeader = /^本轮处理用户消息 [^\n]*?以用户的新消息为准。\n\n/;
+  if (userHeader.test(content)) {
+    content = content.replace(userHeader, "").trim();
+  }
+  if (!content || content === text.trim()) {
+    return { summary: text };
+  }
+  return { summary: content, rawBody: text };
+}
+
   if (message.role === "assignment") {
+    const { summary, rawBody } = extractAssignmentDisplay(message.text);
     return {
       id: message.id,
       kind: "handoff",
       title: "交接要求",
-      subtitle: firstLinePreview(message.text, 88),
+      subtitle: firstLinePreview(summary, 88),
       status: "neutral",
-      body: message.text,
+      body: summary,
+      rawBody,
       createdAt: message.created_at,
     };
   }

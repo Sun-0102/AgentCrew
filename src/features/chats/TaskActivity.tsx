@@ -80,32 +80,6 @@ function DiffBlock({ entry }: { entry: FileDiffEntry }) {
   );
 }
 
-function HandoffContext({ item }: { item: WorkLogItem }) {
-  const [open, setOpen] = useState(false);
-  const hasBody = Boolean(item.body);
-  return (
-    <div className={`worklog-context ${open ? "is-open" : ""}`}>
-      <button
-        type="button"
-        className="worklog-context-trigger"
-        disabled={!hasBody}
-        aria-expanded={hasBody ? open : undefined}
-        onClick={() => hasBody && setOpen(v => !v)}
-      >
-        <Icon name="at" size={13} />
-        <span className="worklog-context-label">{item.title}</span>
-        {item.subtitle && !open && <span className="worklog-context-preview">{item.subtitle}</span>}
-        {hasBody && (
-          <span className="worklog-chevron">
-            <Icon name={open ? "down" : "right"} size={12} />
-          </span>
-        )}
-      </button>
-      {open && item.body && <pre className="worklog-context-body">{item.body}</pre>}
-    </div>
-  );
-}
-
 function WorkLogRow({ item, defaultOpen }: { item: WorkLogItem; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
@@ -258,13 +232,14 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
     return () => window.clearInterval(timer);
   }, [block.active]);
 
-  const rawItems = block.activity.filter(message => message.text.trim());
+  const rawItems = block.activity.filter(
+    message => message.role !== "assignment" && message.text.trim(),
+  );
   if (!block.active && rawItems.length === 0) return null;
 
   const parsedItems = rawItems.map((message, index) =>
     parseWorkLogItem(message, block.active, index === rawItems.length - 1),
   );
-  const handoffs = parsedItems.filter(item => item.kind === "handoff");
   const timelineItems = collapseWorkLogItems(parsedItems.filter(item => item.kind !== "handoff"));
 
   const thoughts = timelineItems.filter(i => i.kind === "thinking").length;
@@ -351,10 +326,6 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
 
       {open && (
         <div className="task-activity-items worklog-timeline" id={`activity-${block.id}`}>
-          {handoffs.map(item => (
-            <HandoffContext key={item.id} item={item} />
-          ))}
-
           {visibleItems.length > 0 ? (
             <div className="worklog-list">
               {visibleItems.map((item, index) => {
@@ -386,7 +357,7 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
                 </button>
               )}
             </div>
-          ) : handoffs.length === 0 ? (
+          ) : block.active ? (
             <div className="worklog-waiting">
               <span className="worklog-spinner" aria-hidden="true" />
               <span>等待模型返回思考与执行步骤…</span>
