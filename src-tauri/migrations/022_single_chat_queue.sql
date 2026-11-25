@@ -9,5 +9,5 @@ CREATE TABLE single_chat_queue (
     status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','paused')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
-CREATE INDEX single_chat_queue_conv ON single_chat_queue(conversation_id, rowid);
+CREATE INDEX single_chat_queue_conv ON single_chat_queue(conversation_id);
 PRAGMA user_version = 22;
