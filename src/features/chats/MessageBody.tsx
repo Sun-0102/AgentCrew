@@ -3,6 +3,7 @@ import remarkGfm from "remark-gfm";
 import { Children, isValidElement, memo, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
+import LocalFileLink from "./LocalFileLink";
 import Dialog from "../../components/Dialog";
 import { useAgents } from "./api";
 import { remarkMentions } from "./mention-markdown";
@@ -13,7 +14,7 @@ const localAttachment = /^ai-gent-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4
 function parseLocalFileLink(href: string, labelText?: string): { path: string; line?: number } | null {
   const raw = href.trim();
   if (!raw || raw.startsWith("#")) return null;
-  if (/^(https?:|mailto:|tel:|javascript:|data:)/i.test(raw)) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:\/\//i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) return null;
 
   let path = raw;
   if (path.startsWith("file://")) {
@@ -121,10 +122,14 @@ export default memo(function MessageBody({
   text,
   members,
   onOpenFile,
+  workspacePath,
+  onNotify,
 }: {
   text: string;
   members?: string[];
   onOpenFile?: (path: string, line?: number) => void;
+  workspacePath?: string;
+  onNotify?: (message: string) => void;
 }) {
   const registry = useAgents();
   const mentionAgents = members ? registry.filter(agent => members.includes(agent.id)) : registry;
@@ -141,22 +146,8 @@ export default memo(function MessageBody({
       },
       a: ({ node: _node, href, children, onClick, ...props }) => {
         const parsed = href ? parseLocalFileLink(href, extractPlainText(children)) : null;
-        if (parsed && onOpenFile) {
-          return (
-            <a
-              {...props}
-              href={href}
-              className="message-file-link"
-              title={`查看文件：${parsed.path}${parsed.line ? `:${parsed.line}` : ""}`}
-              onClick={event => {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenFile(parsed.path, parsed.line);
-              }}
-            >
-              {children}
-            </a>
-          );
+        if (parsed) {
+          return <LocalFileLink {...props} href={href} filePath={parsed.path} line={parsed.line} workspacePath={workspacePath} onOpenFile={onOpenFile} onNotify={onNotify}>{children}</LocalFileLink>;
         }
         return <a {...props} href={href} onClick={onClick} target="_blank" rel="noopener noreferrer">{children}</a>;
       },
@@ -168,7 +159,7 @@ export default memo(function MessageBody({
         return src ? <PreviewImage {...props} src={src} alt={alt} /> : <span>{alt ?? "图片不可用"}</span>;
       },
     }),
-    [onOpenFile],
+    [onOpenFile, workspacePath, onNotify],
   );
   return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
     if (key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url))) {

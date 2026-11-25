@@ -42,6 +42,9 @@ interface Preferences {
 export default function ConnectedChat(p: Props) {
   const registry = useAgents();
   const [error, setError] = useState("");
+  const preferencesKey = p.scope.projectId && !p.group
+    ? `ai-gent.instance-models.v1.${p.scopeKey}`
+    : "ai-gent.instance-models.v1";
   const [preferences, setPreferences] = useState<Preferences>(() => {
     try {
       const oldEfforts = JSON.parse(localStorage.getItem("ai-gent.reasoning.v1") ?? "{}");
@@ -55,6 +58,9 @@ export default function ConnectedChat(p: Props) {
         efforts: oldEfforts,
         tiers: oldTiers,
         ...JSON.parse(localStorage.getItem("ai-gent.instance-models.v1") ?? "{}"),
+        ...(preferencesKey !== "ai-gent.instance-models.v1"
+          ? JSON.parse(localStorage.getItem(preferencesKey) ?? "{}")
+          : {}),
       };
     } catch {
       return { models: {}, efforts: {}, tiers: {} };
@@ -67,7 +73,7 @@ export default function ConnectedChat(p: Props) {
   function save(next: Preferences) {
     setPreferences(next);
     try {
-      localStorage.setItem("ai-gent.instance-models.v1", JSON.stringify(next));
+      localStorage.setItem(preferencesKey, JSON.stringify(next));
     } catch {
       setError("模型设置未能保存，重启后需要重新选择。");
     }

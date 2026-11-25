@@ -15,6 +15,7 @@ mod group_sessions;
 mod groups;
 mod images;
 mod lifecycle;
+mod local_files;
 mod pairing;
 mod private_sessions;
 mod process;
@@ -169,6 +170,7 @@ pub fn run() {
             git::git_open_url,
             git::git_turn_file_diff,
             git::git_turn_revert,
+            local_files::local_file_action,
             git::workspace_read_file
         ])
         .build(tauri::generate_context!())

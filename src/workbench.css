@@ -1531,3 +1531,44 @@ button { -webkit-tap-highlight-color: transparent; }
     display: none;
   }
 }
+
+/* Keep the project executor beside its model, using the existing composer pills. */
+.composer-execution-controls { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.project-agent-trigger { padding-left: 5px; flex-shrink: 0; }
+.project-agent-trigger:disabled { opacity: .55; cursor: not-allowed; }
+.project-agent-trigger .avatar { width: 22px; height: 22px; border-radius: 7px; }
+.project-agent-trigger .model-config-name { max-width: 112px; }
+.project-agent-heading { padding: 18px 18px 12px; }
+.project-agent-eyebrow { display: block; margin-bottom: 6px; font-size: 10px; color: #6366f1; font-weight: 600; letter-spacing: .08em; }
+.project-agent-heading > strong { font-size: 15px; letter-spacing: -.02em; }
+.project-agent-heading p { margin: 6px 0 0; font-size: 12px; color: #64748b; line-height: 1.6; }
+.project-agent-list { overflow-y: auto; min-height: 0; padding: 0 8px 8px; }
+.project-agent-option { display: flex; align-items: center; gap: 11px; width: 100%; padding: 10px; border: 1px solid transparent; border-radius: 10px; text-align: left; background: transparent; color: inherit; }
+.project-agent-option:hover:not(:disabled) { background: #f8fafc; }
+.project-agent-option.selected { border-color: #e0e7ff; background: #eef2ff; }
+.project-agent-option.selected:hover:not(:disabled) { background: #e8edff; }
+.project-agent-option:disabled { opacity: .5; cursor: not-allowed; }
+.project-agent-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
+.project-agent-info strong { font-size: 13px; font-weight: 550; }
+.project-agent-info small { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #64748b; }
+.project-agent-check { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #4f46e5; color: white; }
+.project-agent-footer { padding: 11px 18px 13px; border-top: 1px solid #eef2f6; background: #f8fafc; }
+.project-agent-footer p { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px; color: #64748b; font-size: 11px; line-height: 1.7; }
+.project-agent-footer p svg { margin-top: 3px; flex-shrink: 0; }
+.project-agent-footer button { display: inline-flex; align-items: center; gap: 4px; padding: 0; background: transparent; border: 0; color: #4f46e5; font-size: 12px; }
+.project-agent-empty { padding: 12px; color: #64748b; font-size: 12px; }
+.project-agent-trigger:focus-visible, .project-agent-option:focus-visible, .project-agent-footer button:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+@media (max-width: 720px) {
+  .composer-execution-controls { flex-wrap: wrap; }
+  .composer-tools { flex-wrap: wrap; }
+}
+
+.file-link-menu { position: fixed; inset: auto; margin: 0; padding: 5px; width: 232px; max-width: calc(100vw - 16px); border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; color: #334155; box-shadow: 0 12px 36px rgba(15,23,42,.16), 0 2px 8px rgba(15,23,42,.06); }
+.file-link-menu-heading { display: flex; align-items: center; gap: 7px; padding: 8px 9px 10px; color: #94a3b8; font-size: 11px; }
+.file-link-menu-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-link-menu-heading svg { flex-shrink: 0; }
+.file-link-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px; border: 0; border-radius: 7px; background: transparent; color: inherit; text-align: left; font-size: 13px; cursor: pointer; }
+.file-link-menu button:hover, .file-link-menu button:focus-visible { outline: none; background: #eef2ff; color: #4f46e5; }
+.file-link-menu-divider { height: 1px; margin: 4px 5px; background: #eef2f6; }
+.file-link-feedback { margin-left: 8px; font-size: 12px; color: #64748b; }
+.file-link-feedback[role="alert"] { color: #dc2626; }
