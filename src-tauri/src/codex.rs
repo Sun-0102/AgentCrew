@@ -630,6 +630,15 @@ impl Client {
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         if let Some(cid) = conversation_id.as_deref() {
+            if matches!(status, "completed" | "cancelled" | "failed" | "interrupted") {
+                crate::git::finish_turn_snapshot(
+                    &Store {
+                        path: self.database.clone(),
+                    },
+                    cid,
+                    "codex",
+                );
+            }
             crate::events::emit_conversation_sync(cid);
         }
         Ok(())
@@ -900,6 +909,7 @@ impl Runtime {
             if !still_starting {
                 return;
             }
+            crate::git::begin_turn_snapshot(&conversation_owned, "codex", &root_owned);
             let launch = (|| -> Result<(), String> {
                 let client = ensure_client(&client_slot, &store)?;
                 if effort.is_some() || tier.is_some() {

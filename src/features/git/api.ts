@@ -124,5 +124,52 @@ export const gitCommitFiles = (path: string, hash: string) =>
 export const gitCommitFileDiff = (path: string, hash: string, filePath: string) =>
   invoke<GitFileDiff>("git_commit_file_diff", { path, hash, filePath });
 
+export const gitGenerateCommitMessage = (path: string) =>
+  invoke<GitActionResult>("git_generate_commit_message", { path });
+
+export interface TurnDiffFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  /** Optional inline diff fallback when captured from tool logs rather than Git snapshots. */
+  inline_diff?: string;
+}
+
+export interface TurnDiffSummary {
+  repo_root: string;
+  before_tree: string;
+  after_tree: string;
+  files: TurnDiffFile[];
+  total_additions: number;
+  total_deletions: number;
+  /** True when derived from Git tree snapshots (supports exact turn diff & revert). */
+  from_git?: boolean;
+}
+
 export const gitOpenUrl = (url: string) =>
   invoke<void>("git_open_url", { url });
+
+export const gitTurnFileDiff = (
+  path: string,
+  beforeTree: string,
+  afterTree: string,
+  filePath: string,
+) =>
+  invoke<GitFileDiff>("git_turn_file_diff", {
+    path,
+    beforeTree,
+    afterTree,
+    filePath,
+  });
+
+export const gitTurnRevert = (
+  path: string,
+  beforeTree: string,
+  files: string[],
+) =>
+  invoke<GitActionResult>("git_turn_revert", {
+    path,
+    beforeTree,
+    files,
+  });

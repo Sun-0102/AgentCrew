@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { GitFileDiff } from "./api";
 
@@ -9,16 +9,31 @@ interface Props {
   wrap: boolean;
 }
 
+function readTheme(): "light" | "dark" {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
 export default function DiffViewer({ diff, loading, diffStyle, wrap }: Props) {
+  const [theme, setTheme] = useState<"light" | "dark">(readTheme);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(readTheme()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+
   const options = useMemo(
     () => ({
       diffStyle,
       overflow: wrap ? ("wrap" as const) : ("scroll" as const),
-      themeType: "light" as const,
+      themeType: theme,
       disableFileHeader: false,
       diffIndicators: "bars" as const,
     }),
-    [diffStyle, wrap],
+    [diffStyle, wrap, theme],
   );
 
   if (loading) {
@@ -65,7 +80,7 @@ export default function DiffViewer({ diff, loading, diffStyle, wrap }: Props) {
         </div>
       )}
       <MultiFileDiff
-        key={`${diff.file_path}:${diffStyle}:${wrap ? "wrap" : "scroll"}:${diff.old_contents.length}:${diff.new_contents.length}`}
+        key={`${diff.file_path}:${theme}:${diffStyle}:${wrap ? "wrap" : "scroll"}:${diff.old_contents.length}:${diff.new_contents.length}`}
         oldFile={{
           name: diff.file_path,
           contents: diff.old_contents,

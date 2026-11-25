@@ -1,4 +1,4 @@
-use crate::{codex, deepseek, gemini, storage::Store};
+use crate::{claude, codex, deepseek, gemini, storage::Store};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::Manager;
@@ -345,12 +345,64 @@ impl ProviderAdapter for GeminiAdapter {
     }
 }
 
+struct ClaudeAdapter;
+
+impl ProviderAdapter for ClaudeAdapter {
+    fn driver(&self) -> ProviderDriver {
+        ProviderDriver {
+            provider_kind: "claude",
+            display_name: "Claude Code",
+            runtime_kind: "claude-code-cli",
+            runtime_label: "Claude CLI",
+            session_table: "claude_sessions",
+            auth_hint: "请先在本机安装 Claude Code CLI 并执行 claude login 完成登录。",
+        }
+    }
+
+    fn probe(&self, app: &tauri::AppHandle, store: &Store) -> Result<Value, String> {
+        app.state::<claude::Runtime>().probe(store)
+    }
+
+    fn session(
+        &self,
+        _app: &tauri::AppHandle,
+        store: &Store,
+        runtime_conversation: &str,
+    ) -> Result<Value, String> {
+        claude::session(store, runtime_conversation)
+    }
+
+    fn send(
+        &self,
+        app: &tauri::AppHandle,
+        store: &Store,
+        runtime_conversation: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+    ) -> Result<Value, String> {
+        app.state::<claude::Runtime>()
+            .send_recorded(store, runtime_conversation, model, text, role)
+    }
+
+    fn cancel(
+        &self,
+        app: &tauri::AppHandle,
+        store: &Store,
+        runtime_conversation: &str,
+    ) -> Result<Value, String> {
+        app.state::<claude::Runtime>()
+            .cancel(store, runtime_conversation)
+    }
+}
+
 static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
 static DEEPSEEK_ADAPTER: DeepSeekAdapter = DeepSeekAdapter;
 static GEMINI_ADAPTER: GeminiAdapter = GeminiAdapter;
+static CLAUDE_ADAPTER: ClaudeAdapter = ClaudeAdapter;
 
 pub static BUILT_IN_DRIVERS: &[&'static dyn ProviderAdapter] =
-    &[&CODEX_ADAPTER, &DEEPSEEK_ADAPTER, &GEMINI_ADAPTER];
+    &[&CODEX_ADAPTER, &DEEPSEEK_ADAPTER, &GEMINI_ADAPTER, &CLAUDE_ADAPTER];
 
 pub fn all() -> &'static [&'static dyn ProviderAdapter] {
     BUILT_IN_DRIVERS

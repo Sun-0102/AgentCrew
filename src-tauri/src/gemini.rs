@@ -633,6 +633,9 @@ fn set_status(
     }
     tx.commit().map_err(|e| e.to_string())?;
     if changed > 0 {
+        if matches!(status, "completed" | "failed" | "interrupted" | "cancelled") {
+            crate::git::finish_turn_snapshot(store, conversation, "gemini");
+        }
         crate::events::emit_conversation_sync(&logical_cid);
     }
     Ok(())
@@ -765,6 +768,7 @@ impl Runtime {
             if !still_starting {
                 return;
             }
+            crate::git::begin_turn_snapshot(&conversation_owned, "gemini", &root_owned);
 
             let launch = (|| -> Result<(Arc<Client>, String, mpsc::Receiver<Reply>), String> {
                 // Reuse the live ACP process when workspace and conversation match.

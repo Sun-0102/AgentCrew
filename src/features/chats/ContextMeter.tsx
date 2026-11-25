@@ -23,6 +23,7 @@ export function formatPercent(percent: number): string {
 function defaultWindowForAgent(agentId: string): number {
   const lower = agentId.toLowerCase();
   if (lower.includes("gemini")) return 1_048_576;
+  if (lower.includes("claude") || lower.includes("sonnet") || lower.includes("opus") || lower.includes("haiku")) return 200_000;
   if (lower.includes("deepseek")) return 128_000;
   return 272_000;
 }

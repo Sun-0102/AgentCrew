@@ -52,6 +52,7 @@ impl Store {
             include_str!("../../migrations/016_generic_pairing_gemini.sql"),
             include_str!("../../migrations/017_private_sessions.sql"),
             include_str!("../../migrations/018_usage_records.sql"),
+            include_str!("../../migrations/019_claude_code.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(

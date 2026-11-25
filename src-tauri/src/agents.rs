@@ -7,6 +7,7 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     ("codex", "codex-app-server"),
     ("deepseek", "deepseek-harness-sdk"),
     ("gemini", "gemini-cli-acp"),
+    ("claude", "claude-code-cli"),
 ];
 
 #[derive(Serialize)]

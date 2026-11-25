@@ -367,6 +367,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .composer.has-mention-codex:focus-within { border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14); }
 .composer.has-mention-gemini { border-color: #38bdf8; }
 .composer.has-mention-gemini:focus-within { border-color: #0284c7; box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.14); }
+.composer.has-mention-claude { border-color: #fb923c; }
+.composer.has-mention-claude:focus-within { border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.14); }
 .composer.has-mention-deepseek { border-color: #2dd4bf; }
 .composer.has-mention-deepseek:focus-within { border-color: #0d9488; box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14); }
 .composer.has-mention-multi { border-color: #a78bfa; }
@@ -385,6 +387,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .composer-mention { background: #eef2ff; color: #4338ca; border-radius: 4px; box-shadow: 0 0 0 2px #eef2ff; font: inherit; padding: 0; margin: 0; border: 0; }
 .composer-mention.is-codex { background: #e0e7ff; color: #4338ca; box-shadow: 0 0 0 2px #e0e7ff; }
 .composer-mention.is-gemini { background: #e0f2fe; color: #0369a1; box-shadow: 0 0 0 2px #e0f2fe; }
+.composer-mention.is-claude { background: #ffedd5; color: #c2410c; box-shadow: 0 0 0 2px #ffedd5; }
 .composer-mention.is-deepseek { background: #ccfbf1; color: #0f766e; box-shadow: 0 0 0 2px #ccfbf1; }
 .composer textarea { position: relative; z-index: 1; display: block; width: 100%; resize: none; min-height: 65px; max-height: 160px; margin: 0; border: 0; outline: none; background: transparent; color: transparent; caret-color: #0f172a; padding: 2px 2px; font: inherit; text-rendering: inherit; font-kerning: inherit; font-variant-ligatures: inherit; letter-spacing: inherit; word-spacing: inherit; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word; }
 .composer textarea::selection { background: rgba(99, 102, 241, 0.22); color: transparent; }

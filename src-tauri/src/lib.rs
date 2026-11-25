@@ -1,6 +1,7 @@
 mod agent_commands;
 mod agents;
 mod attachments;
+mod claude;
 mod codex;
 mod codex_sidebar;
 mod collaboration;
@@ -40,12 +41,14 @@ pub fn run() {
             codex::recover(&store)?;
             deepseek::recover(&store)?;
             gemini::recover(&store)?;
+            claude::recover(&store)?;
             collaboration::recover(&store)?;
             pairing::recover(&store)?;
             app.manage(store);
             app.manage(codex::Runtime::default());
             app.manage(deepseek::Runtime::default());
             app.manage(gemini::Runtime::default());
+            app.manage(claude::Runtime::default());
             app.manage(deepseek::ExecutionGate::default());
             app.manage(std::sync::Arc::new(pairing::Service::default()));
             {
@@ -155,7 +158,10 @@ pub fn run() {
             git::git_commits,
             git::git_commit_files,
             git::git_commit_file_diff,
-            git::git_open_url
+            git::git_generate_commit_message,
+            git::git_open_url,
+            git::git_turn_file_diff,
+            git::git_turn_revert
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")

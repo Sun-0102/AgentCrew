@@ -525,6 +525,9 @@ fn set_status(
     tx.execute("UPDATE deepseek_sessions SET status=?2,error=?3 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping') AND (?2!='completed' OR status='running')",params![thread,status,error]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     if let Some(cid) = conversation.as_deref() {
+        if matches!(status, "completed" | "cancelled" | "failed" | "interrupted") {
+            crate::git::finish_turn_snapshot(store, cid, "deepseek");
+        }
         let logical_cid = logical_conversation(&connection, cid);
         crate::events::emit_conversation_sync(&logical_cid);
     }
@@ -704,6 +707,7 @@ impl Runtime {
             if !still_starting {
                 return;
             }
+            crate::git::begin_turn_snapshot(&conversation_owned, "deepseek", &workspace_owned);
             let launch = (|| -> Result<Arc<Client>, String> {
                 if let Some(old) = client_slot.lock().unwrap().take() {
                     let _ = old.request("shutdown", json!({}), Duration::from_secs(5));

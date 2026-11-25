@@ -12,6 +12,7 @@ import {
   gitCreatePr,
   gitDiscard,
   gitFileDiff,
+  gitGenerateCommitMessage,
   gitOpenUrl,
   gitOverview,
   gitPush,
@@ -79,6 +80,7 @@ export default function GitPanel({
   const [diffLoading, setDiffLoading] = useState(false);
 
   const [commitMessage, setCommitMessage] = useState("");
+  const [generatingCommit, setGeneratingCommit] = useState(false);
   const [acting, setActing] = useState(false);
   const [discardTarget, setDiscardTarget] = useState<GitFileChange | null>(null);
 
@@ -316,6 +318,21 @@ export default function GitPanel({
       setError(String(cause));
     } finally {
       setActing(false);
+    }
+  }
+
+  async function handleGenerateCommit() {
+    if (!overview?.repo_root || generatingCommit) return;
+    setGeneratingCommit(true);
+    setError(null);
+    try {
+      const res = await gitGenerateCommitMessage(overview.repo_root);
+      setCommitMessage(res.message);
+      onNotify(res.url ? `已由 ${res.url} 生成提交说明` : "已生成提交说明");
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setGeneratingCommit(false);
     }
   }
 
@@ -775,6 +792,19 @@ export default function GitPanel({
             </div>
 
             <div className="git-commit-box">
+              <div className="git-commit-label-row">
+                <span>提交说明</span>
+                <button
+                  type="button"
+                  className="git-mini-btn"
+                  disabled={generatingCommit || acting || totalChanged === 0}
+                  onClick={() => void handleGenerateCommit()}
+                  title="根据当前变更自动生成 Commit Message"
+                >
+                  <Icon name="spark" size={12} />
+                  {generatingCommit ? "生成中…" : "AI 生成"}
+                </button>
+              </div>
               <textarea
                 rows={3}
                 placeholder="输入提交说明（Commit Message）…"

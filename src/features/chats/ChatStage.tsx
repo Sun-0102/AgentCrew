@@ -5,6 +5,8 @@ import Avatar from "../../components/Avatar";
 import MessageBody from "./MessageBody";
 import TaskResults from "./TaskResults";
 import TaskActivity from "./TaskActivity";
+import TurnDiffCard from "./TurnDiffCard";
+import TurnDiffDrawer, { type TurnDiffOption } from "./TurnDiffDrawer";
 import { replyBlocks } from "./activity";
 import ModelConfigPopover from "./ModelConfigPopover";
 import ContextMeter from "./ContextMeter";
@@ -53,7 +55,10 @@ export default function ChatStage(p: Props) {
   const [optimistic, setOptimistic] = useState<(Message & { scopeKey: string; baselineCount: number })[]>([]);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"members" | "evidence" | null>(null);
+  const [panel, setPanel] = useState<"members" | "evidence" | "diff" | null>(null);
+  const [diffTurnId, setDiffTurnId] = useState<string>("");
+  const [diffFile, setDiffFile] = useState<string | null>(null);
+  const [diffRefresh, setDiffRefresh] = useState(0);
   const [resultsOpen, setResultsOpen] = useState(false);
   const [sessionMenu, setSessionMenu] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement>(null);
@@ -131,7 +136,25 @@ export default function ChatStage(p: Props) {
   const userMessageCount = snapshot.messages.filter(m => m.role === "user").length;
   const pendingMessages = optimistic.filter(item => item.scopeKey === scopeKey && userMessageCount <= item.baselineCount);
   const visibleMessages = replyBlocks({ ...snapshot, messages: [...snapshot.messages, ...pendingMessages] }, agent);
-  const records = snapshot.messages.filter(m => m.role !== "user" && m.role !== "assistant");
+  const turnDiffOptions: TurnDiffOption[] = (() => {
+    const withDiff = visibleMessages.filter(m => m.role === "assistant" && m.turnDiff);
+    return withDiff.map((m, idx) => ({
+      id: m.id,
+      label:
+        idx === withDiff.length - 1
+          ? `最新一轮 (${m.turnDiff!.files.length} 个文件)`
+          : `第 ${idx + 1} 轮 (${m.turnDiff!.files.length} 个文件)`,
+      summary: m.turnDiff!,
+    }));
+  })();
+  const records = snapshot.messages.filter(
+    m => !["user", "assistant", "turn_diff", "task_start", "task_end"].includes(m.role),
+  );
+  function openTurnDiff(turnId: string, filePath?: string) {
+    setDiffTurnId(turnId);
+    setDiffFile(filePath ?? null);
+    setPanel("diff");
+  }
   const hasMessages = visibleMessages.length > 0;
   const providerWorking = running(snapshot.session?.status);
   const attention = !!task?.members?.some(member => member.error) || !!error || !!snapshot.session?.error || !!probe?.sidebar_warning || !!task && ["blocked", "interrupted"].includes(task.status);
@@ -325,10 +348,10 @@ export default function ChatStage(p: Props) {
   return <section className={`chat-stage ${p.session ? "session-chat" : ""}`} aria-label={title}>
     {resultsOpen && group && scope.groupId && <TaskResults groupId={scope.groupId} latestTask={task} acting={acting} members={members} onClose={() => setResultsOpen(false)} notify={notify} onAction={async value => { if (!task) throw new Error("任务不存在，请刷新后重试。"); await action("group_task_control", { taskId: task.id, action: value }, true); }} />}
     {p.session && group ? <header className="chat-header session-chat-header"><div className="session-chat-lead">{p.sidebarControls}<div className="session-chat-heading"><div className="session-breadcrumb"><button onClick={p.onGroups}><Icon name="group" size={12} />所有群聊</button><span>/</span><span>{group.name}</span><Icon name="right" size={12} /><span>{project?.name ?? "群专用目录"}</span></div><h1 title={title}><span className="session-heading-name">{title}</span>{p.session.archived && <span className="session-archived-badge">已归档</span>}</h1></div></div><div className="chat-header-actions">{p.onOpenGit && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span>{members.length} 位 Agent · 你</button><div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || taskControllable} title={taskControllable ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || taskControllable} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); setResultsOpen(true); }}>任务结果</button><button onClick={() => { setSessionMenu(false); onInvite(); }}>群设置</button><button onClick={() => { setSessionMenu(false); setPanel(panel === "evidence" ? null : "evidence"); }}>聊天详情</button><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div></div></header> : <header className="chat-header"><div className="chat-title">{p.sidebarControls}<Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}{!group && <span className="node-badge">本地节点</span>}{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : `${agentName(agent)} · 独立会话`}</p></div></div><div className="chat-header-actions">{p.onOpenGit && (project || snapshot.session?.workspace_path) && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button type="button" className="outline-button task-results-trigger" onClick={() => setResultsOpen(true)}><Icon name="file" size={17} />任务结果</button>}{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || busy} title={busy ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || busy} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button>}</div></header>}
-    <div className={`chat-stage-body ${panel ? "with-panel" : ""}`}><div className="chat-main">
+    <div className={`chat-stage-body ${panel === "diff" ? "with-diff-panel" : panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} /></div>}</div></article>)}
+        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">
@@ -397,7 +420,19 @@ export default function ChatStage(p: Props) {
           <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div><span className="toolbar-divider" /><ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} /><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name="send" size={21} /></button>}</div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</span></div>
       </div>
-    </div>{panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>
+    </div>{panel === "diff" ? (
+      <TurnDiffDrawer
+        turns={turnDiffOptions}
+        selectedTurnId={diffTurnId}
+        selectedFile={diffFile}
+        workspacePath={project?.primary_root ?? snapshot.session?.workspace_path ?? undefined}
+        refreshToken={diffRefresh}
+        onSelectTurn={setDiffTurnId}
+        onSelectFile={setDiffFile}
+        onOpenFullGit={p.onOpenGit}
+        onClose={() => setPanel(null)}
+      />
+    ) : panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>
       <div className="panel-heading"><h2>{panel === "members" ? "聊天成员" : "聊天详情"}</h2><button className="icon-button" aria-label="关闭详情" onClick={() => setPanel(null)}><Icon name="close" size={17} /></button></div>
       {panel === "members" ? group ? <GroupMembers group={group} onUpdated={updated => { p.onGroupUpdated?.(updated); notify("群成员已更新"); }} onSettings={onInvite} /> : <><p className="panel-caption">{members.length} 位 Agent · 1 位成员</p><div className="person-row"><Avatar agent="me" small /><div><strong>我</strong><small>群主 · 本机用户</small></div><span className="availability ready">你</span></div>{members.map(id => <div className="person-row" key={id}><Avatar agent={id} small /><div><strong>{agentName(id)}</strong><small>{agents.find(a => a.id === id)?.description}</small></div><span className={`availability ${id === agent ? "ready" : ""}`}>{id === agent ? probe ? "已就绪" : "可连接" : "可指定执行"}</span></div>)}{group && <button className="outline-button panel-add" onClick={onInvite}><Icon name="settings" size={16} />群设置与项目</button>}<div className="panel-note"><Icon name="shield" /><p>这里只包含你本机的 Agent。私聊不会自动共享到群里。</p></div></> : <>
         {group && task && <div className="collaboration-card" aria-label="协作任务">
@@ -416,6 +451,7 @@ export default function ChatStage(p: Props) {
         {(error || snapshot.session?.error) && <div className="inline-error" role="alert">{error ?? snapshot.session?.error}</div>}
         {probe?.sidebar_warning && <div className="sync-notice">最近列表同步未完成，私聊仍可使用。{probe.sidebar_warning}</div>}
         {provider === "gemini" && <p className="panel-caption">Gemini 使用自己的 CLI 和原厂登录，当前已开启自动批准模式（无独立沙箱隔离）。</p>}
+        {provider === "claude" && <p className="panel-caption">Claude Code 使用本机 claude CLI 与原厂登录，支持流式回复、工具调用与多轮会话恢复。</p>}
         {provider === "deepseek" && <p className="panel-caption">DeepSeek 按消息更新，按当前运行时提供的工具执行任务。</p>}
         <div className="execution-status"><strong>执行详情</strong><small>{records.length} 条记录</small></div>
         {records.length ? records.map(record => <details className="panel-tool" key={record.id}>
