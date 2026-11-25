@@ -620,7 +620,7 @@ export default function Workbench() {
     setUsageOpen(false); setGitOpen(false); setGroupHub(false); setRail("all"); setMode("chats"); setTab("chats");
     if (selection.kind === "group" || selection.kind === "project") setSelection(defaultPrivateSelection());
   }
-  function selectAgent(id: string) { setUsageOpen(false); setGitOpen(false); setRail(id); setMode("chats"); setTab("chats"); setSelection(id === "codex" ? {kind:"personal"} : id === "deepseek" ? {kind:"deepseek"} : {kind:"agent",id}); }
+  function selectAgent(id: string) { setUsageOpen(false); setGitOpen(false); setGroupHub(false); setRail(id); setMode("chats"); setTab("chats"); setSelection(id === "codex" ? {kind:"personal"} : id === "deepseek" ? {kind:"deepseek"} : {kind:"agent",id}); }
   const filteredGroups = groups.filter(g => g.name.toLowerCase().includes(query.toLowerCase()));
   const codexPrimaryWindow = usageData.codexLimits.windows[0];
   const quickPillText = codexPrimaryWindow
