@@ -8,6 +8,7 @@ import Dialog from "../../components/Dialog";
 import Icon from "../../components/Icon";
 import { desktop, useAgents } from "./api";
 import { serializeMarkdownSelection, useCopyToClipboard } from "./clipboard";
+import { highlightCode } from "./code-highlight";
 import { remarkMentions, remarkSkills } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -136,6 +137,18 @@ function MarkdownCodeBlock({
   const { copied, copy } = useCopyToClipboard({
     onError: () => onNotify?.("复制失败，请选择文字后手动复制"),
   });
+  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHighlightedHtml(null);
+    void highlightCode(code, language).then(html => {
+      if (!cancelled && html) setHighlightedHtml(html);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, language]);
 
   return (
     <div className="message-code-block">
@@ -152,7 +165,14 @@ function MarkdownCodeBlock({
           <span>{copied ? "已复制" : "复制"}</span>
         </button>
       </div>
-      <pre {...preProps}>{children}</pre>
+      {highlightedHtml ? (
+        <div
+          className="message-code-highlighted"
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
+      ) : (
+        <pre {...preProps}>{children}</pre>
+      )}
     </div>
   );
 }

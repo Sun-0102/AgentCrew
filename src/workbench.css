@@ -96,7 +96,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .avatar-deepseek { background: #ecfeff; color: #0891b2; }
 .avatar-me { background: #4f46e5; color: #ffffff; font-family: inherit; font-size: 15px; border-radius: 50%; }
 .avatar-group { background: #e0e7ff; color: #4f46e5; }
-.conversation-sidebar { background: var(--sidebar); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.conversation-sidebar { position: relative; background: var(--sidebar); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .sidebar-profile { display: flex; align-items: center; gap: 10px; padding: 16px 14px 13px; }
 .sidebar-profile > div { min-width: 0; flex: 1; }
 .sidebar-profile strong { display: block; font-size: 15px; font-weight: 600; margin-bottom: 3px; }
@@ -354,6 +354,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .message-code-copy:hover { background: #ffffff; border-color: #cbd5e1; color: #0f172a; }
 .message-code-copy.is-copied { color: #15803d; background: #dcfce7; border-color: #bbf7d0; }
 .message-code-block pre { margin: 0; border-radius: 0; background: transparent; }
+.message-code-highlighted .shiki, .message-code-highlighted .shiki span { color: var(--shiki-light); background-color: transparent !important; }
 .message-dispatch-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
 .message-dispatch-card { border: 1px solid #d9d5f7; border-radius: 9px; background: #f7f6ff; padding: 10px 12px; }
 .message-dispatch-pending { color: #5b5e71; font-size: 13px; }

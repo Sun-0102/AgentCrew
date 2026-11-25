@@ -75,7 +75,10 @@
 .group-sidebar-members .avatar { width: 27px; height: 27px; border-radius: 8px; }
 .group-sidebar-members .avatar-me { font-size: 11px; border-radius: 50%; }
 .group-sidebar .sidebar-footer { margin-top: auto; padding: 16px 18px; font-size: 11px; }
-.group-session-sidebar { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--line); background: #f8fafc; }
+.group-session-sidebar { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--line); background: #f8fafc; }
+.sidebar-resize-handle { position: absolute; top: 0; right: -4px; bottom: 0; width: 8px; cursor: col-resize; z-index: 15; touch-action: none; }
+.sidebar-resize-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 140ms ease; }
+.sidebar-resize-handle:hover::after, .sidebar-resize-handle.is-resizing::after { background: var(--accent); }
 .session-heading { padding: 23px 18px 16px; display: flex; align-items: center; justify-content: space-between; color: #64748b; }
 .session-heading h2 { margin: 0; font-size: 15px; font-weight: 600; color: #0f172a; }
 .session-count { font-size: 11px; color: #64748b; background: #e2e8f0; border-radius: 5px; padding: 2px 6px; margin-left: 6px; }

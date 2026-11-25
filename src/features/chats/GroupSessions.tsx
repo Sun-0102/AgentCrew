@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
@@ -65,7 +65,7 @@ export function GroupHub({ groups, projects, onSelect, onCreate }: { groups: Gro
   </div></section>;
 }
 
-export function SessionSidebar<T extends ChatSession>({ sessions, selected, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete, onCollapse }: { sessions: T[]; selected?: T; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T) => void; onArchive: (session: T) => void; onDelete: (session: T) => void; onCollapse?: () => void }) {
+export function SessionSidebar<T extends ChatSession>({ sessions, selected, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete, onCollapse, resizing, onResizeStart, onResizeReset }: { sessions: T[]; selected?: T; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T) => void; onArchive: (session: T) => void; onDelete: (session: T) => void; onCollapse?: () => void; resizing?: boolean; onResizeStart?: (event: ReactMouseEvent<HTMLDivElement>) => void; onResizeReset?: () => void }) {
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(selected?.archived ?? false);
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
@@ -93,6 +93,7 @@ export function SessionSidebar<T extends ChatSession>({ sessions, selected, load
       {loading ? <p className="session-empty" role="status">正在读取会话…</p> : !filtered.length && <p className="session-empty">{query ? "没有找到相关会话" : archived ? "还没有归档会话" : "还没有会话，创建一个吧"}</p>}
     </div><div className="session-bottom"><Icon name="shield" size={15} />{bottomNote}</div>
     {menu && menuSession && createPortal(<div className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="会话操作"><button disabled={saving} onClick={() => { setMenu(null); onRename(menuSession); }}>重命名</button><button disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onArchive(menuSession); }}>{menuSession.archived ? "恢复会话" : "归档会话"}</button><hr /><button className="destructive-action" disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onDelete(menuSession); }}>删除会话</button></div>, document.body)}
+    {onResizeStart && <div className={`sidebar-resize-handle ${resizing ? "is-resizing" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整会话侧栏宽度" title="拖动调整宽度，双击恢复默认" onMouseDown={onResizeStart} onDoubleClick={onResizeReset} />}
   </aside>;
 }
 

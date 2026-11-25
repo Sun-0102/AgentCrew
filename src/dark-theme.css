@@ -176,6 +176,12 @@
   border-color: transparent;
 }
 
+:root[data-theme="dark"] .message-code-highlighted .shiki,
+:root[data-theme="dark"] .message-code-highlighted .shiki span {
+  color: var(--shiki-dark);
+  background-color: transparent !important;
+}
+
 :root[data-theme="dark"] .message-code-header {
   background: #111827;
   border-bottom-color: #1f2937;
