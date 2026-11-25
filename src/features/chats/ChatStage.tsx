@@ -17,6 +17,7 @@ import GroupMembers from "./GroupMembers";
 import QueuedMessagesBar from "./QueuedMessagesBar";
 import { deleteSkillTokenAtCursor, requestedSkills, skillCommandSpans, skillPrefix, type Skill } from "./skills";
 import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
+import { useCopyToClipboard } from "./clipboard";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -36,6 +37,25 @@ interface Props {
   onOpenGit?: (path?: string) => void;
 }
 interface Reply { author: string; text: string }
+
+function MessageCopyButton({ text, onNotify }: { text: string; onNotify: (message: string) => void }) {
+  const { copied, copy } = useCopyToClipboard({
+    onSuccess: () => onNotify("已复制消息"),
+    onError: () => onNotify("复制失败，请选择文字后手动复制"),
+  });
+  return (
+    <button
+      type="button"
+      className={copied ? "is-copied" : undefined}
+      disabled={!text}
+      onClick={() => void copy(text)}
+      aria-label={copied ? "已复制消息" : "复制消息"}
+      title={copied ? "已复制" : "复制消息"}
+    >
+      <Icon name={copied ? "check" : "copy"} size={14} />
+    </button>
+  );
+}
 const drafts = new Map<string, { text: string; files: Attachment[]; reply: Reply | null }>();
 export function discardSessionDraft(session: GroupSession | PrivateSession | ProjectSession) {
   const key = "group_id" in session
@@ -266,7 +286,6 @@ export default function ChatStage(p: Props) {
     if (!group || composingBlocked) return;
     if (members.includes(recipient) && recipient !== agent) onAgent(recipient);
   }, [recipient, agent, members.join(","), composingBlocked]);
-  async function copy(value: string) { try { await navigator.clipboard.writeText(value); notify("已复制消息"); } catch { notify("复制失败，请选择文字后手动复制"); } }
   async function addFiles(items: File[]) {
     if (!items.length) return;
     try {
@@ -482,7 +501,7 @@ export default function ChatStage(p: Props) {
     <div className={`chat-stage-body ${panel === "diff" ? "with-diff-panel" : panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
+        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">

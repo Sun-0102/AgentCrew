@@ -1,11 +1,13 @@
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Children, isValidElement, memo, useEffect, useMemo, useState, type ComponentProps } from "react";
+import { Children, isValidElement, memo, useCallback, useEffect, useMemo, useState, type ClipboardEvent, type ComponentProps, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import LocalFileLink from "./LocalFileLink";
 import Dialog from "../../components/Dialog";
+import Icon from "../../components/Icon";
 import { desktop, useAgents } from "./api";
+import { serializeMarkdownSelection, useCopyToClipboard } from "./clipboard";
 import { remarkMentions, remarkSkills } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -118,6 +120,43 @@ function extractPlainText(node: unknown): string {
   return "";
 }
 
+function MarkdownCodeBlock({
+  language,
+  code,
+  children,
+  preProps,
+  onNotify,
+}: {
+  language?: string;
+  code: string;
+  children: ReactNode;
+  preProps: ComponentProps<"pre">;
+  onNotify?: (message: string) => void;
+}) {
+  const { copied, copy } = useCopyToClipboard({
+    onError: () => onNotify?.("复制失败，请选择文字后手动复制"),
+  });
+
+  return (
+    <div className="message-code-block">
+      <div className="message-code-header" data-copy-ignore="true">
+        <span className="message-code-lang">{language || "code"}</span>
+        <button
+          type="button"
+          className={`message-code-copy ${copied ? "is-copied" : ""}`}
+          aria-label={copied ? "已复制代码" : "复制代码"}
+          title={copied ? "已复制" : "复制代码"}
+          onClick={() => void copy(code)}
+        >
+          <Icon name={copied ? "check" : "copy"} size={13} />
+          <span>{copied ? "已复制" : "复制"}</span>
+        </button>
+      </div>
+      <pre {...preProps}>{children}</pre>
+    </div>
+  );
+}
+
 export default memo(function MessageBody({
   text,
   members,
@@ -133,16 +172,39 @@ export default memo(function MessageBody({
 }) {
   const registry = useAgents();
   const mentionAgents = members ? registry.filter(agent => members.includes(agent.id)) : registry;
+  const handleCopy = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+    const markdown = serializeMarkdownSelection(event.currentTarget);
+    if (!markdown) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", markdown);
+  }, []);
   const components = useMemo<NonNullable<ComponentProps<typeof Markdown>["components"]>>(
     () => ({
       table: ({ children }) => <div className="message-table" role="region" aria-label="消息表格" tabIndex={0}><table>{children}</table></div>,
       pre: ({ node: _node, children, ...props }) => {
         const child = Children.toArray(children)[0];
-        if (isValidElement<{ className?: string; children?: unknown }>(child) && typeof child.props.className === "string" && child.props.className.split(/\s+/).includes("language-agentcrew-dispatch")) {
-          const raw = typeof child.props.children === "string" ? child.props.children : Array.isArray(child.props.children) ? child.props.children.join("") : "";
-          return <DispatchCards raw={raw} />;
+        if (isValidElement<{ className?: string; children?: unknown }>(child)) {
+          const className = typeof child.props.className === "string" ? child.props.className : "";
+          const classes = className.split(/\s+/).filter(Boolean);
+          if (classes.includes("language-agentcrew-dispatch")) {
+            const raw = extractPlainText(child.props.children);
+            return <DispatchCards raw={raw} />;
+          }
+          const langClass = classes.find(token => token.startsWith("language-"));
+          const language = langClass ? langClass.slice("language-".length) : undefined;
+          const rawCode = extractPlainText(child.props.children).replace(/\n$/, "");
+          return (
+            <MarkdownCodeBlock language={language} code={rawCode} preProps={props} onNotify={onNotify}>
+              {children}
+            </MarkdownCodeBlock>
+          );
         }
-        return <pre {...props}>{children}</pre>;
+        const rawCode = extractPlainText(children).replace(/\n$/, "");
+        return (
+          <MarkdownCodeBlock code={rawCode} preProps={props} onNotify={onNotify}>
+            {children}
+          </MarkdownCodeBlock>
+        );
       },
       a: ({ node: _node, href, children, onClick, ...props }) => {
         const parsed = href ? parseLocalFileLink(href, extractPlainText(children)) : null;
@@ -179,7 +241,7 @@ export default memo(function MessageBody({
     }),
     [onOpenFile, workspacePath, onNotify],
   );
-  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkSkills, { source: text }], [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
+  return <div className="message-body" onCopy={handleCopy}><Markdown remarkPlugins={[remarkGfm, [remarkSkills, { source: text }], [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
     if (key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url))) {
       return url;
     }
