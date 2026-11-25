@@ -6,7 +6,7 @@ import MessageBody from "./MessageBody";
 import TaskResults from "./TaskResults";
 import TaskActivity from "./TaskActivity";
 import TurnDiffCard from "./TurnDiffCard";
-import TurnDiffDrawer, { type TurnDiffOption } from "./TurnDiffDrawer";
+import TurnDiffDrawer, { type FilePreviewTarget, type TurnDiffOption } from "./TurnDiffDrawer";
 import { replyBlocks } from "./activity";
 import ModelConfigPopover from "./ModelConfigPopover";
 import ContextMeter from "./ContextMeter";
@@ -58,6 +58,7 @@ export default function ChatStage(p: Props) {
   const [panel, setPanel] = useState<"members" | "evidence" | "diff" | null>(null);
   const [diffTurnId, setDiffTurnId] = useState<string>("");
   const [diffFile, setDiffFile] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FilePreviewTarget | null>(null);
   const [diffRefresh, setDiffRefresh] = useState(0);
   const [resultsOpen, setResultsOpen] = useState(false);
   const [sessionMenu, setSessionMenu] = useState(false);
@@ -151,8 +152,13 @@ export default function ChatStage(p: Props) {
     m => !["user", "assistant", "turn_diff", "task_start", "task_end"].includes(m.role),
   );
   function openTurnDiff(turnId: string, filePath?: string) {
+    setPreviewFile(null);
     setDiffTurnId(turnId);
     setDiffFile(filePath ?? null);
+    setPanel("diff");
+  }
+  function openFilePreview(filePath: string, line?: number) {
+    setPreviewFile({ path: filePath, line });
     setPanel("diff");
   }
   const hasMessages = visibleMessages.length > 0;
@@ -351,7 +357,7 @@ export default function ChatStage(p: Props) {
     <div className={`chat-stage-body ${panel === "diff" ? "with-diff-panel" : panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
+        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><button disabled={!message.text} onClick={() => copy(message.text)} aria-label="复制消息" title="复制"><Icon name="copy" size={14} /></button></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">
@@ -425,12 +431,25 @@ export default function ChatStage(p: Props) {
         turns={turnDiffOptions}
         selectedTurnId={diffTurnId}
         selectedFile={diffFile}
+        previewFile={previewFile}
         workspacePath={project?.primary_root ?? snapshot.session?.workspace_path ?? undefined}
         refreshToken={diffRefresh}
-        onSelectTurn={setDiffTurnId}
+        onSelectTurn={id => {
+          setPreviewFile(null);
+          setDiffTurnId(id);
+        }}
         onSelectFile={setDiffFile}
+        onClearPreview={() => {
+          setPreviewFile(null);
+          if (!diffTurnId && turnDiffOptions.length > 0) {
+            setDiffTurnId(turnDiffOptions[turnDiffOptions.length - 1].id);
+          }
+        }}
         onOpenFullGit={p.onOpenGit}
-        onClose={() => setPanel(null)}
+        onClose={() => {
+          setPreviewFile(null);
+          setPanel(null);
+        }}
       />
     ) : panel && <aside className="detail-panel" aria-label={panel === "members" ? "聊天成员" : "聊天详情"}>
       <div className="panel-heading"><h2>{panel === "members" ? "聊天成员" : "聊天详情"}</h2><button className="icon-button" aria-label="关闭详情" onClick={() => setPanel(null)}><Icon name="close" size={17} /></button></div>

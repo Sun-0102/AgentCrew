@@ -163,6 +163,20 @@ export const gitTurnFileDiff = (
     filePath,
   });
 
+export interface WorkspaceFileContent {
+  path: string;
+  display_path: string;
+  contents: string;
+  is_binary: boolean;
+  truncated: boolean;
+}
+
+export const workspaceReadFile = (workspacePath: string | undefined, filePath: string) =>
+  invoke<WorkspaceFileContent>("workspace_read_file", {
+    workspacePath: workspacePath || null,
+    filePath,
+  });
+
 export const gitTurnRevert = (
   path: string,
   beforeTree: string,

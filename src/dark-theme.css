@@ -305,3 +305,168 @@
   background: #ffedd5;
   color: #c2410c;
 }
+
+/* Group & Session Sidebar, Group Hub, and Model Config Popover Dark Overrides */
+:root[data-theme="dark"] .group-session-sidebar {
+  background: #0f172a;
+  border-right-color: var(--line);
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .session-heading h2 {
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .session-count {
+  background: #1e293b;
+  color: #cbd5e1;
+}
+
+:root[data-theme="dark"] .session-search,
+:root[data-theme="dark"] .hub-search {
+  background: #1e293b;
+  border-color: #334155;
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .session-search input,
+:root[data-theme="dark"] .hub-search input {
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .session-row:hover,
+:root[data-theme="dark"] .group-sidebar-row:hover,
+:root[data-theme="dark"] .hub-group:hover {
+  background: #1e293b;
+}
+
+:root[data-theme="dark"] .session-row.active,
+:root[data-theme="dark"] .group-sidebar-row.active {
+  background: #1e1b4b;
+  border-color: #3730a3;
+}
+
+:root[data-theme="dark"] .session-copy strong,
+:root[data-theme="dark"] .group-sidebar-copy strong,
+:root[data-theme="dark"] .hub-name strong,
+:root[data-theme="dark"] .hub-header h1 {
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .session-copy small,
+:root[data-theme="dark"] .group-sidebar-copy small,
+:root[data-theme="dark"] .session-row time,
+:root[data-theme="dark"] .session-bottom {
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .group-sidebar-select > .avatar {
+  background: #1e1b4b;
+}
+
+:root[data-theme="dark"] .session-row-menu:hover,
+:root[data-theme="dark"] .session-row-menu[aria-expanded=true],
+:root[data-theme="dark"] .group-row-menu:hover,
+:root[data-theme="dark"] .group-row-menu[aria-expanded=true] {
+  background: #334155;
+  color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .sidebar-collapse-btn,
+:root[data-theme="dark"] .sidebar-expand-btn {
+  background: #1e293b;
+  border-color: #334155;
+  color: #cbd5e1;
+}
+
+:root[data-theme="dark"] .sidebar-collapse-btn:hover,
+:root[data-theme="dark"] .sidebar-expand-btn:hover {
+  background: #334155;
+  border-color: #6366f1;
+  color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .group-hub {
+  background: var(--canvas);
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .hub-count {
+  background: #1e1b4b;
+  color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .session-chat .composer {
+  background: #111827;
+  border-color: #334155;
+}
+
+:root[data-theme="dark"] .session-chat .outgoing .message-bubble {
+  background: #312e81;
+  border-color: #4338ca;
+  color: #f8fafc;
+}
+
+:root[data-theme="dark"] .session-chat .members-trigger {
+  color: #cbd5e1;
+}
+
+:root[data-theme="dark"] .session-actions button {
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .session-actions button:hover {
+  background: #1e293b;
+}
+
+:root[data-theme="dark"] .dialog:has(.session-dialog-intro) {
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .dialog:has(.session-dialog-intro) .text-input {
+  background: #1e293b;
+  border-color: #334155;
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .model-config-trigger {
+  background: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .model-config-trigger:hover,
+:root[data-theme="dark"] .model-config-trigger.is-open {
+  background: #334155;
+  border-color: #475569;
+}
+
+:root[data-theme="dark"] .model-config-badge {
+  background: #0f172a;
+  color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .model-config-popover {
+  background: #111827;
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+:root[data-theme="dark"] .mcp-search {
+  background: #1e293b;
+  border-color: #334155;
+}
+
+:root[data-theme="dark"] .mcp-search input {
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .mcp-member-tab {
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .mcp-member-tab.active {
+  background: #1e1b4b;
+  color: #a5b4fc;
+}

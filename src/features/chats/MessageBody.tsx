@@ -1,6 +1,6 @@
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Children, isValidElement, memo, useEffect, useState, type ComponentProps } from "react";
+import { Children, isValidElement, memo, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import Dialog from "../../components/Dialog";
@@ -9,6 +9,39 @@ import { remarkMentions } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const localAttachment = /^ai-gent-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+function parseLocalFileLink(href: string, labelText?: string): { path: string; line?: number } | null {
+  const raw = href.trim();
+  if (!raw || raw.startsWith("#")) return null;
+  if (/^(https?:|mailto:|tel:|javascript:|data:)/i.test(raw)) return null;
+
+  let path = raw;
+  if (path.startsWith("file://")) {
+    path = path.slice("file://".length);
+  }
+  let line: number | undefined;
+  const hashMatch = path.match(/#L(\d+)(?:-L?\d+)?$/i);
+  if (hashMatch) {
+    line = Number(hashMatch[1]);
+    path = path.slice(0, hashMatch.index);
+  } else {
+    const colonMatch = path.match(/:(\d+)(?::\d+)?$/);
+    if (colonMatch) {
+      line = Number(colonMatch[1]);
+      path = path.slice(0, colonMatch.index);
+    }
+  }
+  if (!line && labelText) {
+    const labelLine = labelText.trim().match(/:(\d+)(?:-\d+)?$/);
+    if (labelLine) line = Number(labelLine[1]);
+  }
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Keep raw path if URI decoding fails
+  }
+  return path ? { path, line: Number.isFinite(line) ? line : undefined } : null;
+}
 
 function PreviewImage({ src, alt, ...props }: ComponentProps<"img">) {
   const [open, setOpen] = useState(false);
@@ -77,30 +110,73 @@ function DispatchCards({ raw }: { raw: string }) {
   })}</div>;
 }
 
-const components: NonNullable<ComponentProps<typeof Markdown>["components"]> = {
-  table: ({ children }) => <div className="message-table" role="region" aria-label="消息表格" tabIndex={0}><table>{children}</table></div>,
-  pre: ({ node: _node, children, ...props }) => {
-    const child = Children.toArray(children)[0];
-    if (isValidElement<{ className?: string; children?: unknown }>(child) && typeof child.props.className === "string" && child.props.className.split(/\s+/).includes("language-agentcrew-dispatch")) {
-      const raw = typeof child.props.children === "string" ? child.props.children : Array.isArray(child.props.children) ? child.props.children.join("") : "";
-      return <DispatchCards raw={raw} />;
-    }
-    return <pre {...props}>{children}</pre>;
-  },
-  a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-  img: ({ node: _node, src, alt, ...props }) => {
-    const imageId = src?.match(localImage)?.[1];
-    if (imageId) return <LocalImage id={imageId} alt={alt ?? "生成的图片"} command="image_read" />;
-    const attachmentId = src?.match(localAttachment)?.[1];
-    if (attachmentId) return <LocalImage id={attachmentId} alt={alt ?? "图片附件"} command="attachment_read" />;
-    return src ? <PreviewImage {...props} src={src} alt={alt} /> : <span>{alt ?? "图片不可用"}</span>;
-  },
-};
+function extractPlainText(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(extractPlainText).join("");
+  if (isValidElement<{ children?: unknown }>(node)) return extractPlainText(node.props.children);
+  return "";
+}
 
-export default memo(function MessageBody({ text, members }: { text: string; members?: string[] }) {
+export default memo(function MessageBody({
+  text,
+  members,
+  onOpenFile,
+}: {
+  text: string;
+  members?: string[];
+  onOpenFile?: (path: string, line?: number) => void;
+}) {
   const registry = useAgents();
   const mentionAgents = members ? registry.filter(agent => members.includes(agent.id)) : registry;
-  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) =>
-    key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url)) ? url : defaultUrlTransform(url)
-  } components={components}>{text}</Markdown></div>;
+  const components = useMemo<NonNullable<ComponentProps<typeof Markdown>["components"]>>(
+    () => ({
+      table: ({ children }) => <div className="message-table" role="region" aria-label="消息表格" tabIndex={0}><table>{children}</table></div>,
+      pre: ({ node: _node, children, ...props }) => {
+        const child = Children.toArray(children)[0];
+        if (isValidElement<{ className?: string; children?: unknown }>(child) && typeof child.props.className === "string" && child.props.className.split(/\s+/).includes("language-agentcrew-dispatch")) {
+          const raw = typeof child.props.children === "string" ? child.props.children : Array.isArray(child.props.children) ? child.props.children.join("") : "";
+          return <DispatchCards raw={raw} />;
+        }
+        return <pre {...props}>{children}</pre>;
+      },
+      a: ({ node: _node, href, children, onClick, ...props }) => {
+        const parsed = href ? parseLocalFileLink(href, extractPlainText(children)) : null;
+        if (parsed && onOpenFile) {
+          return (
+            <a
+              {...props}
+              href={href}
+              className="message-file-link"
+              title={`查看文件：${parsed.path}${parsed.line ? `:${parsed.line}` : ""}`}
+              onClick={event => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenFile(parsed.path, parsed.line);
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
+        return <a {...props} href={href} onClick={onClick} target="_blank" rel="noopener noreferrer">{children}</a>;
+      },
+      img: ({ node: _node, src, alt, ...props }) => {
+        const imageId = src?.match(localImage)?.[1];
+        if (imageId) return <LocalImage id={imageId} alt={alt ?? "生成的图片"} command="image_read" />;
+        const attachmentId = src?.match(localAttachment)?.[1];
+        if (attachmentId) return <LocalImage id={attachmentId} alt={alt ?? "图片附件"} command="attachment_read" />;
+        return src ? <PreviewImage {...props} src={src} alt={alt} /> : <span>{alt ?? "图片不可用"}</span>;
+      },
+    }),
+    [onOpenFile],
+  );
+  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
+    if (key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url))) {
+      return url;
+    }
+    if (key === "href" && url.startsWith("file://")) {
+      return url;
+    }
+    return defaultUrlTransform(url);
+  }} components={components}>{text}</Markdown></div>;
 });

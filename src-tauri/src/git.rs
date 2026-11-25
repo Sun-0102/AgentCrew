@@ -1638,6 +1638,119 @@ pub async fn git_turn_revert(
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceFileContent {
+    pub path: String,
+    pub display_path: String,
+    pub contents: String,
+    pub is_binary: bool,
+    pub truncated: bool,
+}
+
+fn find_file_in_workspace(root: &Path, target_name: &str) -> Option<PathBuf> {
+    if let Ok(output) = run_git(root.to_str()?, &["ls-files"]) {
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed == target_name || trimmed.ends_with(&format!("/{target_name}")) {
+                let candidate = root.join(trimmed);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub async fn workspace_read_file(
+    workspace_path: Option<String>,
+    file_path: String,
+) -> Result<WorkspaceFileContent, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut raw = file_path.trim().to_owned();
+        if let Some(stripped) = raw.strip_prefix("file://") {
+            raw = stripped.to_owned();
+        }
+        // Strip trailing #L123 or :123 if present
+        if let Some(idx) = raw.find('#') {
+            raw.truncate(idx);
+        }
+        // Decode basic percent-encoded spaces
+        raw = raw.replace("%20", " ");
+        if raw.is_empty() {
+            return Err("文件路径为空".into());
+        }
+
+        let ws_root = workspace_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+
+        let candidate = PathBuf::from(&raw);
+        let resolved = if candidate.is_absolute() && candidate.is_file() {
+            candidate
+        } else if let Some(ref root) = ws_root {
+            let direct = root.join(&raw);
+            if direct.is_file() {
+                direct
+            } else if let Some(found) = find_file_in_workspace(root, &raw) {
+                found
+            } else {
+                return Err(format!("找不到文件：{raw}"));
+            }
+        } else {
+            return Err(format!("找不到文件：{raw}"));
+        };
+
+        let canonical = fs::canonicalize(&resolved)
+            .map_err(|e| format!("无法访问文件 {raw}：{e}"))?;
+        if !canonical.is_file() {
+            return Err(format!("目标不是文件：{raw}"));
+        }
+
+        let bytes = fs::read(&canonical).map_err(|e| format!("读取文件失败：{e}"))?;
+        if is_probably_binary(&bytes) {
+            let display = ws_root
+                .as_ref()
+                .and_then(|r| fs::canonicalize(r).ok())
+                .and_then(|r| canonical.strip_prefix(&r).ok().map(|p| p.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+            return Ok(WorkspaceFileContent {
+                path: canonical.to_string_lossy().into_owned(),
+                display_path: display,
+                contents: String::new(),
+                is_binary: true,
+                truncated: false,
+            });
+        }
+
+        let truncated = bytes.len() > MAX_FILE_BYTES;
+        let slice = if truncated {
+            &bytes[..MAX_FILE_BYTES]
+        } else {
+            &bytes[..]
+        };
+        let contents = String::from_utf8_lossy(slice).into_owned();
+        let display = ws_root
+            .as_ref()
+            .and_then(|r| fs::canonicalize(r).ok())
+            .and_then(|r| canonical.strip_prefix(&r).ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+
+        Ok(WorkspaceFileContent {
+            path: canonical.to_string_lossy().into_owned(),
+            display_path: display,
+            contents,
+            is_binary: false,
+            truncated,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod turn_diff_tests {
     use super::*;

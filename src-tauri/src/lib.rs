@@ -161,7 +161,8 @@ pub fn run() {
             git::git_generate_commit_message,
             git::git_open_url,
             git::git_turn_file_diff,
-            git::git_turn_revert
+            git::git_turn_revert,
+            git::workspace_read_file
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")
