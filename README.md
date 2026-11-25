@@ -4,6 +4,10 @@
 
 **AgentCrew** 基于 Tauri 2、Rust 与 React 构建，是一个**可扩展的本地多 AI Agent 协作桌面工作台**。通过统一的 Provider Adapter 架构、通用自助配对机制与标准协议（如 ACP），它可以将你本机安装的各类 AI 编程 Agent 汇聚到同一个桌面界面中。无需在多个终端和客户端之间来回切换，即可在一个工作台内完成独立私聊、多 Agent 群聊分工协作、本地项目代码执行、技能调用、任务结果归档与 Token 配额监控。
 
+## 演示视频
+
+https://github.com/user-attachments/assets/dd72248f-e0bc-4754-b251-dff7e4a18444
+
 ---
 
 ## 核心特性

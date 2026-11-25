@@ -15,7 +15,7 @@ import { activeMention, insertMention, mentionSegments, messageRecipients } from
 import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
 import QueuedMessagesBar from "./QueuedMessagesBar";
-import { skillPrefix, requestedSkills, type Skill } from "./skills";
+import { deleteSkillTokenAtCursor, requestedSkills, skillCommandSpans, skillPrefix, type Skill } from "./skills";
 import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
@@ -172,6 +172,41 @@ export default function ChatStage(p: Props) {
   }
   const recipients = group ? messageRecipients(text, members) : [agent];
   const { segments: mentionParts, matched: matchedMentions } = mentionSegments(text, members);
+  const skillSpans = useMemo(() => skillCommandSpans(text), [text]);
+  const hasComposerHighlight = matchedMentions.length > 0 || skillSpans.length > 0;
+  const composerParts = useMemo(() => {
+    if (!hasComposerHighlight) return [];
+    const parts: Array<{ text: string; kind: "plain" | "mention" | "skill"; provider?: string }> = [];
+    let offset = 0;
+    for (const segment of mentionParts) {
+      const segStart = offset;
+      const segEnd = offset + segment.text.length;
+      offset = segEnd;
+      if (segment.agentId) {
+        parts.push({ text: segment.text, kind: "mention", provider: segment.provider });
+        continue;
+      }
+      const overlapping = skillSpans.filter(span => span.start >= segStart && span.end <= segEnd);
+      if (!overlapping.length) {
+        parts.push({ text: segment.text, kind: "plain" });
+        continue;
+      }
+      let localCursor = 0;
+      for (const span of overlapping) {
+        const localStart = span.start - segStart;
+        const localEnd = span.end - segStart;
+        if (localStart > localCursor) {
+          parts.push({ text: segment.text.slice(localCursor, localStart), kind: "plain" });
+        }
+        parts.push({ text: segment.text.slice(localStart, localEnd), kind: "skill" });
+        localCursor = localEnd;
+      }
+      if (localCursor < segment.text.length) {
+        parts.push({ text: segment.text.slice(localCursor), kind: "plain" });
+      }
+    }
+    return parts;
+  }, [hasComposerHighlight, mentionParts, skillSpans]);
   const mentionTone = matchedMentions.length > 1 ? "multi" : matchedMentions.length === 1 ? providerKind(matchedMentions[0]) : "";
   const namedTarget = recipients.length === 1 ? recipients[0] : agent;
   const recipient = namedTarget;
@@ -487,12 +522,14 @@ export default function ChatStage(p: Props) {
           </div>}
           {mentionsOpen && <div className="mention-menu" id="mention-menu" role="listbox" aria-label="选择要 @ 的成员" ref={mentionMenuRef}><div className="menu-caption">选择要 @ 的成员</div>{mentionItems.map((id, index) => <button type="button" role="option" id={`mention-option-${index}`} aria-selected={index === activeMentionIndex} key={id} disabled={composingBlocked} onMouseEnter={() => setMentionIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}
           <label className="sr-only" htmlFor="chat-input">输入消息</label>
-          <div className={`composer-editor ${matchedMentions.length > 0 ? "has-highlight" : ""}`}>
-            {matchedMentions.length > 0 && (
+          <div className={`composer-editor ${hasComposerHighlight ? "has-highlight" : ""}`}>
+            {hasComposerHighlight && (
               <div className="composer-highlight" ref={highlight} aria-hidden="true">
-                {mentionParts.map((part, index) =>
-                  part.agentId ? (
+                {composerParts.map((part, index) =>
+                  part.kind === "mention" ? (
                     <mark key={index} className={`composer-mention is-${part.provider ?? "default"}`}>{part.text}</mark>
+                  ) : part.kind === "skill" ? (
+                    <mark key={index} className="composer-skill">{part.text}</mark>
                   ) : (
                     <span key={index}>{part.text}</span>
                   ),
@@ -502,6 +539,19 @@ export default function ChatStage(p: Props) {
             )}
             <textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onScroll={event => { if (highlight.current) { highlight.current.scrollTop = event.currentTarget.scrollTop; highlight.current.scrollLeft = event.currentTarget.scrollLeft; } }} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart, { fromSelect: true })} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : editingQueueId ? "修改排队消息内容，Enter 保存，Esc 取消…" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : busy ? (canSteer ? (activeFollowUpMode === "steer" ? "输入内容直接纠偏当前轮（Enter 纠偏 · ⌘Enter 加入排队）…" : "继续输入下一条，将自动排队等待（Enter 排队 · ⌘Enter 立即纠偏）…") : "执行中也可继续输入，发送后自动排队等待…") : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
+            if (event.key === "Backspace" && !skillsOpen && !event.metaKey && !event.ctrlKey && !event.altKey) {
+              const field = event.currentTarget;
+              const removed = deleteSkillTokenAtCursor(text, field.selectionStart, field.selectionEnd);
+              if (removed) {
+                event.preventDefault();
+                setText(removed.text);
+                updateCommands(removed.text, removed.cursor, { isDelete: true });
+                requestAnimationFrame(() => {
+                  input.current?.setSelectionRange(removed.cursor, removed.cursor);
+                });
+                return;
+              }
+            }
             if (editingQueueId && event.key === "Escape") {
               event.preventDefault();
               cancelEditQueued();

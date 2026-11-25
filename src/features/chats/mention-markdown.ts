@@ -1,4 +1,5 @@
 import type { Agent } from "./api";
+import { skillCommandSpans } from "./skills";
 
 interface Node {
   type: string;
@@ -21,7 +22,7 @@ export function remarkMentions({ agents, source }: MentionOptions) {
   const closingQuotes: Record<string, string> = { "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"', "'": "'" };
   return (tree: Node) => {
     const visit = (node: Node, quotes: string[] = []) => {
-      if (["blockquote", "code", "inlineCode", "link", "image", "html"].includes(node.type) || !node.children) return;
+      if (["blockquote", "code", "inlineCode", "link", "image", "html", "skill"].includes(node.type) || !node.children) return;
       // Quote state follows inline formatting, but never crosses paragraph boundaries.
       const state = ["paragraph", "heading", "tableCell"].includes(node.type) ? [] : quotes;
       node.children = node.children.flatMap(child => {
@@ -53,6 +54,61 @@ export function remarkMentions({ agents, source }: MentionOptions) {
         }
         if (!parts.length) return [child];
         if (start < text.length) parts.push({ type: "text", value: text.slice(start) });
+        return parts;
+      });
+    };
+    visit(tree);
+  };
+}
+
+export function remarkSkills({ source }: { source: string }) {
+  const spans = skillCommandSpans(source);
+  return (tree: Node) => {
+    if (!spans.length) return;
+    const visit = (node: Node) => {
+      if (["blockquote", "code", "inlineCode", "link", "image", "html", "mention", "skill"].includes(node.type) || !node.children) return;
+      node.children = node.children.flatMap(child => {
+        if (child.type !== "text" || !child.value) { visit(child); return [child]; }
+        const text = child.value;
+        const offset = child.position?.start.offset;
+        const end = child.position?.end.offset;
+        if (offset === undefined || end === undefined || source.slice(offset, end) !== text) return [child];
+        const overlapping = spans.filter(span => span.start >= offset && span.end <= end);
+        if (!overlapping.length) return [child];
+        const parts: Node[] = [];
+        let cursor = 0;
+        for (const span of overlapping) {
+          const localStart = span.start - offset;
+          const localEnd = span.end - offset;
+          if (localStart < cursor) continue;
+          if (localStart > cursor) {
+            parts.push({
+              type: "text",
+              value: text.slice(cursor, localStart),
+              position: { start: { offset: offset + cursor }, end: { offset: offset + localStart } },
+            });
+          }
+          parts.push({
+            type: "skill",
+            data: {
+              hName: "span",
+              hProperties: {
+                className: "message-skill",
+                "data-skill": span.name,
+                title: `技能：${span.name}`,
+              },
+            },
+            children: [{ type: "text", value: text.slice(localStart, localEnd) }],
+          });
+          cursor = localEnd;
+        }
+        if (cursor < text.length) {
+          parts.push({
+            type: "text",
+            value: text.slice(cursor),
+            position: { start: { offset: offset + cursor }, end: { offset: end } },
+          });
+        }
         return parts;
       });
     };

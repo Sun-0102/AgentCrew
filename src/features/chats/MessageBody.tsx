@@ -5,8 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import LocalFileLink from "./LocalFileLink";
 import Dialog from "../../components/Dialog";
-import { useAgents } from "./api";
-import { remarkMentions } from "./mention-markdown";
+import { desktop, useAgents } from "./api";
+import { remarkMentions, remarkSkills } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const localAttachment = /^ai-gent-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -149,7 +149,25 @@ export default memo(function MessageBody({
         if (parsed) {
           return <LocalFileLink {...props} href={href} filePath={parsed.path} line={parsed.line} workspacePath={workspacePath} onOpenFile={onOpenFile} onNotify={onNotify}>{children}</LocalFileLink>;
         }
-        return <a {...props} href={href} onClick={onClick} target="_blank" rel="noopener noreferrer">{children}</a>;
+        const isHttp = !!href && /^https?:\/\//i.test(href);
+        return (
+          <a
+            {...props}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={event => {
+              onClick?.(event);
+              if (event.defaultPrevented || !isHttp || !desktop) return;
+              event.preventDefault();
+              void invoke("git_open_url", { url: href }).catch(cause => {
+                onNotify?.(`无法打开链接：${String(cause)}`);
+              });
+            }}
+          >
+            {children}
+          </a>
+        );
       },
       img: ({ node: _node, src, alt, ...props }) => {
         const imageId = src?.match(localImage)?.[1];
@@ -161,7 +179,7 @@ export default memo(function MessageBody({
     }),
     [onOpenFile, workspacePath, onNotify],
   );
-  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
+  return <div className="message-body"><Markdown remarkPlugins={[remarkGfm, [remarkSkills, { source: text }], [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
     if (key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url))) {
       return url;
     }

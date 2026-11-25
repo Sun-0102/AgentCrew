@@ -308,6 +308,9 @@ button { -webkit-tap-highlight-color: transparent; }
 .message-body { min-width: 0; }
 .message-body .message-mention { display: inline; padding: 1px 6px; border: 1px solid #dcd6ff; border-radius: 5px; background: #eeebff; color: #5747c6; font-weight: 600; box-decoration-break: clone; -webkit-box-decoration-break: clone; overflow-wrap: anywhere; }
 .message-body .message-mention-self { border-color: #f0d4a1; background: #fff1db; color: #925c12; }
+.message-body .message-skill { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; margin: 0 1px; border: 1px solid #e9d5ff; border-radius: 6px; background: #faf5ff; color: #7e22ce; font-weight: 550; line-height: 1.55; vertical-align: baseline; overflow-wrap: anywhere; }
+.message-body .message-skill::before { content: ""; display: inline-block; width: 12px; height: 12px; flex-shrink: 0; background-color: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z'/%3E%3Cpath d='m3.3 7 8.7 5 8.7-5'/%3E%3Cpath d='M12 22V12'/%3E%3C/svg%3E") no-repeat center / contain; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z'/%3E%3Cpath d='m3.3 7 8.7 5 8.7-5'/%3E%3Cpath d='M12 22V12'/%3E%3C/svg%3E") no-repeat center / contain; }
+.outgoing .message-body .message-skill { border-color: #d8b4fe; background: #f3e8ff; }
 .message-body > :first-child { margin-top: 0; }
 .message-body > :last-child { margin-bottom: 0; }
 .message-body p { margin: 0 0 10px; white-space: pre-wrap; }
@@ -406,6 +409,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .composer-mention.is-gemini { background: #e0f2fe; color: #0369a1; box-shadow: 0 0 0 2px #e0f2fe; }
 .composer-mention.is-claude { background: #ffedd5; color: #c2410c; box-shadow: 0 0 0 2px #ffedd5; }
 .composer-mention.is-deepseek { background: #ccfbf1; color: #0f766e; box-shadow: 0 0 0 2px #ccfbf1; }
+.composer-skill { background: #f3e8ff; color: #7e22ce; border-radius: 4px; box-shadow: 0 0 0 2px #f3e8ff; font: inherit; padding: 0; margin: 0; border: 0; }
 .composer textarea { position: relative; z-index: 1; display: block; width: 100%; box-sizing: border-box; resize: none; min-height: 65px; max-height: 160px; margin: 0; border: 0; outline: none; background: transparent; color: #0f172a; caret-color: #0f172a; padding: 2px 2px; font: inherit; text-rendering: inherit; font-kerning: inherit; font-variant-ligatures: inherit; letter-spacing: inherit; word-spacing: inherit; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word; }
 .composer-editor.has-highlight textarea { color: transparent; }
 .composer-editor.has-highlight textarea::selection { background: rgba(99, 102, 241, 0.22); color: transparent; }

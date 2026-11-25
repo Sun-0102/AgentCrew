@@ -6,6 +6,7 @@ import Icon from "../../components/Icon";
 import DiffViewer from "../git/DiffViewer";
 import {
   gitFileDiff,
+  gitOpenUrl,
   gitOverview,
   gitTurnFileDiff,
   workspaceReadFile,
@@ -292,11 +293,25 @@ function FileCodePreview({
           <table>{children}</table>
         </div>
       ),
-      a: ({ node: _node, href, children, ...props }) => (
-        <a {...props} href={href} target="_blank" rel="noopener noreferrer">
-          {children}
-        </a>
-      ),
+      a: ({ node: _node, href, children, onClick, ...props }) => {
+        const isHttp = !!href && /^https?:\/\//i.test(href);
+        return (
+          <a
+            {...props}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={event => {
+              onClick?.(event);
+              if (event.defaultPrevented || !isHttp || !desktop) return;
+              event.preventDefault();
+              void gitOpenUrl(href).catch(() => {});
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
     }),
     [],
   );

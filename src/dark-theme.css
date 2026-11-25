@@ -128,6 +128,19 @@
   color: #f1f5f9;
 }
 
+:root[data-theme="dark"] .composer-skill {
+  background: rgba(168, 85, 247, 0.24);
+  color: #e9d5ff;
+  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.24);
+}
+
+:root[data-theme="dark"] .message-body .message-skill,
+:root[data-theme="dark"] .outgoing .message-body .message-skill {
+  border-color: rgba(192, 132, 252, 0.35);
+  background: rgba(168, 85, 247, 0.18);
+  color: #e9d5ff;
+}
+
 :root[data-theme="dark"] .composer-editor.has-highlight textarea {
   color: transparent;
 }
