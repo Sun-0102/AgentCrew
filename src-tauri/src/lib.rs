@@ -1,6 +1,7 @@
 mod agent_commands;
 mod agents;
 mod attachments;
+mod chat_queue;
 mod claude;
 mod codex;
 mod codex_sidebar;
@@ -45,6 +46,7 @@ pub fn run() {
             gemini::recover(&store)?;
             claude::recover(&store)?;
             collaboration::recover(&store)?;
+            chat_queue::recover(&store)?;
             pairing::recover(&store)?;
             app.manage(store);
             app.manage(codex::Runtime::default());
@@ -103,6 +105,11 @@ pub fn run() {
             agent_commands::agent_snapshot,
             agent_commands::agent_cancel,
             agent_commands::agent_approve,
+            agent_commands::agent_queue_update,
+            agent_commands::agent_queue_remove,
+            agent_commands::agent_queue_clear,
+            agent_commands::agent_queue_resume,
+            agent_commands::agent_queue_send_now,
             agent_commands::agent_group_send,
             agent_commands::agent_update,
             agent_commands::pairing_create,

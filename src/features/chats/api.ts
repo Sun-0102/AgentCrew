@@ -42,12 +42,24 @@ export interface ContextUsage {
   cachedTokens: number;
   source: "live" | "recorded" | "none";
 }
+export interface QueuedMessage {
+  id: string;
+  conversation_id: string;
+  agent_id: string;
+  model: string;
+  text: string;
+  reasoning_effort?: string | null;
+  service_tier?: string | null;
+  status: "queued" | "paused";
+  created_at: string;
+}
 export interface Snapshot {
   conversation_id?: string;
   sessions?: Partial<Record<string, Snapshot["session"]>>;
   context_usage?: Record<string, ContextUsage>;
   agent?: string;
   task?: GroupTask | null;
+  queued_messages?: QueuedMessage[];
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;
   messages: Message[];
   approvals: { agent_id?: string; id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
@@ -62,6 +74,7 @@ export interface ProviderCapabilities {
   tools?: boolean;
   streaming?: boolean;
   acp?: boolean;
+  steer?: boolean;
 }
 export interface Agent {
   id: string;

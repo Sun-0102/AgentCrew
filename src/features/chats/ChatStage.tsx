@@ -14,9 +14,10 @@ import ContextMeter from "./ContextMeter";
 import { activeMention, insertMention, mentionSegments, messageRecipients } from "./mentions";
 import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
+import QueuedMessagesBar from "./QueuedMessagesBar";
 import { skillPrefix, requestedSkills, type Skill } from "./skills";
 import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
-import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type Scope, type Snapshot } from "./api";
+import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
 interface Props {
@@ -55,6 +56,10 @@ export default function ChatStage(p: Props) {
   const [reply, setReply] = useState<Reply | null>(() => drafts.get(scopeKey)?.reply ?? null);
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [followUpMode, setFollowUpMode] = useState<"queue" | "steer">(() =>
+    localStorage.getItem("ai-gent.follow-up-mode") === "steer" ? "steer" : "queue",
+  );
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<(Message & { scopeKey: string; baselineCount: number })[]>([]);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,7 +135,41 @@ export default function ChatStage(p: Props) {
   const mentionsOpen = mentions && mentionItems.length > 0;
   const activeMentionIndex = Math.min(mentionIndex, Math.max(0, mentionItems.length - 1));
   const busy = sending || running(snapshot.session?.status) || Object.values(snapshot.sessions ?? {}).some(session => running(session?.status)) || taskActive;
-  const composingBlocked = !!p.session?.archived || sending || (group ? task?.status === "cancelling" : busy);
+  const composingBlocked = !!p.session?.archived || sending || (group ? task?.status === "cancelling" : false);
+  const queuedMessages = useMemo(() => (group ? [] : (snapshot.queued_messages ?? [])), [group, snapshot.queued_messages]);
+  const pausedQueueCount = queuedMessages.filter(item => item.status === "paused").length;
+  const canSteer = !group && provider === "codex" && snapshot.session?.status === "running";
+  const activeFollowUpMode: "queue" | "steer" = canSteer ? followUpMode : "queue";
+  useEffect(() => {
+    setEditingQueueId(null);
+  }, [scopeKey]);
+  useEffect(() => {
+    if (editingQueueId && !queuedMessages.some(item => item.id === editingQueueId)) {
+      setEditingQueueId(null);
+    }
+  }, [editingQueueId, queuedMessages]);
+  function updateFollowUpMode(next: "queue" | "steer") {
+    setFollowUpMode(next);
+    try {
+      localStorage.setItem("ai-gent.follow-up-mode", next);
+    } catch {
+      // ignore storage errors
+    }
+  }
+  function startEditQueued(item: QueuedMessage) {
+    setEditingQueueId(item.id);
+    setText(item.text);
+    setFiles([]);
+    setReply(null);
+    requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(item.text.length, item.text.length);
+    });
+  }
+  function cancelEditQueued() {
+    setEditingQueueId(null);
+    setText("");
+  }
   const recipients = group ? messageRecipients(text, members) : [agent];
   const { segments: mentionParts, matched: matchedMentions } = mentionSegments(text, members);
   const mentionTone = matchedMentions.length > 1 ? "multi" : matchedMentions.length === 1 ? providerKind(matchedMentions[0]) : "";
@@ -293,15 +332,37 @@ export default function ChatStage(p: Props) {
     setSkillQuery(null);
     requestAnimationFrame(() => { input.current?.focus(); input.current?.setSelectionRange(next.length, next.length); });
   }
-  async function send() {
+  async function send(overrideMode?: "queue" | "steer") {
     if ((!text.trim() && !files.length) || composingBlocked || !ready) return;
     if (!desktop) { notify("请在桌面版中发送消息，浏览器预览不会调用 Agent"); return; }
+    if (!group && editingQueueId) {
+      const nextText = text.trim();
+      if (!nextText) return;
+      const targetId = editingQueueId;
+      setSending(true); setError(null);
+      try {
+        await invoke("agent_queue_update", { ...scope, agent, id: targetId, text: nextText });
+        setEditingQueueId(null);
+        setText("");
+        await onRefresh();
+        notify("已更新排队消息");
+      } catch (cause) {
+        setError(String(cause));
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     const targetAgent = recipient;
     if (!members.includes(targetAgent)) { setError("这个 Agent 不在当前群里，请先邀请成员。"); return; }
     const draftText = text;
     const draftFiles = files;
     const draftReply = reply;
     const baseText = draftText.trim() || (draftFiles.every(file => file.isImage) ? "请查看以下图片：" : "请查看以下附件：");
+    const singleFollowUpMode: "queue" | "steer" | null = !group && busy
+      ? (overrideMode === "steer" && !canSteer ? "queue" : (overrideMode ?? activeFollowUpMode))
+      : null;
+    const showOptimistic = singleFollowUpMode !== "queue";
     let optimisticContent = baseText;
     if (draftReply) optimisticContent = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${optimisticContent}`;
     for (const file of draftFiles) {
@@ -312,7 +373,9 @@ export default function ChatStage(p: Props) {
     const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const baselineCount = userMessageCount;
     setText(""); setFiles([]); setReply(null); setSkillQuery(null); setMentions(false);
-    setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: optimisticContent, created_at: new Date().toISOString(), agent: targetAgent }]);
+    if (showOptimistic) {
+      setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: optimisticContent, created_at: new Date().toISOString(), agent: targetAgent }]);
+    }
     setSending(true); setError(null); nearBottom.current = true;
     try {
       let content = baseText;
@@ -327,12 +390,22 @@ export default function ChatStage(p: Props) {
       if (names.length) content += await invoke<string>("skills_prepare", { ...scope, agents: recipients, names });
       if (group) {
         await invoke("agent_group_send", { groupId: scope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content });
-      } else await invoke("agent_send", { ...scope, agent, model, serviceTier: provider === "codex" ? p.codexServiceTier ?? "default" : null, reasoningEffort: p.reasoningEffort || null, text: content });
+      } else {
+        await invoke("agent_send", {
+          ...scope,
+          agent,
+          model,
+          serviceTier: provider === "codex" ? p.codexServiceTier ?? "default" : null,
+          reasoningEffort: p.reasoningEffort || null,
+          followUpMode: singleFollowUpMode,
+          text: content,
+        });
+      }
       await onRefresh();
-      setOptimistic(current => current.filter(item => item.id !== optimisticId));
+      if (showOptimistic) setOptimistic(current => current.filter(item => item.id !== optimisticId));
     }
     catch (cause) {
-      setOptimistic(current => current.filter(item => item.id !== optimisticId));
+      if (showOptimistic) setOptimistic(current => current.filter(item => item.id !== optimisticId));
       setText(current => current || draftText);
       setFiles(current => current.length ? current : draftFiles);
       setReply(current => current ?? draftReply);
@@ -378,11 +451,34 @@ export default function ChatStage(p: Props) {
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">
-          <span className={`presence-dot ${busy ? "connected" : ""}`} /><span className="chat-status-text">{group && task?.members?.length && task.status === "running" && !error && !snapshot.approvals.length ? "群任务正在处理" : p.session?.archived ? "会话已归档，恢复后可继续讨论" : stateText}{task && task.queued_count > 0 ? ` · ${task.queued_count} 项待处理` : ""}</span>
+          <span className={`presence-dot ${busy ? "connected" : ""}`} /><span className="chat-status-text">{group && task?.members?.length && task.status === "running" && !error && !snapshot.approvals.length ? "群任务正在处理" : p.session?.archived ? "会话已归档，恢复后可继续讨论" : stateText}{task && task.queued_count > 0 ? ` · ${task.queued_count} 项待处理` : ""}{!group && queuedMessages.length > 0 ? ` · ${queuedMessages.length} 条排队${pausedQueueCount > 0 ? "（已暂停）" : ""}` : ""}</span>
           {(attention || snapshot.approvals.length > 0) && <button type="button" className="status-detail-button" onClick={() => setPanel("evidence")}>{snapshot.approvals.length ? "查看请求" : "查看详情"}</button>}
         </div>
         {group && (busy || taskControllable || attention) && <GroupMemberStatus snapshot={snapshot} members={members} />}
-        <form className={`composer ${dragging ? "dragging" : ""} ${mentionTone ? `has-mention has-mention-${mentionTone}` : ""}`} onDragOver={event => { event.preventDefault(); if (!composingBlocked) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={handleDrop} onSubmit={event => { event.preventDefault(); void send(); }}>
+        {!group && queuedMessages.length > 0 && (
+          <QueuedMessagesBar
+            items={queuedMessages}
+            busy={busy}
+            canSteer={canSteer}
+            acting={acting || sending}
+            editingId={editingQueueId}
+            onEdit={startEditQueued}
+            onRemove={id => void action("agent_queue_remove", { agent, id })}
+            onSendNow={(id, preferSteer) => void action("agent_queue_send_now", { agent, id, preferSteer })}
+            onResume={() => void action("agent_queue_resume", { agent })}
+            onClear={() => void action("agent_queue_clear", { agent })}
+          />
+        )}
+        <form className={`composer ${dragging ? "dragging" : ""} ${mentionTone ? `has-mention has-mention-${mentionTone}` : ""} ${editingQueueId ? "is-editing-queue" : ""}`} onDragOver={event => { event.preventDefault(); if (!composingBlocked) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={handleDrop} onSubmit={event => { event.preventDefault(); void send(); }}>
+          {editingQueueId && (
+            <div className="queue-edit-banner">
+              <Icon name="edit" size={14} />
+              <span>正在编辑排队消息 · Enter 保存 · Esc 取消</span>
+              <button type="button" className="icon-button" aria-label="取消编辑排队消息" onClick={cancelEditQueued}>
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          )}
           {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
           {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}>{file.isImage && file.previewUrl ? <img className="attachment-thumb" src={file.previewUrl} alt={file.name} /> : <Icon name="file" size={18} />}<span>{file.name}<small>{formatAttachmentSize(file.size)} · {file.isImage ? "图片" : "文件"}</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
           {skillsOpen && <div className="skill-suggestions" id="skill-suggestions" role="listbox" aria-label="技能列表">
@@ -404,8 +500,23 @@ export default function ChatStage(p: Props) {
                 {text.endsWith("\n") ? "\u200b" : null}
               </div>
             )}
-            <textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onScroll={event => { if (highlight.current) { highlight.current.scrollTop = event.currentTarget.scrollTop; highlight.current.scrollLeft = event.currentTarget.scrollLeft; } }} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart, { fromSelect: true })} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
+            <textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onScroll={event => { if (highlight.current) { highlight.current.scrollTop = event.currentTarget.scrollTop; highlight.current.scrollLeft = event.currentTarget.scrollLeft; } }} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart, { fromSelect: true })} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : editingQueueId ? "修改排队消息内容，Enter 保存，Esc 取消…" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : busy ? (canSteer ? (activeFollowUpMode === "steer" ? "输入内容直接纠偏当前轮（Enter 纠偏 · ⌘Enter 加入排队）…" : "继续输入下一条，将自动排队等待（Enter 排队 · ⌘Enter 立即纠偏）…") : "执行中也可继续输入，发送后自动排队等待…") : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
+            if (editingQueueId && event.key === "Escape") {
+              event.preventDefault();
+              cancelEditQueued();
+              return;
+            }
+            if (!group && !text && !editingQueueId && event.altKey && event.key === "ArrowUp" && queuedMessages.length > 0) {
+              event.preventDefault();
+              startEditQueued(queuedMessages[queuedMessages.length - 1]);
+              return;
+            }
+            if (!group && busy && canSteer && !editingQueueId && !text.trim() && (event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "Enter" && queuedMessages.length > 0) {
+              event.preventDefault();
+              void action("agent_queue_send_now", { agent, id: queuedMessages[0].id, preferSteer: true });
+              return;
+            }
             if (skillsOpen) {
               if (event.key === "Escape") { event.preventDefault(); setSkillQuery(null); return; }
               if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -436,14 +547,22 @@ export default function ChatStage(p: Props) {
                 return;
               }
             }
+            if (!group && busy && !editingQueueId && (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key === "Enter") {
+              event.preventDefault();
+              const opposite: "queue" | "steer" = canSteer
+                ? (activeFollowUpMode === "steer" ? "queue" : "steer")
+                : "queue";
+              void send(opposite);
+              return;
+            }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               void send();
             }
           }} />
           </div>
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div><span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}{(group || !busy) && <button className="send-button" type="submit" aria-label="发送消息" title={!desktop ? "请在桌面版中发送" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name="send" size={21} /></button>}</div></div>
-        </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</span></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div><span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
+        </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>{!group && busy ? (<>Enter {activeFollowUpMode === "steer" ? "纠偏" : "排队"}{canSteer && <><span className="keyboard-separator">·</span>⌘Enter {activeFollowUpMode === "steer" ? "排队" : "纠偏"}</>} {queuedMessages.length > 0 && <><span className="keyboard-separator">·</span>⌥↑ 编辑排队</>}</>) : (<>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</>)}</span></div>
       </div>
     </div>{panel === "diff" ? (
       <TurnDiffDrawer

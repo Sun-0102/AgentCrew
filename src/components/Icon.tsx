@@ -37,6 +37,10 @@ const paths = {
   external: "M14 4h6v6M10 14 20 4M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
   sun: "M12 4V2M12 22v-2M4.93 4.93 3.51 3.51M20.49 20.49l-1.42-1.42M4 12H2M22 12h-2M4.93 19.07l-1.42 1.42M20.49 3.51l-1.42 1.42M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z",
   moon: "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z",
+  queue: "M4 6h16M4 12h10M4 18h7m7-4v6m-3-3h6",
+  steer: "M5 17a2 2 0 0 1 2-2h12m-4-4 4 4-4 4M5 7v8",
+  edit: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z",
+  play: "M7 5v14l11-7-11-7Z",
 };
 export type IconName = keyof typeof paths;
 export default function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

@@ -992,6 +992,42 @@ impl Runtime {
         Ok(json!({"status": "starting"}))
     }
 
+    pub fn steer(&self, store: &Store, conversation_id: &str, text: &str) -> Reply {
+        if text.trim().is_empty() || text.len() > 100_000 {
+            return Err("消息不能为空且不能超过 100000 字节。".into());
+        }
+        let _operation = self.operation.lock().map_err(|e| e.to_string())?;
+        let s = session(store, conversation_id)?.ok_or("没有正在执行的会话")?;
+        if s["status"].as_str() != Some("running") {
+            return Err("当前任务尚未进入可纠偏状态，已支持加入排队。".into());
+        }
+        let thread = s["thread_id"].as_str().ok_or("会话 ID 无效")?;
+        let turn = s["turn_id"].as_str().ok_or("任务尚未开始，请稍后再试")?;
+        let client = self.client(store)?;
+        let mut turn_input = vec![json!({"type":"text","text":text,"text_elements":[]})];
+        for attachment_id in crate::attachments::extract_ids(text) {
+            if let Ok(file) = crate::attachments::find(store, &attachment_id) {
+                if file.is_image {
+                    turn_input.push(json!({"type":"localImage","path":file.path.to_string_lossy()}));
+                }
+            }
+        }
+        client.request(
+            "turn/steer",
+            json!({"threadId":thread,"expectedTurnId":turn,"input":turn_input}),
+        )?;
+        let item_id = format!("steer-{}", uuid::Uuid::new_v4());
+        store
+            .connect()?
+            .execute(
+                "INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'user',?3)",
+                params![conversation_id, item_id, text],
+            )
+            .map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(conversation_id);
+        Ok(json!({"status": "steered", "turn_id": turn}))
+    }
+
     pub fn cancel(&self, store: &Store, conversation_id: &str) -> Reply {
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         let s = session(store, conversation_id)?.ok_or("没有可取消的会话")?;

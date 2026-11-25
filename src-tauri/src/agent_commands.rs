@@ -111,6 +111,7 @@ pub async fn agent_snapshot(
                 &sessions,
                 None,
             )?;
+            snapshot["queued_messages"] = json!(crate::chat_queue::list(&store, &id)?);
             return Ok(snapshot);
         }
         let mut snapshot=app.state::<crate::codex::Runtime>().snapshot(&store,&id)?;
@@ -149,7 +150,11 @@ pub async fn agent_snapshot(
         snapshot["approvals"]=json!(approvals);
         snapshot["context_usage"]=context_usage;
         if snapshot["session"].is_object() {snapshot["session"]["workspace_path"]=json!(store.conversation_root(&id)?);}
-        if group_id.is_some() { snapshot["task"]=serde_json::to_value(crate::collaboration::latest(&store,&id)?).map_err(|e|e.to_string())?; }
+        if group_id.is_some() {
+            snapshot["task"]=serde_json::to_value(crate::collaboration::latest(&store,&id)?).map_err(|e|e.to_string())?;
+        } else {
+            snapshot["queued_messages"] = json!(crate::chat_queue::list(&store, &id)?);
+        }
         Ok(snapshot)
     }).await.map_err(|e|e.to_string())?
 }
@@ -164,6 +169,7 @@ pub async fn agent_send(
     text: String,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
+    follow_up_mode: Option<String>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<Store>();
@@ -184,9 +190,6 @@ pub async fn agent_send(
             return Err("所有派发已暂停，请先继续。".into());
         }
         crate::collaboration::manual_send(&store, &model, &text)?;
-        if kind == "deepseek" {
-            crate::deepseek::ensure_idle(&store)?;
-        }
         let id = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
         if session_id.is_some() {
             if project_id.is_some() {
@@ -194,6 +197,33 @@ pub async fn agent_send(
             } else {
                 store.ensure_private_session_open(&id)?;
             }
+        }
+        let status = crate::chat_queue::session_status(&app, &store, &agent, &id)?;
+        let is_active = status.as_deref().is_some_and(crate::codex::active);
+        if is_active {
+            let adapter = providers::resolve(&kind)?;
+            if follow_up_mode.as_deref() == Some("steer")
+                && adapter.supports_steer()
+                && status.as_deref() == Some("running")
+            {
+                let runtime = agents::binding(&store, &agent, &id)?;
+                if let Ok(result) = adapter.steer(&app, &store, &runtime, &text) {
+                    return Ok(result);
+                }
+            }
+            let item = crate::chat_queue::enqueue(
+                &store,
+                &id,
+                &agent,
+                &model,
+                &text,
+                reasoning_effort.as_deref(),
+                service_tier.as_deref(),
+            )?;
+            return Ok(json!({"status": "queued", "queued_item": item}));
+        }
+        if kind == "deepseek" {
+            crate::deepseek::ensure_idle(&store)?;
         }
         let runtime = agents::binding(&store, &agent, &id)?;
         crate::reasoning::save(&store, &runtime, &kind, &model, reasoning_effort.as_deref())?;
@@ -219,6 +249,9 @@ pub async fn agent_cancel(
         let _guard = gate.0.lock().map_err(|e| e.to_string())?;
         let store = app.state::<Store>();
         let id = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
+        if group_id.is_none() {
+            let _ = crate::chat_queue::pause_all(&store, &id);
+        }
         agents::cancel(&app, &store, &agent, &id)
     })
     .await
@@ -326,4 +359,89 @@ pub async fn agent_update(
         crate::events::emit_agents_sync();
         Ok(())
     }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_queue_update(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
+    id: String,
+    text: String,
+) -> Result<crate::chat_queue::QueuedMessage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        crate::chat_queue::update_text(&store, &conv, &id, &text)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_queue_remove(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
+    id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        crate::chat_queue::remove(&store, &conv, &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_queue_clear(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        crate::chat_queue::clear(&store, &conv)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_queue_resume(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        crate::chat_queue::resume_and_dispatch(&app, &store, &conv)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_queue_send_now(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    session_id: Option<String>,
+    id: String,
+    prefer_steer: Option<bool>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
+        crate::chat_queue::send_now(&app, &store, &conv, &id, prefer_steer.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

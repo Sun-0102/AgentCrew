@@ -419,6 +419,7 @@ pub fn start_scheduler(app: &tauri::AppHandle) {
                     }
                 }
             }
+            crate::chat_queue::tick(&app);
             std::thread::sleep(Duration::from_millis(600));
         }
     });

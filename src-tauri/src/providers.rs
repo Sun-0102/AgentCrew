@@ -21,6 +21,7 @@ pub struct ProviderCapabilities {
     pub tools: bool,
     pub streaming: bool,
     pub acp: bool,
+    pub steer: bool,
 }
 
 impl ProviderCapabilities {
@@ -51,6 +52,7 @@ pub trait ProviderAdapter: Sync {
             tools: true,
             streaming: true,
             acp: false,
+            steer: false,
         }
         .to_value()
     }
@@ -102,6 +104,20 @@ pub trait ProviderAdapter: Sync {
     ) -> Result<Value, String> {
         Err("此运行组件不提供交互审批。".into())
     }
+
+    fn supports_steer(&self) -> bool {
+        false
+    }
+
+    fn steer(
+        &self,
+        _app: &tauri::AppHandle,
+        _store: &Store,
+        _runtime_conversation: &str,
+        _text: &str,
+    ) -> Result<Value, String> {
+        Err("此运行组件暂不支持运行中直接纠偏。".into())
+    }
 }
 
 struct CodexAdapter;
@@ -130,6 +146,7 @@ impl ProviderAdapter for CodexAdapter {
             tools: true,
             streaming: true,
             acp: false,
+            steer: true,
         }
         .to_value()
     }
@@ -197,6 +214,21 @@ impl ProviderAdapter for CodexAdapter {
     ) -> Result<Value, String> {
         app.state::<codex::Runtime>()
             .approve(store, runtime_conversation, id, allow)
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn steer(
+        &self,
+        app: &tauri::AppHandle,
+        store: &Store,
+        runtime_conversation: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        app.state::<codex::Runtime>()
+            .steer(store, runtime_conversation, text)
     }
 }
 
@@ -282,6 +314,7 @@ impl ProviderAdapter for GeminiAdapter {
             tools: raw["tools"].as_bool().unwrap_or(true),
             streaming: raw["streaming"].as_bool().unwrap_or(true),
             acp: true,
+            steer: false,
         }
         .to_value()
     }
