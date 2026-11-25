@@ -89,9 +89,17 @@ pub async fn project_list(store: State<'_, Store>) -> Result<Vec<Project>, Strin
 }
 
 #[tauri::command]
-pub async fn project_add(path: String, store: State<'_, Store>) -> Result<Project, String> {
+pub async fn project_add(path: String, name: Option<String>, store: State<'_, Store>) -> Result<Project, String> {
     let database_path = store.path.clone();
-    tauri::async_runtime::spawn_blocking(move || Store::open(database_path)?.add_project(&path))
+    tauri::async_runtime::spawn_blocking(move || Store::open(database_path)?.add_project_with_name(&path, name.as_deref()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn project_rename(id: String, name: Option<String>, store: State<'_, Store>) -> Result<Project, String> {
+    let path = store.path.clone();
+    tauri::async_runtime::spawn_blocking(move || Store { path }.rename_project(&id, name.as_deref()))
         .await
         .map_err(|error| error.to_string())?
 }

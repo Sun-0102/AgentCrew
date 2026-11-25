@@ -114,7 +114,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .conversation-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; min-height: 61px; border: 1px solid transparent; background: transparent; border-radius: 13px; text-align: left; margin-bottom: 7px; }
 .conversation-item:hover { background: #f1f5f9; }
 .conversation-item.selected { background: #e0e7ff; border-color: #c7d2fe; }
-.conversation-item.project-item { display: grid; grid-template-columns: 40px minmax(0, 1fr) 26px; column-gap: 10px; row-gap: 3px; }
+.conversation-item.project-item { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; column-gap: 8px; row-gap: 3px; }
 .project-item .project-folder { grid-column: 1; grid-row: 1 / 3; padding: 0; border: 0; }
 .project-name, .project-path { padding: 0; border: 0; background: transparent; color: inherit; text-align: left; min-width: 0; }
 .project-name { grid-column: 2; grid-row: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
@@ -122,8 +122,11 @@ button { -webkit-tap-highlight-color: transparent; }
 .project-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-path svg { flex-shrink: 0; }
 .project-path:hover { color: var(--accent); text-decoration: underline; }
-.project-item .project-remove { grid-column: 3; grid-row: 1 / 3; width: 26px; height: 28px; padding: 4px; color: var(--muted); }
+.project-item .project-actions { grid-column: 3; grid-row: 1 / 3; display: flex; align-items: center; gap: 2px; }
+.project-item .project-rename, .project-item .project-remove { width: 24px; height: 26px; padding: 4px; color: var(--muted); }
+.project-item .project-rename:hover { color: var(--accent); background: rgba(79, 70, 229, 0.1); }
 .project-item .project-remove:hover { color: #dc2626; background: #dc262614; }
+.project-path-preview { margin: 0 0 12px; padding: 8px 10px; border-radius: 8px; background: var(--surface-subtle, #f8fafc); border: 1px solid var(--border); color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
 .project-name:focus-visible, .project-path:focus-visible, .project-folder:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 .conversation-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .conversation-name { display: flex; gap: 7px; align-items: center; min-width: 0; }

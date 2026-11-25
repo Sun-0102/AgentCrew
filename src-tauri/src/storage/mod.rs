@@ -104,6 +104,10 @@ impl Store {
     }
 
     pub fn add_project(&self, input: &str) -> Result<Project, String> {
+        self.add_project_with_name(input, None)
+    }
+
+    pub fn add_project_with_name(&self, input: &str, custom_name: Option<&str>) -> Result<Project, String> {
         let canonical = Path::new(input)
             .canonicalize()
             .map_err(|e| format!("无法访问项目目录：{e}"))?;
@@ -114,15 +118,17 @@ impl Store {
         let path = canonical
             .to_str()
             .ok_or("项目目录不是有效的 Unicode 路径。")?;
-        let name = canonical
+        let default_name = canonical
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(path);
+        let trimmed_custom = custom_name.map(str::trim).filter(|s| !s.is_empty());
+        let name = trimmed_custom.unwrap_or(default_name);
         let connection = self.connect()?;
         connection
             .execute(
-                "INSERT INTO projects (id, name, primary_root) VALUES (?1, ?2, ?3) ON CONFLICT(primary_root) DO UPDATE SET removed_at=NULL",
-                params![uuid::Uuid::new_v4().to_string(), name, path],
+                "INSERT INTO projects (id, name, primary_root) VALUES (?1, ?2, ?3) ON CONFLICT(primary_root) DO UPDATE SET removed_at=NULL, name=CASE WHEN ?4 IS NOT NULL THEN ?4 ELSE name END",
+                params![uuid::Uuid::new_v4().to_string(), name, path, trimmed_custom],
             )
             .map_err(|e| e.to_string())?;
         connection.execute("INSERT INTO conversations(id,project_id,workspace_path) SELECT id,id,primary_root FROM projects WHERE primary_root=?1 ON CONFLICT(id) DO NOTHING",[path]).map_err(|e|e.to_string())?;
@@ -130,6 +136,45 @@ impl Store {
             .query_row(
                 "SELECT id, name, primary_root, created_at FROM projects WHERE primary_root = ?1",
                 [path],
+                |row| {
+                    Ok(Project {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        primary_root: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn rename_project(&self, id: &str, custom_name: Option<&str>) -> Result<Project, String> {
+        let connection = self.connect()?;
+        let primary_root: String = connection
+            .query_row(
+                "SELECT primary_root FROM projects WHERE id=?1 AND removed_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "项目不存在或已移除。".to_owned())?;
+        let default_name = Path::new(&primary_root)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&primary_root);
+        let name = custom_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_name);
+        connection
+            .execute(
+                "UPDATE projects SET name=?1 WHERE id=?2 AND removed_at IS NULL",
+                params![name, id],
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .query_row(
+                "SELECT id, name, primary_root, created_at FROM projects WHERE id=?1",
+                [id],
                 |row| {
                     Ok(Project {
                         id: row.get(0)?,

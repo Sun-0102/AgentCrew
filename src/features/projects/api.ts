@@ -13,7 +13,8 @@ export interface AppInfo {
 }
 
 export const listProjects = () => invoke<Project[]>("project_list");
-export const addProject = (path: string) => invoke<Project>("project_add", { path });
+export const addProject = (path: string, name?: string) => invoke<Project>("project_add", { path, name: name?.trim() ? name.trim() : null });
+export const renameProject = (id: string, name?: string) => invoke<Project>("project_rename", { id, name: name?.trim() ? name.trim() : null });
 export const removeProject = (id: string) => invoke<void>("project_remove", { id });
 export const openProjectDirectory = (id: string) => invoke<void>("project_open_directory", { id });
 export const getAppInfo = () => invoke<AppInfo>("app_info");

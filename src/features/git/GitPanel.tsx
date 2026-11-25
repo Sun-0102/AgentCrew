@@ -899,7 +899,7 @@ export default function GitPanel({
             <p>
               参考 T3 Code 的隔离机制，新建的 Worktree 会统一存放在应用数据目录的
               <code> worktrees/ </code>
-              下，不会污染当前项目目录。创建后可一键加入工作空间，让不同会话或 Agent 并行改代码互不干扰。
+              下，不会污染当前项目目录。创建后可一键加入项目空间，让不同会话或 Agent 并行改代码互不干扰。
             </p>
             <div className="git-wt-form">
               <input
