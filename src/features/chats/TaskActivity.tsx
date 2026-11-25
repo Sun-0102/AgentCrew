@@ -222,6 +222,11 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
   const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
+    setOpen(false);
+    setShowAll(false);
+  }, [block.id, block.active]);
+
+  useEffect(() => {
     if (!block.active) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -237,6 +242,9 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
     parseWorkLogItem(message, block.active, index === rawItems.length - 1),
   );
   const timelineItems = collapseWorkLogItems(parsedItems.filter(item => item.kind !== "handoff"));
+  // Keep progress messages visible while commands and tool output stay folded.
+  // The trailing assistant message is already rendered in the main reply bubble.
+  const progressItems = block.active ? timelineItems.filter(item => item.kind === "note") : [];
 
   const thoughts = timelineItems.filter(i => i.kind === "thinking").length;
   const reads = timelineItems
@@ -319,6 +327,14 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
         </span>
         <Icon name={open ? "down" : "right"} size={13} />
       </button>
+
+      {!open && progressItems.length > 0 && (
+        <div className="worklog-progress">
+          {progressItems.map(item => (
+            <WorkLogRow key={item.id} item={item} defaultOpen={false} />
+          ))}
+        </div>
+      )}
 
       {open && (
         <div className="task-activity-items worklog-timeline" id={`activity-${block.id}`}>
