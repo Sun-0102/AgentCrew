@@ -78,6 +78,9 @@ fn conversation(
     if let Some(group) = group {
         store.group(group)?;
         Ok(group.to_owned())
+    } else if let (Some(project), Some(session)) = (project, session) {
+        store.verify_project_session(project, session)?;
+        Ok(session.to_owned())
     } else if let Some(session) = session {
         store.verify_private_session(agent, session)?;
         Ok(session.to_owned())
@@ -186,7 +189,11 @@ pub async fn agent_send(
         }
         let id = conversation(&store, &agent, None, project_id.as_deref(), session_id.as_deref())?;
         if session_id.is_some() {
-            store.ensure_private_session_open(&id)?;
+            if project_id.is_some() {
+                store.ensure_project_session_open(&id)?;
+            } else {
+                store.ensure_private_session_open(&id)?;
+            }
         }
         let runtime = agents::binding(&store, &agent, &id)?;
         crate::reasoning::save(&store, &runtime, &kind, &model, reasoning_effort.as_deref())?;

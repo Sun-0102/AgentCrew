@@ -217,13 +217,9 @@ function WorkLogRow({ item, defaultOpen }: { item: WorkLogItem; defaultOpen: boo
 }
 
 export default function TaskActivity({ block }: { block: ReplyBlock }) {
-  const [open, setOpen] = useState(block.active);
+  const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [now, setNow] = useState(Date.now);
-
-  useEffect(() => {
-    setOpen(block.active);
-  }, [block.active]);
 
   useEffect(() => {
     if (!block.active) return;
@@ -328,14 +324,9 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
         <div className="task-activity-items worklog-timeline" id={`activity-${block.id}`}>
           {visibleItems.length > 0 ? (
             <div className="worklog-list">
-              {visibleItems.map((item, index) => {
-                const isLatestActive = block.active && index === visibleItems.length - 1;
-                const autoExpand =
-                  (isLatestActive &&
-                    (item.kind === "thinking" || item.kind === "command" || item.kind === "file_change")) ||
-                  item.status === "failed";
-                return <WorkLogRow key={item.id} item={item} defaultOpen={autoExpand} />;
-              })}
+              {visibleItems.map(item => (
+                <WorkLogRow key={item.id} item={item} defaultOpen={false} />
+              ))}
               {hiddenCount > 0 && (
                 <button
                   type="button"

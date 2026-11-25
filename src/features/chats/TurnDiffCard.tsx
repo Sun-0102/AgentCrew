@@ -28,6 +28,7 @@ export default function TurnDiffCard({
   onNotify,
   onReverted,
 }: Props) {
+  const [expanded, setExpanded] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [reverting, setReverting] = useState(false);
   const [reverted, setReverted] = useState(false);
@@ -66,8 +67,21 @@ export default function TurnDiffCard({
         <button
           type="button"
           className="turn-diff-lead"
-          onClick={() => onViewDiff(summary.files[0]?.path)}
-          title={singleFile ? singleFile.path : `查看本轮 ${count} 个文件的变更`}
+          aria-expanded={!isSingle ? expanded : undefined}
+          onClick={() => {
+            if (isSingle) {
+              onViewDiff(summary.files[0]?.path);
+            } else {
+              setExpanded(v => !v);
+            }
+          }}
+          title={
+            singleFile
+              ? singleFile.path
+              : expanded
+                ? "收起文件列表"
+                : `展开本轮修改的 ${count} 个文件`
+          }
         >
           <span className="turn-diff-icon" aria-hidden="true">
             <Icon name="diff" size={16} />
@@ -75,6 +89,11 @@ export default function TurnDiffCard({
           <span className="turn-diff-title-group">
             <span className="turn-diff-title">
               {isSingle && singleParts ? `已编辑 ${singleParts.name}` : `已编辑 ${count} 个文件`}
+              {!isSingle && (
+                <span className="turn-diff-chevron" aria-hidden="true">
+                  <Icon name={expanded ? "down" : "right"} size={13} />
+                </span>
+              )}
             </span>
             <span className="turn-diff-sub">
               {summary.total_additions > 0 || summary.total_deletions > 0 ? (
@@ -87,6 +106,11 @@ export default function TurnDiffCard({
                 <span className="turn-diff-link-hint">
                   查看变更
                   <Icon name="external" size={11} />
+                </span>
+              )}
+              {!isSingle && (
+                <span className="turn-diff-link-hint">
+                  {expanded ? "收起列表" : "点击展开文件列表"}
                 </span>
               )}
               {reverted && <span className="turn-diff-reverted-tag">已撤销</span>}
@@ -138,7 +162,7 @@ export default function TurnDiffCard({
         </div>
       </div>
 
-      {!isSingle && (
+      {!isSingle && expanded && (
         <div className="turn-diff-files" role="list">
           {summary.files.map(file => {
             const { dir, name } = splitPath(file.path);

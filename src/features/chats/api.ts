@@ -4,6 +4,7 @@ export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null; session_count?: number }
 export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface PrivateSession { id: string; agent_id: string; name: string; archived: boolean; is_default?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface ProjectSession { id: string; project_id: string; name: string; archived: boolean; is_default?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: string; id: string; role: string; text: string; created_at: string | null }
@@ -217,6 +218,36 @@ export async function deletePrivateSession(agentId: string, id: string) {
   delete messages[id];
   localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
   localStorage.setItem(previewPrivateSessionsKey, JSON.stringify(all));
+}
+const previewProjectSessionsKey = "ai-gent.preview.project-sessions.v1";
+export async function getProjectSessions(projectId: string): Promise<ProjectSession[]> {
+  if (desktop) return invoke<ProjectSession[]>("project_session_list", { projectId });
+  const all = readPreview<Record<string, ProjectSession[]>>(previewProjectSessionsKey, {});
+  return all[projectId] ?? [{ id: projectId, project_id: projectId, name: "默认会话", archived: false, is_default: true, created_at: new Date().toISOString(), preview: null, updated_at: null, status: null }];
+}
+export async function saveProjectSession(projectId: string, name: string, existing?: ProjectSession, archived = existing?.archived ?? false): Promise<ProjectSession> {
+  name = name.trim();
+  if (!name || [...name].length > 40) throw new Error("会话名称请填写 1–40 个字。");
+  if (desktop) return existing ? invoke<ProjectSession>("project_session_update", { projectId, id: existing.id, name, archived }) : invoke<ProjectSession>("project_session_create", { projectId, name });
+  const list = await getProjectSessions(projectId);
+  if (existing && !list.some(s => s.id === existing.id)) throw new Error("会话不属于当前项目。");
+  const session: ProjectSession = existing ? { ...existing, name, archived } : { id: crypto.randomUUID(), project_id: projectId, name, archived: false, is_default: false, created_at: new Date().toISOString(), preview: null, updated_at: null, status: null };
+  const all = readPreview<Record<string, ProjectSession[]>>(previewProjectSessionsKey, {});
+  all[projectId] = existing ? list.map(s => s.id === session.id ? session : s) : [session, ...list];
+  localStorage.setItem(previewProjectSessionsKey, JSON.stringify(all));
+  return session;
+}
+export async function deleteProjectSession(projectId: string, id: string) {
+  if (desktop) return invoke<void>("project_session_delete", { projectId, id });
+  const list = await getProjectSessions(projectId);
+  const target = list.find(s => s.id === id);
+  if (!target) throw new Error("会话不存在或已删除。");
+  const all = readPreview<Record<string, ProjectSession[]>>(previewProjectSessionsKey, {});
+  all[projectId] = target.is_default ? list : list.filter(s => s.id !== id);
+  const messages = readPreview<Record<string, Message[]>>(previewMessagesKey, {});
+  delete messages[id];
+  localStorage.setItem(previewMessagesKey, JSON.stringify(messages));
+  localStorage.setItem(previewProjectSessionsKey, JSON.stringify(all));
 }
 export async function updateGroupMembers(groupId: string, add: string[], remove: string[]) {
   if (desktop) return invoke<Group>("group_members_update", { groupId, add, remove });

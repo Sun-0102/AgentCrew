@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
 import Avatar from "../../components/Avatar";
@@ -15,7 +15,7 @@ import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
 import { skillPrefix, requestedSkills, type Skill } from "./skills";
 import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
-import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type Message, type Probe, type Scope, type Snapshot } from "./api";
+import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
 interface Props {
@@ -28,17 +28,19 @@ interface Props {
   onReasoningEffort?: (value: string) => void;
   onModel: (model: string) => void; onConnect: () => void; onInvite: () => void; onSettings: () => void;
   onRefresh: () => Promise<void>; notify: (text: string) => void;
-  session?: GroupSession | PrivateSession; onGroups?: () => void; onRenameSession?: () => void; onArchiveSession?: () => void; sessionSaving?: boolean;
+  session?: GroupSession | PrivateSession | ProjectSession; onGroups?: () => void; onRenameSession?: () => void; onArchiveSession?: () => void; sessionSaving?: boolean;
   onDeleteSession?: () => void; onGroupUpdated?: (group: Group) => void;
   sidebarControls?: ReactNode;
   onOpenGit?: (path?: string) => void;
 }
 interface Reply { author: string; text: string }
 const drafts = new Map<string, { text: string; files: Attachment[]; reply: Reply | null }>();
-export function discardSessionDraft(session: GroupSession | PrivateSession) {
+export function discardSessionDraft(session: GroupSession | PrivateSession | ProjectSession) {
   const key = "group_id" in session
     ? (session.id === session.group_id ? `group:${session.group_id}` : `group:${session.group_id}:${session.id}`)
-    : (session.is_default ? `private:${session.agent_id}` : `private:${session.agent_id}:${session.id}`);
+    : "project_id" in session
+      ? (session.is_default ? `project:${session.project_id}` : `project:${session.project_id}:${session.id}`)
+      : (session.is_default ? `private:${session.agent_id}` : `private:${session.agent_id}:${session.id}`);
   drafts.delete(key);
   localStorage.removeItem(`ai-gent.draft.${key}`);
 }
@@ -106,7 +108,7 @@ export default function ChatStage(p: Props) {
   const highlight = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const nearBottom = useRef(true);
-  const members = group?.members ?? [agent];
+  const members = useMemo(() => group?.members ?? [agent], [group?.members, agent]);
   const mentionItems = (() => {
     const q = mentionQuery.trim().toLowerCase();
     if (!q) return members;
@@ -135,9 +137,15 @@ export default function ChatStage(p: Props) {
   const recipient = namedTarget;
   const ready = group ? recipients.every(id => members.includes(id) && !!p.collaborationModels[id as string]) : !!probe && (!probe.requires_auth || !!probe.auth) && !!model;
   const userMessageCount = snapshot.messages.filter(m => m.role === "user").length;
-  const pendingMessages = optimistic.filter(item => item.scopeKey === scopeKey && userMessageCount <= item.baselineCount);
-  const visibleMessages = replyBlocks({ ...snapshot, messages: [...snapshot.messages, ...pendingMessages] }, agent);
-  const turnDiffOptions: TurnDiffOption[] = (() => {
+  const pendingMessages = useMemo(
+    () => optimistic.filter(item => item.scopeKey === scopeKey && userMessageCount <= item.baselineCount),
+    [optimistic, scopeKey, userMessageCount],
+  );
+  const visibleMessages = useMemo(
+    () => replyBlocks({ ...snapshot, messages: [...snapshot.messages, ...pendingMessages] }, agent),
+    [snapshot, pendingMessages, agent],
+  );
+  const turnDiffOptions: TurnDiffOption[] = useMemo(() => {
     const withDiff = visibleMessages.filter(m => m.role === "assistant" && m.turnDiff);
     return withDiff.map((m, idx) => ({
       id: m.id,
@@ -147,28 +155,36 @@ export default function ChatStage(p: Props) {
           : `第 ${idx + 1} 轮 (${m.turnDiff!.files.length} 个文件)`,
       summary: m.turnDiff!,
     }));
-  })();
-  const records = snapshot.messages.filter(
-    m => !["user", "assistant", "turn_diff", "task_start", "task_end"].includes(m.role),
+  }, [visibleMessages]);
+  const records = useMemo(
+    () => snapshot.messages.filter(m => !["user", "assistant", "turn_diff", "task_start", "task_end"].includes(m.role)),
+    [snapshot.messages],
   );
-  function openTurnDiff(turnId: string, filePath?: string) {
+  const openTurnDiff = useCallback((turnId: string, filePath?: string) => {
     setPreviewFile(null);
     setDiffTurnId(turnId);
     setDiffFile(filePath ?? null);
     setPanel("diff");
-  }
-  function openFilePreview(filePath: string, line?: number) {
+  }, []);
+  const openFilePreview = useCallback((filePath: string, line?: number) => {
     setPreviewFile({ path: filePath, line });
     setPanel("diff");
-  }
+  }, []);
   const hasMessages = visibleMessages.length > 0;
   const providerWorking = running(snapshot.session?.status);
   const attention = !!task?.members?.some(member => member.error) || !!error || !!snapshot.session?.error || !!probe?.sidebar_warning || !!task && ["blocked", "interrupted"].includes(task.status);
   const stateText = error ? "操作未完成" : task?.status === "cancelling" ? "正在停止" : snapshot.approvals.length ? `${agentName(snapshot.approvals[0]?.agent_id ?? agent)} 等待你批准` : providerWorking ? `${agentName(executingAgent)} ${statusLabels[snapshot.session?.status ?? "running"] ?? "正在处理"}${task?.status === "paused" ? " · 结束后暂停" : ""}` : sending ? "正在发送" : task ? task.status === "running" ? `${agentName(task.current_agent)} 正在处理` : taskLabels[task.status] ?? task.status : snapshot.session ? statusLabels[snapshot.session.status] ?? "就绪" : connecting ? "正在连接" : ready ? "就绪" : "尚未连接";
   useEffect(() => {
     drafts.set(scopeKey, { text, files, reply });
-    try { if (text) localStorage.setItem(`ai-gent.draft.${scopeKey}`, text); else localStorage.removeItem(`ai-gent.draft.${scopeKey}`); }
-    catch { setError("草稿未能保存，请检查本机存储空间。"); }
+    const timer = window.setTimeout(() => {
+      try {
+        if (text) localStorage.setItem(`ai-gent.draft.${scopeKey}`, text);
+        else localStorage.removeItem(`ai-gent.draft.${scopeKey}`);
+      } catch {
+        setError("草稿未能保存，请检查本机存储空间。");
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
   }, [scopeKey, text, files, reply]);
   useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, pendingMessages.length, snapshot.messages.map(m => `${m.id}:${m.text.length}`).join("|")]);
   useEffect(() => {
@@ -374,17 +390,19 @@ export default function ChatStage(p: Props) {
           </div>}
           {mentionsOpen && <div className="mention-menu" id="mention-menu" role="listbox" aria-label="选择要 @ 的成员" ref={mentionMenuRef}><div className="menu-caption">选择要 @ 的成员</div>{mentionItems.map((id, index) => <button type="button" role="option" id={`mention-option-${index}`} aria-selected={index === activeMentionIndex} key={id} disabled={composingBlocked} onMouseEnter={() => setMentionIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}
           <label className="sr-only" htmlFor="chat-input">输入消息</label>
-          <div className="composer-editor">
-            <div className="composer-highlight" ref={highlight} aria-hidden="true">
-              {mentionParts.map((part, index) =>
-                part.agentId ? (
-                  <mark key={index} className={`composer-mention is-${part.provider ?? "default"}`}>{part.text}</mark>
-                ) : (
-                  <span key={index}>{part.text}</span>
-                ),
-              )}
-              {text.endsWith("\n") ? "\u200b" : null}
-            </div>
+          <div className={`composer-editor ${matchedMentions.length > 0 ? "has-highlight" : ""}`}>
+            {matchedMentions.length > 0 && (
+              <div className="composer-highlight" ref={highlight} aria-hidden="true">
+                {mentionParts.map((part, index) =>
+                  part.agentId ? (
+                    <mark key={index} className={`composer-mention is-${part.provider ?? "default"}`}>{part.text}</mark>
+                  ) : (
+                    <span key={index}>{part.text}</span>
+                  ),
+                )}
+                {text.endsWith("\n") ? "\u200b" : null}
+              </div>
+            )}
             <textarea id="chat-input" ref={input} value={text} onChange={editText} onPaste={handlePaste} onScroll={event => { if (highlight.current) { highlight.current.scrollTop = event.currentTarget.scrollTop; highlight.current.scrollLeft = event.currentTarget.scrollLeft; } }} onSelect={event => updateCommands(event.currentTarget.value, event.currentTarget.selectionStart, { fromSelect: true })} placeholder={p.session?.archived ? "恢复会话后可继续讨论" : group ? "在这个会话里继续讨论，输入 / 调用技能，或 @ 指定成员…" : "把想法写下来，输入 / 调用技能，支持粘贴或拖拽图片与文件…"} aria-expanded={skillsOpen} aria-controls={skillsOpen ? "skill-suggestions" : undefined} aria-activedescendant={skillsOpen && skillItems.length ? `skill-option-${Math.min(skillIndex, skillItems.length - 1)}` : undefined} disabled={composingBlocked} maxLength={25000} rows={3} onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;
             if (skillsOpen) {

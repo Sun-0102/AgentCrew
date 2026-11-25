@@ -21,9 +21,9 @@
 .sidebar-expand-btn svg { color: var(--accent); }
 .sidebar-expand-btn:hover { background: #eef2ff; border-color: #a5b4fc; color: var(--accent); box-shadow: 0 2px 6px rgba(79, 70, 229, 0.14); }
 .workspace-collapsed-bar { display: flex; align-items: center; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--surface); flex-shrink: 0; }
-.agent-rail { padding: 17px 5px; gap: 23px; }
+.agent-rail { padding: 10px 5px; gap: 6px; min-height: 0; overflow-y: auto; scrollbar-width: none; }
 .agent-rail > .rail-rule { order: 0; }
-.rail-button { gap: 8px; width: 50px; padding: 8px 0; }
+.rail-button { gap: 4px; width: 50px; padding: 6px 0; flex-shrink: 0; }
 .rail-button.active { color: var(--accent); }
 .hub-workspace { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .group-hub { padding: 48px clamp(26px, 6vw, 110px); flex: 1; background: #ffffff; }

@@ -5,7 +5,7 @@ import SettingsDialog from "./features/chats/SettingsDialog";
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addProject, getAppInfo, listProjects, type AppInfo, type Project } from "./features/projects/api";
-import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getSnapshot, probeAgent, running, saveGroupSession, savePrivateSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
+import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getProjectSessions, getSnapshot, probeAgent, running, saveGroupSession, savePrivateSession, saveProjectSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
 import { applyStreamDeltas, subscribeRealtimeEvents, type CoalescedSync, type StreamDelta } from "./features/chats/events";
 import { discardSessionDraft } from "./features/chats/ChatStage";
 import GroupDialog from "./features/chats/GroupDialog";
@@ -52,6 +52,10 @@ export default function Workbench() {
   const [privateSessionsOwner, setPrivateSessionsOwner] = useState("");
   const [privateSessionsLoading, setPrivateSessionsLoading] = useState(false);
   const privateSessionsRevision = useRef(0);
+  const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
+  const [projectSessionsOwner, setProjectSessionsOwner] = useState("");
+  const [projectSessionsLoading, setProjectSessionsLoading] = useState(false);
+  const projectSessionsRevision = useRef(0);
   const [sessionDialog, setSessionDialog] = useState<"new" | ChatSession | null>(null);
   const [deleteSession, setDeleteSession] = useState<ChatSession | null>(null);
   const [sessionSaving, setSessionSaving] = useState(false);
@@ -60,6 +64,9 @@ export default function Workbench() {
   });
   const [privateSessionSelection, setPrivateSessionSelection] = useState<Record<string, string>>(() => {
     try { const value = JSON.parse(localStorage.getItem("ai-gent.selected-private-sessions.v1") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
+  });
+  const [projectSessionSelection, setProjectSessionSelection] = useState<Record<string, string>>(() => {
+    try { const value = JSON.parse(localStorage.getItem("ai-gent.selected-project-sessions.v1") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
   });
   const [groupTargets, setGroupTargets] = useState<Record<string, string>>({});
   const [selection, setSelection] = useState<Selection>({ kind: "personal" });
@@ -174,7 +181,8 @@ export default function Workbench() {
   const selectedAgent = selection.kind === "agent" ? selection.id : selection.kind === "deepseek" ? "deepseek" : group ? (group.members.includes(groupTargets[group.id] ?? "codex") ? groupTargets[group.id] ?? "codex" : group.members[0]) : hasCodexConnected ? "codex" : connectedAgents[0]?.id ?? "";
   const selectedExists = agents.some(agent => agent.id === selectedAgent);
   const inAgent = mode === "chats" && !groupHub && !group && selection.kind !== "project" && selectedExists;
-  const hasSessions = !usageOpen && !gitOpen && !(groupHub && mode === "chats") && (inGroup || inAgent);
+  const inProject = mode === "projects" && selection.kind === "project" && !!project;
+  const hasSessions = !usageOpen && !gitOpen && !(groupHub && mode === "chats") && (inGroup || inAgent || inProject);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
@@ -215,12 +223,14 @@ export default function Workbench() {
   }, []);
   const agentSessions = privateSessionsOwner === selectedAgent ? privateSessions : [];
   const privateSession = agentSessions.find(s => s.id === privateSessionSelection[selectedAgent]) ?? agentSessions.find(s => !s.archived) ?? agentSessions[0];
-  const activeSession: ChatSession | undefined = inGroup ? session : inAgent ? privateSession : undefined;
+  const currentProjectSessions = projectSessionsOwner === project?.id ? projectSessions : [];
+  const projectSession = currentProjectSessions.find(s => s.id === projectSessionSelection[project?.id ?? ""]) ?? currentProjectSessions.find(s => !s.archived) ?? currentProjectSessions[0];
+  const activeSession: ChatSession | undefined = inGroup ? session : inAgent ? privateSession : inProject ? projectSession : undefined;
   useEffect(() => {
     if (agentsLoaded && selection.kind === "personal" && !hasCodexConnected && selectedAgent) setSelection(selectedAgent === "deepseek" ? {kind:"deepseek"} : {kind:"agent",id:selectedAgent});
   }, [agentsLoaded, hasCodexConnected, selectedAgent, selection.kind]);
-  const scope: Scope = { projectId: selection.kind === "project" ? selection.id : null, groupId: selection.kind === "group" ? session?.id ?? selection.id : null, sessionId: inAgent ? privateSession?.id ?? null : null, agent: selectedAgent };
-  const key = selection.kind === "group" ? session?.id === selection.id ? `group:${selection.id}` : `group:${selection.id}:${session?.id ?? "loading"}` : selection.kind === "project" ? `project:${selection.id}` : inAgent ? (privateSession ? (privateSession.is_default ? `private:${selectedAgent}` : `private:${selectedAgent}:${privateSession.id}`) : `private:${selectedAgent}:loading`) : selection.kind === "agent" ? `agent:${selection.id}` : selection.kind;
+  const scope: Scope = { projectId: selection.kind === "project" ? selection.id : null, groupId: selection.kind === "group" ? session?.id ?? selection.id : null, sessionId: inAgent ? privateSession?.id ?? null : inProject ? projectSession?.id ?? null : null, agent: selectedAgent };
+  const key = selection.kind === "group" ? session?.id === selection.id ? `group:${selection.id}` : `group:${selection.id}:${session?.id ?? "loading"}` : selection.kind === "project" ? (projectSession ? (projectSession.is_default ? `project:${selection.id}` : `project:${selection.id}:${projectSession.id}`) : `project:${selection.id}:loading`) : inAgent ? (privateSession ? (privateSession.is_default ? `private:${selectedAgent}` : `private:${selectedAgent}:${privateSession.id}`) : `private:${selectedAgent}:loading`) : selection.kind === "agent" ? `agent:${selection.id}` : selection.kind;
   const currentKey = useRef(key); currentKey.current = key;
   const pollingKey = useRef(key);
   const visibleSnapshot = pollingKey.current === key ? snapshot : emptySnapshot;
@@ -254,6 +264,11 @@ export default function Workbench() {
     setPrivateSessionSelection(next);
     try { localStorage.setItem("ai-gent.selected-private-sessions.v1", JSON.stringify(next)); } catch { setError("会话选择未能保存，重启后需要重新选择。"); }
   }
+  function selectProjectSession(value: ProjectSession) {
+    const next = { ...projectSessionSelection, [value.project_id]: value.id };
+    setProjectSessionSelection(next);
+    try { localStorage.setItem("ai-gent.selected-project-sessions.v1", JSON.stringify(next)); } catch { setError("会话选择未能保存，重启后需要重新选择。"); }
+  }
   async function archiveSession(target: ChatSession | undefined = activeSession) {
     if (!target || sessionSaving) return;
     setSessionSaving(true);
@@ -264,6 +279,11 @@ export default function Workbench() {
         sessionsRevision.current += 1;
         setSessions(current => current.map(s => s.id === updated.id ? updated : s));
         setGroups(await getGroups()); notify(updated.archived ? "会话已归档，记录仍保留" : "会话已恢复");
+      } else if ("project_id" in target) {
+        const updated = await saveProjectSession(target.project_id, target.name, target, !target.archived);
+        projectSessionsRevision.current += 1;
+        setProjectSessions(current => current.map(s => s.id === updated.id ? updated : s));
+        notify(updated.archived ? "会话已归档，记录仍保留" : "会话已恢复");
       } else {
         const updated = await savePrivateSession(target.agent_id, target.name, target, !target.archived);
         privateSessionsRevision.current += 1;
@@ -283,6 +303,15 @@ export default function Workbench() {
       setSessionSelection(next);
       setGroups(current => current.map(g => g.id === deleted.group_id ? { ...g, session_count: Math.max(0, (g.session_count ?? 1) - (deleted.archived ? 0 : 1)) } : g));
       try { discardSessionDraft(deleted); localStorage.setItem("ai-gent.selected-sessions.v1", JSON.stringify(next)); }
+      catch { setError("会话记录已删除，但本机草稿或会话选择清理失败，请检查浏览器存储。"); }
+    } else if ("project_id" in deleted) {
+      projectSessionsRevision.current += 1;
+      setProjectSessions(current => deleted.is_default ? current.map(s => s.id === deleted.id ? { ...s, preview: null, updated_at: null, status: null } : s) : current.filter(s => s.id !== deleted.id));
+      if (projectSession?.id === deleted.id) setSnapshot(emptySnapshot);
+      const next = { ...projectSessionSelection };
+      if (!deleted.is_default && next[deleted.project_id] === deleted.id) delete next[deleted.project_id];
+      setProjectSessionSelection(next);
+      try { discardSessionDraft(deleted); localStorage.setItem("ai-gent.selected-project-sessions.v1", JSON.stringify(next)); }
       catch { setError("会话记录已删除，但本机草稿或会话选择清理失败，请检查浏览器存储。"); }
     } else {
       privateSessionsRevision.current += 1;
@@ -412,7 +441,22 @@ export default function Workbench() {
     return () => { active = false; };
   }, [inAgent, selectedAgent]);
   useEffect(() => {
-    if (!agentsLoaded || !selectedExists || (inAgent && !privateSession) || (inGroup && !session)) { setSnapshot(emptySnapshot); return; }
+    if (!inProject || !project?.id) { setProjectSessionsOwner(""); setProjectSessions([]); setProjectSessionsLoading(false); return; }
+    const projectId = project.id;
+    let active = true;
+    setProjectSessionsOwner(projectId); setProjectSessions([]); setProjectSessionsLoading(true);
+    const revision = projectSessionsRevision.current;
+    void getProjectSessions(projectId)
+      .then(result => { if (active && revision === projectSessionsRevision.current) setProjectSessions(result); })
+      .catch(cause => { if (active) setError(String(cause)); })
+      .finally(() => { if (active) setProjectSessionsLoading(false); });
+    return () => { active = false; };
+  }, [inProject, project?.id]);
+  useEffect(() => {
+    if (inProject && project && projectSession && projectSessionSelection[project.id] !== projectSession.id) selectProjectSession(projectSession);
+  }, [inProject, project?.id, projectSession?.id]);
+  useEffect(() => {
+    if (!agentsLoaded || !selectedExists || (inAgent && !privateSession) || (inGroup && !session) || (inProject && !projectSession)) { setSnapshot(emptySnapshot); return; }
     let active = true;
     if (pollingKey.current !== key) { setSnapshot(emptySnapshot); pollingKey.current = key; }
     void getSnapshot(scope)
@@ -424,7 +468,7 @@ export default function Workbench() {
       })
       .catch(cause => { if (active) setError(String(cause)); });
     return () => { active = false; };
-  }, [key, scope.agent, agentsLoaded, selectedExists, inAgent, privateSession?.id, inGroup, session?.id]);
+  }, [key, scope.agent, agentsLoaded, selectedExists, inAgent, privateSession?.id, inGroup, session?.id, inProject, projectSession?.id]);
 
   const realtimeRef = useRef<{
     onStream: (deltas: StreamDelta[]) => void;
@@ -442,7 +486,7 @@ export default function Workbench() {
       });
     },
     onSync: batch => {
-      const canFetchSnapshot = agentsLoaded && selectedExists && (!inAgent || !!privateSession) && (!inGroup || !!session);
+      const canFetchSnapshot = agentsLoaded && selectedExists && (!inAgent || !!privateSession) && (!inGroup || !!session) && (!inProject || !!projectSession);
       if (canFetchSnapshot && (batch.resyncAll || batch.scopes.has("snapshot"))) {
         const activeConvId = snapshotConversationId.current;
         const matchesCurrent = batch.resyncAll || batch.conversationIds.size === 0 || !activeConvId || batch.conversationIds.has(activeConvId);
@@ -499,10 +543,11 @@ export default function Workbench() {
   }, []);
   async function refreshCurrent() {
     const selected = key;
-    const [result, list, conversations, privateList] = await Promise.all([getSnapshot(scope), getGroups(), group ? getGroupSessions(group.id) : Promise.resolve(null), inAgent ? getPrivateSessions(selectedAgent) : Promise.resolve(null)]);
+    const [result, list, conversations, privateList, projectList] = await Promise.all([getSnapshot(scope), getGroups(), group ? getGroupSessions(group.id) : Promise.resolve(null), inAgent ? getPrivateSessions(selectedAgent) : Promise.resolve(null), inProject && project ? getProjectSessions(project.id) : Promise.resolve(null)]);
     if (currentKey.current === selected) setSnapshot(result);
     if (currentKey.current === selected && conversations) setSessions(conversations);
     if (currentKey.current === selected && privateList) setPrivateSessions(privateList);
+    if (currentKey.current === selected && projectList) setProjectSessions(projectList);
     setGroups(list); if (selection.kind === "personal") setPrivatePreview(result.messages.filter(m => m.role === "user" || m.role === "assistant").at(-1)?.text ?? "");
   }
   async function probeSingleAgent(target: Agent) {
@@ -582,7 +627,7 @@ export default function Workbench() {
     !usageOpen && !gitOpen && !isHubMode && sidebarLayout.workspaceCollapsed ? "hide-workspace" : "",
     hasSessions && sidebarLayout.sessionsCollapsed ? "hide-sessions" : "",
   ].filter(Boolean).join(" ");
-  const isWorkspaceWaiting = loading || !agentsLoaded || (!selectedExists && (checkingAgents || discovering)) || (inGroup && (sessionsLoading || !session)) || (inAgent && (privateSessionsLoading || !privateSession));
+  const isWorkspaceWaiting = loading || !agentsLoaded || (!selectedExists && (checkingAgents || discovering)) || (inGroup && (sessionsLoading || !session)) || (inAgent && (privateSessionsLoading || !privateSession)) || (inProject && (projectSessionsLoading || !projectSession));
   const showingChat = !isWorkspaceWaiting && selectedExists;
   return <div className={`app-shell ${usageOpen ? "usage-mode" : gitOpen ? "git-mode" : ""}`}>
     <header className="app-topbar"><div className="brand"><img className="brand-mark" src={appIcon} alt="" /><span>AgentCrew<span className="brand-edition">桌面版</span><small>多端协同 · 智能体工作台</small></span></div><nav className="top-nav" aria-label="工作区"><button className={!usageOpen && !gitOpen && mode === "chats" ? "active" : ""} onClick={() => { setUsageOpen(false); setGitOpen(false); setGroupHub(false); setMode("chats"); setTab("chats"); if (selection.kind === "project") setSelection(defaultPrivateSelection()); }}>对话</button><button className={!usageOpen && !gitOpen && mode === "projects" ? "active" : ""} onClick={() => { setUsageOpen(false); setGitOpen(false); setGroupHub(false); setMode("projects"); if (projects[0]) setSelection({ kind: "project", id: projects[0].id }); }}>工作空间</button></nav><div className="topbar-end"><button type="button" className="icon-button" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title={theme === "dark" ? "切换为浅色主题" : "切换为暗黑主题"} aria-label={theme === "dark" ? "切换为浅色主题" : "切换为暗黑主题"}><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button><button type="button" className="quota-pill-btn" onClick={() => { setUsagePopover(p => !p); if (!usagePopover) void refreshUsage(); }} title="查看额度与用量 (⌘U)"><span className="connected-dot" /><span>{quickPillText}</span></button><span className="local-badge"><Icon name="shield" size={14} />本机工作台</span><button className="profile-button" aria-label="工作台设置" onClick={() => setSettings(true)}>我</button>{usagePopover && <QuotaQuickPopover data={usageData} onClose={() => setUsagePopover(false)} onOpenFull={() => { setGitOpen(false); setUsageOpen(true); void refreshUsage(); }} />}</div></header>
@@ -593,9 +638,9 @@ export default function Workbench() {
       {connectedAgents.filter(a => a.id !== "codex" && a.id !== "deepseek" && (rail === "all" || rail === a.id) && a.name.toLowerCase().includes(query.toLowerCase())).map(a => <button className={`conversation-item ${selection.kind === "agent" && selection.id === a.id ? "selected" : ""}`} key={a.id} onClick={() => setSelection({ kind: "agent", id: a.id })}><Avatar agent={a.id}/><span className="conversation-text"><span className="conversation-name"><strong>{a.name}</strong><span className="connected-dot" /></span><small>{a.error ?? a.provider_kind}</small></span></button>)}{rail === "all" && <><div className="list-heading group-list-heading"><span>协作群</span><span>{filteredGroups.length}</span></div>{filteredGroups.map(g => <button className={`conversation-item ${selection.kind === "group" && selection.id === g.id ? "selected" : ""}`} key={g.id} onClick={() => openGroup(g.id)}><Avatar agent="group" /><span className="conversation-text"><span className="conversation-name"><strong title={g.name}>{g.name}</strong><time>{clock(g.updated_at)}</time></span><small>{running(g.status ?? "") ? "Agent 正在处理任务…" : g.preview ?? `${g.members.length} 位 Agent · 你`}</small></span></button>)}{!filteredGroups.length && <p className="no-groups">{query ? "没有找到匹配的群聊" : "让不同的想法，在一个群里碰面。"}</p>}</>}</>}</div>
       <SidebarQuotaCard data={usageData} onClick={() => { setUsageOpen(true); void refreshUsage(); }} />
       <div className="sidebar-footer"><span className={`presence-dot ${desktop ? "connected" : ""}`} /><span>{desktop ? "记录保存在本机" : "浏览器预览"}</span><button className="icon-button" title="数据与连接" aria-label="查看数据与连接" onClick={() => setSettings(true)}><Icon name="shield" size={15} /></button></div>
-    </aside>)}{showSessionSidebar && (inGroup && group ? <SessionSidebar key={group.id} sessions={groupSessions} selected={session} loading={sessionsLoading} saving={sessionSaving} onCollapse={() => toggleSessionsSidebar(true)} onRename={s => setSessionDialog(s)} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectSession} onCreate={() => setSessionDialog("new")} /> : inAgent && <SessionSidebar key={`agent:${selectedAgent}`} sessions={agentSessions} selected={privateSession} loading={privateSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${agentName(selectedAgent)} 会话`} bottomNote="会话独立 · 上下文隔离" onCollapse={() => toggleSessionsSidebar(true)} onRename={s => setSessionDialog(s)} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectPrivateSession} onCreate={() => setSessionDialog("new")} />)}<main className="conversation-workspace">{!showingChat && sidebarControls && <div className="workspace-collapsed-bar">{sidebarControls}</div>}{!desktop && <div className="preview-notice">浏览器预览<span>Agent 执行与项目目录选择请使用桌面版。</span></div>}{error && <div className="global-error" role="alert"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError(null)}><Icon name="close" size={16} /></button></div>}{isWorkspaceWaiting ? <div className="loading-conversation"><span className="small-spinner" />{inGroup || inAgent ? (sessionsLoading || privateSessionsLoading) ? "正在读取会话…" : "请选择或新建会话" : checkingAgents || discovering ? "正在连接本机已安装的 Agent…" : "正在打开你的工作台…"}</div> : !selectedExists ? <div className="conversation-welcome"><div className="welcome-mark"><Icon name="spark" size={37}/></div><h2>还没有已连接的 Agent</h2><p>在设置中自动检测并连接本机已安装的 Agent，或手动添加一位 Agent 后开始对话。</p><div className="pairing-actions"><button className="primary" disabled={discovering} onClick={()=>void discoverLocalAgents(true)}>{discovering ? "正在检测本机 Agent…" : "自动检测并连接"}</button><button className="outline-button" onClick={()=>setPairing(true)}><Icon name="plus" size={16}/>手动添加 Agent</button></div></div> : <ConnectedChat sidebarControls={sidebarControls} onOpenGit={openGitPanel} session={activeSession} onGroups={showGroups} onRenameSession={() => activeSession && setSessionDialog(activeSession)} onArchiveSession={() => archiveSession()} onDeleteSession={() => activeSession && setDeleteSession(activeSession)} onGroupUpdated={updated => setGroups(current => current.map(g => g.id === updated.id ? updated : g))} sessionSaving={sessionSaving} key={key} scope={scope} scopeKey={key} title={title} group={group} project={project} agent={selectedAgent} onAgent={agent => { if (group) setGroupTargets(current => ({ ...current, [group.id]: agent })); }} snapshot={visibleSnapshot} probes={probesByAgent} connectingByAgent={probingByAgent} onConnectAgent={id => void probeById(id, false)} onInvite={() => group && openGroupDialog(group)} onSettings={() => setSettings(true)} onRefresh={refreshCurrent} notify={notify} />}</main></>}</div>
+    </aside>)}{showSessionSidebar && (inGroup && group ? <SessionSidebar key={group.id} sessions={groupSessions} selected={session} loading={sessionsLoading} saving={sessionSaving} onCollapse={() => toggleSessionsSidebar(true)} onRename={s => setSessionDialog(s)} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectSession} onCreate={() => setSessionDialog("new")} /> : inProject && project ? <SessionSidebar key={`project:${project.id}`} sessions={currentProjectSessions} selected={projectSession} loading={projectSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${project.name} 会话`} bottomNote="会话独立 · 项目目录共享" onCollapse={() => toggleSessionsSidebar(true)} onRename={s => setSessionDialog(s)} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectProjectSession} onCreate={() => setSessionDialog("new")} /> : inAgent && <SessionSidebar key={`agent:${selectedAgent}`} sessions={agentSessions} selected={privateSession} loading={privateSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${agentName(selectedAgent)} 会话`} bottomNote="会话独立 · 上下文隔离" onCollapse={() => toggleSessionsSidebar(true)} onRename={s => setSessionDialog(s)} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectPrivateSession} onCreate={() => setSessionDialog("new")} />)}<main className="conversation-workspace">{!showingChat && sidebarControls && <div className="workspace-collapsed-bar">{sidebarControls}</div>}{!desktop && <div className="preview-notice">浏览器预览<span>Agent 执行与项目目录选择请使用桌面版。</span></div>}{error && <div className="global-error" role="alert"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError(null)}><Icon name="close" size={16} /></button></div>}{isWorkspaceWaiting ? <div className="loading-conversation"><span className="small-spinner" />{inGroup || inAgent || inProject ? (sessionsLoading || privateSessionsLoading || projectSessionsLoading) ? "正在读取会话…" : "请选择或新建会话" : checkingAgents || discovering ? "正在连接本机已安装的 Agent…" : "正在打开你的工作台…"}</div> : !selectedExists ? <div className="conversation-welcome"><div className="welcome-mark"><Icon name="spark" size={37}/></div><h2>还没有已连接的 Agent</h2><p>在设置中自动检测并连接本机已安装的 Agent，或手动添加一位 Agent 后开始对话。</p><div className="pairing-actions"><button className="primary" disabled={discovering} onClick={()=>void discoverLocalAgents(true)}>{discovering ? "正在检测本机 Agent…" : "自动检测并连接"}</button><button className="outline-button" onClick={()=>setPairing(true)}><Icon name="plus" size={16}/>手动添加 Agent</button></div></div> : <ConnectedChat sidebarControls={sidebarControls} onOpenGit={openGitPanel} session={activeSession} onGroups={showGroups} onRenameSession={() => activeSession && setSessionDialog(activeSession)} onArchiveSession={() => archiveSession()} onDeleteSession={() => activeSession && setDeleteSession(activeSession)} onGroupUpdated={updated => setGroups(current => current.map(g => g.id === updated.id ? updated : g))} sessionSaving={sessionSaving} key={key} scope={scope} scopeKey={key} title={title} group={group} project={project} agent={selectedAgent} onAgent={agent => { if (group) setGroupTargets(current => ({ ...current, [group.id]: agent })); }} snapshot={visibleSnapshot} probes={probesByAgent} connectingByAgent={probingByAgent} onConnectAgent={id => void probeById(id, false)} onInvite={() => group && openGroupDialog(group)} onSettings={() => setSettings(true)} onRefresh={refreshCurrent} notify={notify} />}</main></>}</div>
     {groupDialog && <GroupDialog initialDelete={groupDialog !== "new" && groupDialogDelete} key={groupDialog === "new" ? "new" : groupDialog.id} existing={groupDialog === "new" ? undefined : groupDialog} projects={projects} onClose={() => setGroupDialog(null)} onDeleted={groupDeleted} onSaved={saved => { setGroups(current => [saved, ...current.filter(g => g.id !== saved.id)]); openGroup(saved.id); setGroupDialog(null); notify(groupDialog === "new" ? `已创建「${saved.name}」` : "群设置已保存"); }} />}
-    {sessionDialog && (group || inAgent) && <SessionDialog key={sessionDialog === "new" ? `${group?.id ?? selectedAgent}:new` : sessionDialog.id} groupId={group?.id} agentId={group ? undefined : selectedAgent} existing={sessionDialog === "new" ? undefined : sessionDialog} onClose={() => setSessionDialog(null)} onSaved={saved => { if ("group_id" in saved) { sessionsRevision.current += 1; setSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectSession(saved); setGroups(current => current.map(g => g.id === saved.group_id ? { ...g, session_count: sessionDialog === "new" ? (g.session_count ?? 1) + 1 : g.session_count } : g)); } else { privateSessionsRevision.current += 1; setPrivateSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectPrivateSession(saved); } setSessionDialog(null); notify(sessionDialog === "new" ? "已创建会话" : "会话名称已更新"); }} />}
+    {sessionDialog && (group || inAgent || (inProject && project)) && <SessionDialog key={sessionDialog === "new" ? `${group?.id ?? (inProject ? project?.id : selectedAgent)}:new` : sessionDialog.id} groupId={group?.id} projectId={inProject ? project?.id : undefined} agentId={group || inProject ? undefined : selectedAgent} existing={sessionDialog === "new" ? undefined : sessionDialog} onClose={() => setSessionDialog(null)} onSaved={saved => { if ("group_id" in saved) { sessionsRevision.current += 1; setSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectSession(saved); setGroups(current => current.map(g => g.id === saved.group_id ? { ...g, session_count: sessionDialog === "new" ? (g.session_count ?? 1) + 1 : g.session_count } : g)); } else if ("project_id" in saved) { projectSessionsRevision.current += 1; setProjectSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectProjectSession(saved); } else { privateSessionsRevision.current += 1; setPrivateSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]); selectPrivateSession(saved); } setSessionDialog(null); notify(sessionDialog === "new" ? "已创建会话" : "会话名称已更新"); }} />}
     {deleteSession && <DeleteSessionDialog session={deleteSession} onClose={() => setDeleteSession(null)} onDeleted={sessionDeleted} />}
     {pairing && <PairingDialog invitation={invitation} onInvitation={setInvitation} onClose={()=>setPairing(false)}/> }
     {settings && (

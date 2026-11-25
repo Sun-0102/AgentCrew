@@ -18,6 +18,7 @@ mod lifecycle;
 mod pairing;
 mod private_sessions;
 mod process;
+mod project_sessions;
 mod providers;
 mod reasoning;
 mod skills;
@@ -139,6 +140,10 @@ pub fn run() {
             commands::private_session_create,
             commands::private_session_update,
             commands::private_session_delete,
+            commands::project_session_list,
+            commands::project_session_create,
+            commands::project_session_update,
+            commands::project_session_delete,
             commands::group_members_update,
             commands::group_task_start,
             commands::group_task_control,

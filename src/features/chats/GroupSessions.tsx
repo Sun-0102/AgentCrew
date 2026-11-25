@@ -3,10 +3,10 @@ import { createPortal } from "react-dom";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
 import Dialog from "../../components/Dialog";
-import { clock, deleteGroupSession, deletePrivateSession, saveGroupSession, savePrivateSession, taskLabels, type Group, type GroupSession, type PrivateSession } from "./api";
+import { clock, deleteGroupSession, deletePrivateSession, deleteProjectSession, saveGroupSession, savePrivateSession, saveProjectSession, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession } from "./api";
 import type { Project } from "../projects/api";
 
-export type ChatSession = GroupSession | PrivateSession;
+export type ChatSession = GroupSession | PrivateSession | ProjectSession;
 
 function time(value: string | null) {
   if (!value) return "";
@@ -17,6 +17,9 @@ function time(value: string | null) {
 function draftKey(session: ChatSession) {
   if ("group_id" in session) {
     return session.id === session.group_id ? `group:${session.group_id}` : `group:${session.group_id}:${session.id}`;
+  }
+  if ("project_id" in session) {
+    return session.is_default ? `project:${session.project_id}` : `project:${session.project_id}:${session.id}`;
   }
   return session.is_default ? `private:${session.agent_id}` : `private:${session.agent_id}:${session.id}`;
 }
@@ -100,11 +103,11 @@ export function DeleteSessionDialog({ session, onClose, onDeleted }: { session: 
     <p className="session-dialog-intro">确定删除「{session.name}」吗？</p>
     <p className="delete-session-description">将永久删除此会话在本应用中的消息、摘要、任务结果和草稿，无法撤销。其他会话保留。项目文件、图片缓存和原厂会话文件不会删除。</p>
     {error && <p className="inline-error" role="alert">{error}</p>}
-    <div className="dialog-footer"><span /><div className="session-dialog-actions"><button className="outline-button" disabled={saving} onClick={onClose}>取消</button><button className="primary danger-button" disabled={saving} onClick={async () => { if (saving) return; setSaving(true); setError(""); try { if ("group_id" in session) await deleteGroupSession(session.group_id, session.id); else await deletePrivateSession(session.agent_id, session.id); onDeleted(session); } catch (cause) { setError(String(cause)); setSaving(false); } }}>{saving ? "正在删除…" : "确认删除"}</button></div></div>
+    <div className="dialog-footer"><span /><div className="session-dialog-actions"><button className="outline-button" disabled={saving} onClick={onClose}>取消</button><button className="primary danger-button" disabled={saving} onClick={async () => { if (saving) return; setSaving(true); setError(""); try { if ("group_id" in session) await deleteGroupSession(session.group_id, session.id); else if ("project_id" in session) await deleteProjectSession(session.project_id, session.id); else await deletePrivateSession(session.agent_id, session.id); onDeleted(session); } catch (cause) { setError(String(cause)); setSaving(false); } }}>{saving ? "正在删除…" : "确认删除"}</button></div></div>
   </Dialog>;
 }
 
-export function SessionDialog({ groupId, agentId, existing, onClose, onSaved }: { groupId?: string; agentId?: string; existing?: ChatSession; onClose: () => void; onSaved: (session: ChatSession) => void }) {
+export function SessionDialog({ groupId, agentId, projectId, existing, onClose, onSaved }: { groupId?: string; agentId?: string; projectId?: string; existing?: ChatSession; onClose: () => void; onSaved: (session: ChatSession) => void }) {
   const [name, setName] = useState(existing?.name ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -112,7 +115,7 @@ export function SessionDialog({ groupId, agentId, existing, onClose, onSaved }: 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   return <Dialog title={existing ? "重命名会话" : "新建会话"} onClose={onClose}>
     <p className="session-dialog-intro">{existing ? "换一个更容易找到的名称，聊天记录保持不变。" : "给这个需求起个名字。新会话从空上下文开始。"}</p>
-    <form onSubmit={async e => { e.preventDefault(); if (saving || !name.trim()) return; setSaving(true); setError(""); try { const saved = groupId ? await saveGroupSession(groupId, name, existing as GroupSession | undefined) : await savePrivateSession(agentId!, name, existing as PrivateSession | undefined); if (mounted.current) onSaved(saved); } catch (cause) { if (mounted.current) setError(String(cause)); } finally { if (mounted.current) setSaving(false); } }}>
+    <form onSubmit={async e => { e.preventDefault(); if (saving || !name.trim()) return; setSaving(true); setError(""); try { const saved = groupId ? await saveGroupSession(groupId, name, existing as GroupSession | undefined) : projectId ? await saveProjectSession(projectId, name, existing as ProjectSession | undefined) : await savePrivateSession(agentId!, name, existing as PrivateSession | undefined); if (mounted.current) onSaved(saved); } catch (cause) { if (mounted.current) setError(String(cause)); } finally { if (mounted.current) setSaving(false); } }}>
       <label className="field-label" htmlFor="session-name">会话名称</label><input id="session-name" className="text-input" autoFocus required maxLength={40} placeholder="例如：登录功能、首页改版" value={name} disabled={saving} onChange={e => setName(e.target.value)} />
       {error && <p className="inline-error" role="alert">{error}</p>}
       <div className="dialog-footer"><span /><div className="session-dialog-actions"><button type="button" className="outline-button" disabled={saving} onClick={onClose}>取消</button><button className="primary" disabled={saving || !name.trim()} type="submit">{saving ? "正在保存…" : existing ? "保存名称" : "创建会话"}</button></div></div>

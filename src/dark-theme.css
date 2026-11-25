@@ -121,6 +121,15 @@
 
 :root[data-theme="dark"] .composer textarea {
   color: #f1f5f9;
+  caret-color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .composer-highlight {
+  color: #f1f5f9;
+}
+
+:root[data-theme="dark"] .composer-editor.has-highlight textarea {
+  color: transparent;
 }
 
 :root[data-theme="dark"] .message-row.incoming .message-bubble {

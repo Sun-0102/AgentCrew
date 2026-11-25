@@ -594,6 +594,49 @@ pub async fn private_session_delete(app: tauri::AppHandle, agent_id: String, id:
 }
 
 #[tauri::command]
+pub async fn project_session_list(app: tauri::AppHandle, project_id: String) -> Result<Value, String> {
+    codex_call(app, move |_, store| {
+        serde_json::to_value(store.project_sessions(&project_id)?).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+pub async fn project_session_create(app: tauri::AppHandle, project_id: String, name: String) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        let value = serde_json::to_value(store.create_project_session(&project_id, &name)?).map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(&project_id);
+        Ok(value)
+    }).await
+}
+
+#[tauri::command]
+pub async fn project_session_update(app: tauri::AppHandle, project_id: String, id: String, name: String, archived: bool) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        let value = serde_json::to_value(store.update_project_session(&project_id, &id, &name, archived)?).map_err(|e| e.to_string())?;
+        crate::events::emit_conversation_sync(&id);
+        Ok(value)
+    }).await
+}
+
+#[tauri::command]
+pub async fn project_session_delete(app: tauri::AppHandle, project_id: String, id: String) -> Result<Value, String> {
+    let handle = app.clone();
+    codex_call(app, move |_, store| {
+        let gate = handle.state::<crate::deepseek::ExecutionGate>();
+        let _guard = gate.0.lock().map_err(|e| e.to_string())?;
+        store.delete_project_session(&project_id, &id)?;
+        crate::events::emit_conversation_sync(&id);
+        Ok(Value::Null)
+    }).await
+}
+
+#[tauri::command]
 pub async fn group_members_update(app: tauri::AppHandle, group_id: String, add: Vec<String>, remove: Vec<String>) -> Result<Value, String> {
     let handle = app.clone();
     codex_call(app, move |_, store| {

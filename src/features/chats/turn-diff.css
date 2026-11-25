@@ -55,12 +55,22 @@
 }
 
 .turn-diff-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 13px;
   font-weight: 600;
   color: #0f172a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.turn-diff-chevron {
+  display: inline-flex;
+  align-items: center;
+  color: #64748b;
+  flex-shrink: 0;
 }
 
 .turn-diff-sub {
