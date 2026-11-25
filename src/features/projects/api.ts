@@ -14,4 +14,6 @@ export interface AppInfo {
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const addProject = (path: string) => invoke<Project>("project_add", { path });
+export const removeProject = (id: string) => invoke<void>("project_remove", { id });
+export const openProjectDirectory = (id: string) => invoke<void>("project_open_directory", { id });
 export const getAppInfo = () => invoke<AppInfo>("app_info");

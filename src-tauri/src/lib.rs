@@ -116,6 +116,8 @@ pub fn run() {
             commands::attachment_read,
             commands::project_list,
             commands::project_add,
+            commands::project_remove,
+            commands::project_open_directory,
             commands::codex_probe,
             commands::codex_send,
             commands::codex_snapshot,

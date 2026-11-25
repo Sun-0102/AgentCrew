@@ -21,7 +21,7 @@ impl Store {
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if matches!(previous, 1..=15) {
+        if matches!(previous, 1..=19) {
             let backup = store
                 .path
                 .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
@@ -53,6 +53,7 @@ impl Store {
             include_str!("../../migrations/017_private_sessions.sql"),
             include_str!("../../migrations/018_usage_records.sql"),
             include_str!("../../migrations/019_claude_code.sql"),
+            include_str!("../../migrations/020_project_removal.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
@@ -83,7 +84,7 @@ impl Store {
         let connection = self.connect()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, primary_root, created_at FROM projects ORDER BY created_at, id",
+                "SELECT id, name, primary_root, created_at FROM projects WHERE removed_at IS NULL ORDER BY created_at, id",
             )
             .map_err(|e| e.to_string())?;
         let rows = statement
@@ -118,7 +119,7 @@ impl Store {
         let connection = self.connect()?;
         connection
             .execute(
-                "INSERT INTO projects (id, name, primary_root) VALUES (?1, ?2, ?3) ON CONFLICT(primary_root) DO NOTHING",
+                "INSERT INTO projects (id, name, primary_root) VALUES (?1, ?2, ?3) ON CONFLICT(primary_root) DO UPDATE SET removed_at=NULL",
                 params![uuid::Uuid::new_v4().to_string(), name, path],
             )
             .map_err(|e| e.to_string())?;
@@ -137,6 +138,17 @@ impl Store {
                 },
             )
             .map_err(|e| e.to_string())
+    }
+
+    pub fn remove_project(&self, id: &str) -> Result<(), String> {
+        let changed = self.connect()?.execute(
+            "UPDATE projects SET removed_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=?1 AND removed_at IS NULL",
+            [id],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("项目不存在或已移除。".into());
+        }
+        Ok(())
     }
 
     pub fn conversation_id(&self, project_id: Option<&str>) -> Result<String, String> {

@@ -96,6 +96,42 @@ pub async fn project_add(path: String, store: State<'_, Store>) -> Result<Projec
         .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn project_remove(id: String, store: State<'_, Store>) -> Result<(), String> {
+    let path = store.path.clone();
+    tauri::async_runtime::spawn_blocking(move || Store { path }.remove_project(&id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn project_open_directory(id: String, store: State<'_, Store>) -> Result<(), String> {
+    let database_path = store.path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = Store { path: database_path };
+        let root: String = store.connect()?.query_row(
+            "SELECT primary_root FROM projects WHERE id=?1 AND removed_at IS NULL",
+            [&id], |row| row.get(0),
+        ).map_err(|e| format!("无法读取项目目录：{e}"))?;
+        let path = std::path::Path::new(&root).canonicalize()
+            .map_err(|e| format!("无法访问项目目录：{e}"))?;
+        if !path.is_dir() {
+            return Err("项目目录不存在。".into());
+        }
+        #[cfg(target_os = "macos")]
+        let status = std::process::Command::new("open").arg(&path).status();
+        #[cfg(target_os = "windows")]
+        let status = std::process::Command::new("explorer.exe").arg(&path).status();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let status = std::process::Command::new("xdg-open").arg(&path).status();
+        let status = status.map_err(|e| format!("无法打开项目目录：{e}"))?;
+        if !status.success() {
+            return Err("无法打开项目目录，请检查系统文件管理器。".into());
+        }
+        Ok(())
+    }).await.map_err(|error| error.to_string())?
+}
+
 async fn codex_call(
     app: tauri::AppHandle,
     action: impl FnOnce(&Runtime, &Store) -> Result<Value, String> + Send + 'static,
