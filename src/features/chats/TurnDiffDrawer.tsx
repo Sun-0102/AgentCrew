@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { File as CodeFile } from "@pierre/diffs/react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Icon from "../../components/Icon";
 import DiffViewer from "../git/DiffViewer";
 import {
@@ -222,30 +225,81 @@ function InlinePatchView({
   );
 }
 
+type PreviewFormat = "markdown" | "html" | null;
+
+function detectPreviewFormat(path?: string | null): PreviewFormat {
+  if (!path) return null;
+  const lower = path.trim().toLowerCase();
+  if (lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".mdx")) {
+    return "markdown";
+  }
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+    return "html";
+  }
+  return null;
+}
+
+function readTheme(): "light" | "dark" {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
 function FileCodePreview({
   file,
   loading,
   error,
   targetLine,
   wrap,
+  mode,
+  format,
 }: {
   file: WorkspaceFileContent | null;
   loading: boolean;
   error: string | null;
   targetLine?: number;
   wrap: boolean;
+  mode: "rendered" | "source";
+  format: PreviewFormat;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [theme, setTheme] = useState<"light" | "dark">(readTheme);
 
   useEffect(() => {
-    if (!file || !targetLine || !containerRef.current) return;
-    const row = containerRef.current.querySelector<HTMLElement>(
-      `[data-line="${targetLine}"]`,
-    );
-    if (row) {
-      row.scrollIntoView({ block: "center", behavior: "smooth" });
-    }
-  }, [file?.path, targetLine]);
+    const observer = new MutationObserver(() => setTheme(readTheme()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  const codeOptions = useMemo(
+    () => ({
+      overflow: wrap ? ("wrap" as const) : ("scroll" as const),
+      themeType: theme,
+      disableFileHeader: true,
+    }),
+    [wrap, theme],
+  );
+
+  const selectedLines = useMemo(
+    () => (targetLine ? { start: targetLine, end: targetLine } : null),
+    [targetLine],
+  );
+
+  const markdownComponents = useMemo<NonNullable<ComponentProps<typeof Markdown>["components"]>>(
+    () => ({
+      table: ({ children }) => (
+        <div className="message-table" role="region" aria-label="文档表格" tabIndex={0}>
+          <table>{children}</table>
+        </div>
+      ),
+      a: ({ node: _node, href, children, ...props }) => (
+        <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+          {children}
+        </a>
+      ),
+    }),
+    [],
+  );
 
   if (loading) {
     return (
@@ -279,33 +333,59 @@ function FileCodePreview({
     );
   }
 
-  const lines = file.contents.split("\n");
+  if (mode === "rendered" && format === "markdown") {
+    return (
+      <div className="file-markdown-preview">
+        {file.truncated && (
+          <div className="git-diff-banner">
+            文件超过 512 KB，已截取前部内容用于快速预览。
+          </div>
+        )}
+        <div className="message-body file-markdown-body">
+          <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            {file.contents}
+          </Markdown>
+        </div>
+      </div>
+    );
+  }
+
+  if (mode === "rendered" && format === "html") {
+    return (
+      <div className="file-html-preview-wrap">
+        {file.truncated && (
+          <div className="git-diff-banner">
+            文件超过 512 KB，已截取前部内容用于快速预览。
+          </div>
+        )}
+        <iframe
+          key={`${file.path}:${file.contents.length}`}
+          className="file-html-preview"
+          title={file.display_path || file.path}
+          srcDoc={file.contents}
+          sandbox="allow-scripts allow-forms allow-modals allow-popups"
+        />
+      </div>
+    );
+  }
+
   return (
-    <div
-      ref={containerRef}
-      className={`file-code-preview ${wrap ? "is-wrap" : "is-scroll"}`}
-    >
+    <div className="git-diff-canvas file-code-highlight-canvas">
       {file.truncated && (
         <div className="git-diff-banner">
           文件超过 512 KB，已截取前部内容用于快速预览。
         </div>
       )}
-      <div className="file-code-lines">
-        {lines.map((lineText, idx) => {
-          const lineNo = idx + 1;
-          const highlighted = targetLine === lineNo;
-          return (
-            <div
-              key={lineNo}
-              data-line={lineNo}
-              className={`file-code-row ${highlighted ? "is-highlighted" : ""}`}
-            >
-              <span className="file-code-ln">{lineNo}</span>
-              <span className="file-code-text">{lineText || " "}</span>
-            </div>
-          );
-        })}
-      </div>
+      <CodeFile
+        key={`${file.path}:${theme}:${wrap ? "wrap" : "scroll"}:${file.contents.length}:${targetLine ?? ""}`}
+        file={{
+          name: file.display_path || file.path,
+          contents: file.contents,
+        }}
+        selectedLines={selectedLines}
+        options={codeOptions}
+        disableWorkerPool
+      />
     </div>
   );
 }
@@ -335,12 +415,28 @@ export default function TurnDiffDrawer({
   const [previewData, setPreviewData] = useState<WorkspaceFileContent | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewViewMode, setPreviewViewMode] = useState<"rendered" | "source">("rendered");
 
   const [drawerWidth, setDrawerWidth] = useState<number | null>(readSavedWidth);
   const [resizing, setResizing] = useState(false);
   const drawerRef = useRef<HTMLElement>(null);
 
   const isPreviewMode = Boolean(previewFile);
+  const previewFormat = useMemo(
+    () => detectPreviewFormat(previewData?.display_path ?? previewFile?.path),
+    [previewData?.display_path, previewFile?.path],
+  );
+  const effectivePreviewMode: "rendered" | "source" =
+    previewFormat ? previewViewMode : "source";
+
+  useEffect(() => {
+    const fmt = detectPreviewFormat(previewFile?.path);
+    if (fmt && !previewFile?.line) {
+      setPreviewViewMode("rendered");
+    } else {
+      setPreviewViewMode("source");
+    }
+  }, [previewFile?.path, previewFile?.line]);
   const isWorkingMode = selectedTurnId === "__working__";
   const activeTurn = useMemo(
     () => turns.find(t => t.id === selectedTurnId) ?? turns.at(-1) ?? null,
@@ -600,6 +696,26 @@ export default function TurnDiffDrawer({
         )}
 
         <div className="turn-diff-drawer-tools">
+          {isPreviewMode && previewFormat && (
+            <div className="turn-diff-seg" role="group" aria-label="文件预览模式">
+              <button
+                type="button"
+                className={effectivePreviewMode === "rendered" ? "active" : ""}
+                onClick={() => setPreviewViewMode("rendered")}
+                title="按原格式预览"
+              >
+                预览
+              </button>
+              <button
+                type="button"
+                className={effectivePreviewMode === "source" ? "active" : ""}
+                onClick={() => setPreviewViewMode("source")}
+                title="查看语法高亮源码"
+              >
+                源码
+              </button>
+            </div>
+          )}
           {!isPreviewMode && (
             <div className="turn-diff-seg" role="group" aria-label="Diff 布局">
               <button
@@ -620,14 +736,16 @@ export default function TurnDiffDrawer({
               </button>
             </div>
           )}
-          <button
-            type="button"
-            className={`turn-diff-tool-btn ${wrapLines ? "active" : ""}`}
-            onClick={() => setWrapLines(w => !w)}
-            title="切换自动换行"
-          >
-            换行
-          </button>
+          {(!isPreviewMode || effectivePreviewMode === "source") && (
+            <button
+              type="button"
+              className={`turn-diff-tool-btn ${wrapLines ? "active" : ""}`}
+              onClick={() => setWrapLines(w => !w)}
+              title="切换自动换行"
+            >
+              换行
+            </button>
+          )}
           <button
             type="button"
             className="icon-button"
@@ -711,6 +829,8 @@ export default function TurnDiffDrawer({
             error={previewError}
             targetLine={previewFile?.line}
             wrap={wrapLines}
+            mode={effectivePreviewMode}
+            format={previewFormat}
           />
         ) : !isWorkingMode && activeTurn && !activeTurn.summary.from_git ? (
           effectiveFileObj?.inline_diff ? (
