@@ -88,6 +88,14 @@ npm run desktop:build
 - **macOS**：使用 [`src-tauri/tauri.macos.conf.json`](src-tauri/tauri.macos.conf.json) 构建 `AgentCrew.app` 与 `.dmg`
 - **Windows**：构建 NSIS 安装包 `.exe`（构建前请先关闭正在运行的 AgentCrew 窗口）
 
+### 在 GitHub 手动构建 Windows 安装包
+
+无需本地 Windows 电脑。打开 [Windows 构建页面](https://github.com/Sun-0102/AgentCrew/actions/workflows/build-windows.yml)，点击 **Run workflow**，选择 `main`，再点击 **Run workflow** 开始构建。
+
+构建成功后，进入该次运行页面，在 **Artifacts** 下载 `AgentCrew-Windows-x64-运行编号`。解压后运行其中的 `.exe`；`SHA256SUMS.txt` 提供安装包校验值。下载文件保留 30 天，也可从运行页面的 Summary 下载链接进入。
+
+该流程只支持手动触发，不会在推送代码时自动运行，也不会自动发布 GitHub Release。安装包尚未配置 Windows 代码签名；分发前需在真实 Windows 环境验证安装、启动和 Agent 连接。
+
 ### 常用研发命令
 
 ```bash
