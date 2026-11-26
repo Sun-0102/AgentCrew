@@ -841,6 +841,8 @@ impl Runtime {
                 };
 
                 *client.turn_id.lock().map_err(|e| e.to_string())? = turn_bg.clone();
+                *client.message_id.lock().map_err(|e| e.to_string())? = None;
+                *client.thought_id.lock().map_err(|e| e.to_string())? = None;
                 store
                     .connect()?
                     .execute(
@@ -937,6 +939,14 @@ impl Runtime {
                 reason.as_deref(),
             );
             client.recording.store(false, Ordering::SeqCst);
+            *client
+                .message_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            *client
+                .thought_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             client
                 .approvals
                 .lock()
