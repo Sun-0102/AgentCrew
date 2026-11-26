@@ -47,6 +47,28 @@ function parseLocalFileLink(href: string, labelText?: string): { path: string; l
   return path ? { path, line: Number.isFinite(line) ? line : undefined } : null;
 }
 
+function parseLocalImagePath(src: string): string | null {
+  const raw = src.trim();
+  if (!raw || raw.startsWith("#") || raw.startsWith("//")) return null;
+  if (localImage.test(raw) || localAttachment.test(raw)) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:\/\//i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) return null;
+
+  let path = raw;
+  if (/^file:\/\//i.test(path)) {
+    path = path.replace(/^file:\/\/(?:localhost)?/i, "");
+    if (/^\/[a-z]:[\\/]/i.test(path)) {
+      path = path.slice(1);
+    }
+  }
+  path = path.split(/[?#]/, 1)[0] ?? "";
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Keep raw path if URI decoding fails
+  }
+  return path.trim() || null;
+}
+
 function PreviewImage({ src, alt, ...props }: ComponentProps<"img">) {
   const [open, setOpen] = useState(false);
   return <><button type="button" className="message-image-thumbnail" aria-label={`放大图片：${alt || "图片"}`} aria-haspopup="dialog" onClick={event => { event.preventDefault(); event.stopPropagation(); setOpen(true); }}>
@@ -67,6 +89,57 @@ function LocalImage({ id, alt, command = "image_read" }: { id: string; alt: stri
   return image?.id === id && image.url
     ? <PreviewImage src={image.url} alt={alt} />
     : <span role="status">{image?.id === id && image.error ? image.error : "正在读取图片…"}</span>;
+}
+
+function LocalFileImage({
+  filePath,
+  workspacePath,
+  alt,
+  onOpenFile,
+  onNotify,
+}: {
+  filePath: string;
+  workspacePath?: string;
+  alt: string;
+  onOpenFile?: (path: string, line?: number) => void;
+  onNotify?: (message: string) => void;
+}) {
+  const cacheKey = `${workspacePath ?? ""}\0${filePath}`;
+  const [image, setImage] = useState<{ key: string; url?: string; error?: string }>();
+  useEffect(() => {
+    if (!desktop) {
+      setImage({ key: cacheKey, error: "仅桌面版支持加载本地图片" });
+      return;
+    }
+    let active = true;
+    invoke<string>("local_image_read", {
+      filePath,
+      workspacePath: workspacePath ?? null,
+    }).then(
+      url => { if (active) setImage({ key: cacheKey, url }); },
+      cause => {
+        const detail = String(cause).replace(/^Error:\s*/, "").trim();
+        if (active) setImage({ key: cacheKey, error: detail || "图片读取失败" });
+      },
+    );
+    return () => { active = false; };
+  }, [cacheKey, filePath, workspacePath]);
+
+  if (image?.key === cacheKey && image.url) {
+    return <PreviewImage src={image.url} alt={alt} />;
+  }
+  if (image?.key === cacheKey && image.error) {
+    const fileName = filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+    return (
+      <span className="message-image-fallback" role="status" title={`${filePath}：${image.error}`}>
+        <span>{alt || fileName}（{image.error}）</span>
+        <LocalFileLink filePath={filePath} workspacePath={workspacePath} onOpenFile={onOpenFile} onNotify={onNotify}>
+          {fileName}
+        </LocalFileLink>
+      </span>
+    );
+  }
+  return <span className="message-image-status" role="status">正在读取图片…</span>;
 }
 
 interface DispatchItem {
@@ -256,13 +329,23 @@ export default memo(function MessageBody({
         if (imageId) return <LocalImage id={imageId} alt={alt ?? "生成的图片"} command="image_read" />;
         const attachmentId = src?.match(localAttachment)?.[1];
         if (attachmentId) return <LocalImage id={attachmentId} alt={alt ?? "图片附件"} command="attachment_read" />;
+        const localFilePath = src ? parseLocalImagePath(src) : null;
+        if (localFilePath) {
+          return <LocalFileImage filePath={localFilePath} workspacePath={workspacePath} alt={alt ?? "本地图片"} onOpenFile={onOpenFile} onNotify={onNotify} />;
+        }
         return src ? <PreviewImage {...props} src={src} alt={alt} /> : <span>{alt ?? "图片不可用"}</span>;
       },
     }),
     [onOpenFile, workspacePath, onNotify],
   );
   return <div className="message-body" onCopy={handleCopy}><Markdown remarkPlugins={[remarkGfm, [remarkSkills, { source: text }], [remarkMentions, { agents: mentionAgents, source: text }]]} urlTransform={(url, key) => {
-    if (key === "src" && (localImage.test(url) || localAttachment.test(url) || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url))) {
+    if (key === "src" && (
+      localImage.test(url)
+      || localAttachment.test(url)
+      || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url)
+      || /^file:\/\//i.test(url)
+      || /^[a-z]:[\\/]/i.test(url)
+    )) {
       return url;
     }
     if (key === "href" && url.startsWith("file://")) {

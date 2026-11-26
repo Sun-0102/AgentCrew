@@ -179,6 +179,7 @@ pub fn run() {
             git::git_turn_file_diff,
             git::git_turn_revert,
             local_files::local_file_action,
+            local_files::local_image_read,
             git::workspace_read_file
         ])
         .build(tauri::generate_context!())

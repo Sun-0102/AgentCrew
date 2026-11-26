@@ -33,6 +33,20 @@ test("resolves local image references separately and rejects paths and link prot
   assert.doesNotMatch(render("![图片](ai-gent-image:../../auth.json)"), /正在读取图片|src="ai-gent-image:/);
 });
 
+test("loads local workspace, absolute, file:// and Windows paths through local image reader", () => {
+  for (const src of [
+    "direction-a-login.png",
+    "./previews/workbench.png",
+    "/Users/demo/project/detail.png",
+    "file:///Users/demo/project/detail%20view.png",
+    "C:/Users/demo/project/detail.png",
+  ]) {
+    const html = render(`![效果图](${src})`);
+    assert.match(html, /正在读取图片/, src);
+    assert.doesNotMatch(html, /<img\b/, src);
+  }
+});
+
 test("renders the review table with inline code and aligned cells", () => {
   const html = render("核对结论：实现符合要求\n\n| 要求 | 结果 | 依据 |\n| --- | :---: | --- |\n| 初始显示 0 | ✅ | 第 62 行 `<output>` 内容为 0 |\n| 加一 | ✅ | `update(count + 1)` |");
   assert.match(html, /class="message-table"[^>]*tabindex="0"/);

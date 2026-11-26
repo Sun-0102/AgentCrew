@@ -330,6 +330,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .message-image-thumbnail { display: inline-flex; max-width: min(240px, 100%); padding: 0; border: 0; border-radius: 8px; overflow: hidden; background: transparent; cursor: zoom-in; vertical-align: top; line-height: 0; }
 .message-image-thumbnail img { display: block; min-width: 0; max-height: 240px; object-fit: contain; }
 .message-image-thumbnail:focus-visible { outline: 2px solid #4f46e5; outline-offset: 3px; }
+.message-image-status, .message-image-fallback { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; border: 1px solid #e2e8f0; background: #f8fafc; color: #64748b; font-size: 12px; line-height: 1.4; }
 .dialog:has(> .image-preview) { width: fit-content; max-width: calc(100vw - 32px); padding: 16px; }
 .dialog:has(> .image-preview) .dialog-heading { margin-bottom: 12px; align-items: center; }
 .dialog:has(> .image-preview) h2 { margin: 0; font-size: 16px; }
