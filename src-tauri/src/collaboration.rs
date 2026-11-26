@@ -215,17 +215,6 @@ pub fn manual_send(store: &Store, model: &str, text: &str) -> Result<(), String>
     if model.is_empty() || text.trim().is_empty() || text.len() > 100_000 {
         return Err("请先选择模型，并填写有效长度的消息。".into());
     }
-    let busy: bool = store
-        .connect()?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM group_tasks WHERE status IN ('running','cancelling'))",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if busy {
-        return Err("群内正在执行，请先暂停或停止后再执行私聊任务。".into());
-    }
     Ok(())
 }
 
@@ -330,21 +319,12 @@ pub fn start_instances(
     {
         return Err("正在停止，请等待进程清理完成后发送。".into());
     }
-    if !worker_exists {
-        deepseek::ensure_idle(store)?;
-    }
     let id = continuing
         .map(|task| task.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let root = store.conversation_root(group)?;
     let mut connection = store.connect()?;
     let tx = connection.transaction().map_err(|e| e.to_string())?;
-    let other_active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM group_tasks WHERE id!=?1 AND status IN ('running','paused','cancelling'))", [&id], |r| r.get(0)).map_err(|e|e.to_string())?;
-    if other_active {
-        return Err(
-            "其他会话正在执行或暂停中，请先完成或停止该会话的任务。切换会话不会停止任务。".into(),
-        );
-    }
     if continuing.is_none() {
         tx.execute("INSERT INTO group_tasks(id,conversation_id,objective,status,current_agent,codex_model,deepseek_model,pending_prompt,max_turns,workspace_path) VALUES(?1,?2,?3,'running',?4,?5,?6,'',0,?7)", params![id,group,text,recipients[0],codex_model,deepseek_model,root]).map_err(|e|e.to_string())?;
     }
@@ -1383,17 +1363,12 @@ pub fn control(
         {
             let recipient = review.strip_prefix("review_").ok_or("复核目标无效")?;
             store.validate_group_target(group, recipient)?;
-            deepseek::ensure_idle(store)?;
             let model = model_for(store, &current.id, recipient)?;
             if model.is_empty() {
                 return Err("该 Agent 尚未选择模型，请先在群内向它发送消息。".into());
             }
             let mut connection = store.connect()?;
             let tx = connection.transaction().map_err(|e| e.to_string())?;
-            let other_active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM group_tasks WHERE status IN ('running','paused','cancelling'))", [], |r| r.get(0)).map_err(|e|e.to_string())?;
-            if other_active {
-                return Err("请先结束其他群的执行或暂停任务。".into());
-            }
             let message = uuid::Uuid::new_v4().to_string();
             let other = if recipient == "codex" {
                 "DeepSeek"

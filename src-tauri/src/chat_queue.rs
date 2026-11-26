@@ -428,9 +428,6 @@ pub fn tick(app: &tauri::AppHandle) {
             let Ok(guard) = gate.0.try_lock() else {
                 continue;
             };
-            if crate::deepseek::ensure_idle(&store).is_err() {
-                continue;
-            }
             Some(guard)
         } else {
             None

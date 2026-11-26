@@ -852,13 +852,17 @@ impl Runtime {
         } else {
             session(store, conversation_id)?
         };
-        let any_running: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",[],|row|row.get(0)).map_err(|e|e.to_string())?;
-        if any_running {
-            return Err("当前已有会话执行中。请先等待完成或返回该会话取消。".into());
-        }
-        if existing
-            .as_ref()
-            .is_some_and(|s| active(s["status"].as_str().unwrap_or("")))
+        let current_running: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if current_running
+            || existing
+                .as_ref()
+                .is_some_and(|s| active(s["status"].as_str().unwrap_or("")))
         {
             return Err("当前会话仍在执行，请等待或取消。".into());
         }

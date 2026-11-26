@@ -204,7 +204,6 @@ pub async fn codex_send(
                 &admission, store, id, "codex", &model, &other, &text,
             );
         }
-        crate::deepseek::ensure_idle(store)?;
         crate::collaboration::manual_send(store, &model, &text)?;
         runtime.send(
             store,
@@ -289,7 +288,6 @@ pub async fn deepseek_send(
             };
             crate::collaboration::start(&admission, store, &id, "deepseek", &other, &model, &text)
         } else {
-            crate::deepseek::ensure_idle(store)?;
             crate::collaboration::manual_send(store, &model, &text)?;
             runtime.send(store, &model, &text)
         }

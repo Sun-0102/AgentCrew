@@ -18,7 +18,7 @@ const ACTIVE: &str = "('starting','running','waiting_approval','cancel_requested
 
 #[derive(Default)]
 pub struct Runtime {
-    client: Arc<Mutex<Option<Arc<Client>>>>,
+    clients: Arc<Mutex<HashMap<String, Arc<Client>>>>,
     operation: Arc<Mutex<()>>,
     cached_probe: Mutex<Option<Value>>,
 }
@@ -707,13 +707,13 @@ impl Runtime {
         let busy: bool = store
             .connect()?
             .query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM gemini_sessions WHERE status IN {ACTIVE})"),
-                [],
+                &format!("SELECT EXISTS(SELECT 1 FROM gemini_sessions WHERE conversation_id=?1 AND status IN {ACTIVE})"),
+                [conversation],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
         if busy {
-            return Err("Gemini 已有任务正在执行，请等待或取消。".into());
+            return Err("当前 Gemini 会话正在执行，请等待或取消。".into());
         }
         let root = PathBuf::from(store.conversation_root(conversation)?)
             .canonicalize()
@@ -747,7 +747,7 @@ impl Runtime {
         crate::events::emit_conversation_sync(&logical_cid);
         drop(_operation);
 
-        let client_slot = self.client.clone();
+        let client_slots = self.clients.clone();
         let operation_lock = self.operation.clone();
         let db_path = store.path.clone();
         let conversation_owned = conversation.to_owned();
@@ -772,7 +772,11 @@ impl Runtime {
 
             let launch = (|| -> Result<(Arc<Client>, String, mpsc::Receiver<Reply>), String> {
                 // Reuse the live ACP process when workspace and conversation match.
-                let existing_client = client_slot.lock().map_err(|e| e.to_string())?.clone();
+                let existing_client = client_slots
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .get(&conversation_owned)
+                    .cloned();
                 let reusable = existing_client.filter(|c| {
                     c.healthy.load(Ordering::SeqCst)
                         && c.root == root_owned
@@ -799,7 +803,11 @@ impl Runtime {
                     }
                     (client, id)
                 } else {
-                    if let Some(old) = client_slot.lock().map_err(|e| e.to_string())?.take() {
+                    if let Some(old) = client_slots
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .remove(&conversation_owned)
+                    {
                         let _ = old.stop();
                     }
                     let previous_id = if role_owned == "assignment" {
@@ -859,7 +867,10 @@ impl Runtime {
                     .lock()
                     .map_err(|e| e.to_string())?
                     .insert(request_id, send);
-                *client_slot.lock().map_err(|e| e.to_string())? = Some(client.clone());
+                client_slots
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(conversation_owned.clone(), client.clone());
                 let mut prompt_blocks = vec![json!({"type":"text","text":text_owned})];
                 for attachment_id in crate::attachments::extract_ids(&text_owned) {
                     if let Ok((mime, data)) = crate::attachments::read_base64(&store, &attachment_id) {
@@ -954,23 +965,31 @@ impl Runtime {
                 .clear();
             if status != "completed" {
                 let _ = client.stop();
+                if let Ok(mut map) = client_slots.lock() {
+                    if map
+                        .get(&conversation_owned)
+                        .is_some_and(|current| Arc::ptr_eq(current, &client))
+                    {
+                        map.remove(&conversation_owned);
+                    }
+                }
             }
         });
         Ok(json!({"turn_id": turn, "status": "starting"}))
     }
     pub fn approvals(&self, conversation: &str) -> Result<Vec<Value>, String> {
-        let slot = self.client.lock().map_err(|e| e.to_string())?;
-        let Some(client) = slot.as_ref().filter(|c| c.conversation == conversation) else {
+        let slots = self.clients.lock().map_err(|e| e.to_string())?;
+        let Some(client) = slots.get(conversation) else {
             return Ok(Vec::new());
         };
         let requests = client.approvals.lock().map_err(|e| e.to_string())?;
         Ok(requests.iter().map(|(id,request)|json!({"id":id,"method":"session/request_permission","command":request["params"]["toolCall"]["title"],"reason":serde_json::to_string(&request["params"]["toolCall"]).unwrap_or_default(),"cwd":null})).collect())
     }
     pub fn approve(&self, store: &Store, conversation: &str, id: &str, allow: bool) -> Reply {
-        let slot = self.client.lock().map_err(|e| e.to_string())?;
-        let client = slot
-            .as_ref()
-            .filter(|c| c.conversation == conversation && c.recording.load(Ordering::SeqCst))
+        let slots = self.clients.lock().map_err(|e| e.to_string())?;
+        let client = slots
+            .get(conversation)
+            .filter(|c| c.recording.load(Ordering::SeqCst))
             .ok_or("Gemini 审批已过期。")?;
         let mut requests = client.approvals.lock().map_err(|e| e.to_string())?;
         let request = requests.get(id).ok_or("Gemini 审批不存在或已处理。")?;
@@ -999,13 +1018,12 @@ impl Runtime {
     }
     pub fn cancel(&self, store: &Store, conversation: &str) -> Reply {
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
-        let slot = self.client.lock().map_err(|e| e.to_string())?;
-        let client = slot
-            .as_ref()
-            .filter(|c| c.conversation == conversation)
+        let slots = self.clients.lock().map_err(|e| e.to_string())?;
+        let client = slots
+            .get(conversation)
             .cloned()
             .ok_or("Gemini 当前会话进程已断开；不能确认已取消。")?;
-        drop(slot);
+        drop(slots);
         let turn = client.turn_id.lock().map_err(|e| e.to_string())?.clone();
         if !session(store, conversation)?["status"]
             .as_str()
@@ -1027,6 +1045,14 @@ impl Runtime {
         }
         let terminal = session(store, conversation)?["status"].clone();
         client.stop()?;
+        if let Ok(mut map) = self.clients.lock() {
+            if map
+                .get(conversation)
+                .is_some_and(|current| Arc::ptr_eq(current, &client))
+            {
+                map.remove(conversation);
+            }
+        }
         if terminal == "cancelled" {
             Ok(json!({"cancelled":true}))
         } else if terminal == "completed" {
@@ -1036,8 +1062,8 @@ impl Runtime {
         }
     }
     pub fn shutdown(&self) {
-        if let Ok(mut slot) = self.client.lock() {
-            if let Some(client) = slot.take() {
+        if let Ok(mut slots) = self.clients.lock() {
+            for (_, client) in slots.drain() {
                 let _ = client.stop();
             }
         }

@@ -222,9 +222,6 @@ pub async fn agent_send(
             )?;
             return Ok(json!({"status": "queued", "queued_item": item}));
         }
-        if kind == "deepseek" {
-            crate::deepseek::ensure_idle(&store)?;
-        }
         let runtime = agents::binding(&store, &agent, &id)?;
         crate::reasoning::save(&store, &runtime, &kind, &model, reasoning_effort.as_deref())?;
         if kind == "codex" {

@@ -21,7 +21,7 @@ const RUNTIME_PATCH: &str = "- id: session-log-deepseek\n  disabled: true\n- id:
 
 #[derive(Default)]
 pub struct Runtime {
-    client: Arc<Mutex<Option<Arc<Client>>>>,
+    clients: Arc<Mutex<HashMap<String, Arc<Client>>>>,
     operation: Arc<Mutex<()>>,
 }
 
@@ -602,14 +602,16 @@ impl Runtime {
         if text.trim().is_empty() || text.len() > 100000 {
             return Err("消息为空或过长。".into());
         }
-        // Group assignments have one slot per provider; private sends retain global admission.
-        if role == "assignment" {
-            let busy: bool = store.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM deepseek_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-            if busy {
-                return Err("DeepSeek 已有任务正在执行。".into());
-            }
-        } else {
-            ensure_idle(store)?;
+        let busy: bool = store
+            .connect()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deepseek_sessions WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",
+                [conversation],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if busy {
+            return Err("当前 DeepSeek 会话正在执行，请等待或取消。".into());
         }
         let install = Installation::find()?;
         let models = install.models(store)?;
@@ -687,7 +689,7 @@ impl Runtime {
         crate::events::emit_conversation_sync(group_conversation);
         drop(_op);
 
-        let client_slot = self.client.clone();
+        let client_slots = self.clients.clone();
         let operation_lock = self.operation.clone();
         let db_path = store.path.clone();
         let conversation_owned = conversation.to_owned();
@@ -709,7 +711,7 @@ impl Runtime {
             }
             crate::git::begin_turn_snapshot(&conversation_owned, "deepseek", &workspace_owned);
             let launch = (|| -> Result<Arc<Client>, String> {
-                if let Some(old) = client_slot.lock().unwrap().take() {
+                if let Some(old) = client_slots.lock().unwrap().remove(&conversation_owned) {
                     let _ = old.request("shutdown", json!({}), Duration::from_secs(5));
                     old.stop()?;
                 }
@@ -756,7 +758,10 @@ impl Runtime {
                         params![thread_bg],
                     )
                     .map_err(|e| e.to_string())?;
-                *client_slot.lock().unwrap() = Some(client.clone());
+                client_slots
+                    .lock()
+                    .unwrap()
+                    .insert(conversation_owned.clone(), client.clone());
                 if let Err(error) = client.request(
                     "session/prompt",
                     json!({"sessionId":thread_bg,"contentBlocks":[{"type":"text","text":prompt}]}),
@@ -807,14 +812,14 @@ impl Runtime {
         ) {
             return Err("当前没有正在执行的 DeepSeek 任务。".into());
         }
-        let mut slot = self.client.lock().map_err(|e| e.to_string())?;
-        if !slot.as_ref().is_some_and(|client| {
+        let mut slots = self.clients.lock().map_err(|e| e.to_string())?;
+        if !slots.get(conversation).is_some_and(|client| {
             client.conversation == conversation && current["thread_id"] == client.thread
         }) {
             return Err("当前会话的 DeepSeek 进程已断开，请核对执行记录。".into());
         }
-        let client = slot.take().ok_or("DeepSeek 进程已断开")?;
-        drop(slot);
+        let client = slots.remove(conversation).ok_or("DeepSeek 进程已断开")?;
+        drop(slots);
         set_status(store, &client.thread, "stopping", None)?;
         // No interrupt RPC in the pinned SDK. Stop our complete process group and confirm exit.
         match client.stop() {
@@ -829,8 +834,8 @@ impl Runtime {
         }
     }
     pub fn shutdown(&self) {
-        if let Ok(mut slot) = self.client.lock() {
-            if let Some(client) = slot.take() {
+        if let Ok(mut slots) = self.clients.lock() {
+            for (_, client) in slots.drain() {
                 let _ = client.request("shutdown", json!({}), Duration::from_secs(2));
                 let _ = client.stop();
             }
