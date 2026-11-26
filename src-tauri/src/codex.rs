@@ -866,12 +866,15 @@ impl Runtime {
         {
             return Err("当前会话仍在执行，请等待或取消。".into());
         }
-        let existing_for_resume = existing.filter(|s| !s["thread_id"].as_str().unwrap_or("").is_empty());
+        let existing_for_resume = existing.filter(|s| {
+            let id = s["thread_id"].as_str().unwrap_or("");
+            !id.is_empty() && !id.starts_with("pending:")
+        });
         let placeholder_thread = existing_for_resume
             .as_ref()
             .and_then(|s| s["thread_id"].as_str())
-            .unwrap_or("")
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("pending:{}", uuid::Uuid::new_v4()));
         let item_id = uuid::Uuid::new_v4().to_string();
         let transaction = connection
             .unchecked_transaction()

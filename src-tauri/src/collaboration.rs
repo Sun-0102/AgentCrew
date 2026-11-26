@@ -563,7 +563,9 @@ fn tick_member(
 ) -> Result<(), String> {
     if current.status == "running" || current.thread_id.is_some() {
         let session = snapshot(current)?;
-        let session_thread = session["thread_id"].as_str().filter(|id| !id.is_empty());
+        let session_thread = session["thread_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && !id.starts_with("pending:"));
         let session_turn = session["turn_id"].as_str().filter(|id| !id.is_empty());
         if current.thread_id.is_none() {
             if let Some(thread) = session_thread {
@@ -636,10 +638,18 @@ fn tick_member(
         }
         current = member_task(store, &current.id, &current.current_agent)?;
     }
+    let runtime_cid =
+        crate::agents::binding(store, &current.current_agent, &current.conversation_id)?;
     let connection = store.connect()?;
     let table =
         crate::agents::session_table(&crate::agents::provider(store, &current.current_agent)?)?;
-    let busy: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping'))"),[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let busy: bool = connection
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE conversation_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))"),
+            [&runtime_cid],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     if busy {
         return Ok(());
     }
@@ -701,7 +711,9 @@ fn tick_member(
         return Err(error);
     }
     let session = snapshot(&current)?;
-    let thread = session["thread_id"].as_str().filter(|id| !id.is_empty());
+    let thread = session["thread_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && !id.starts_with("pending:"));
     let turn = session["turn_id"].as_str().filter(|id| !id.is_empty());
     if thread.is_none() && !session["status"].as_str().is_some_and(codex::active) {
         return Err("执行未返回会话标识".into());

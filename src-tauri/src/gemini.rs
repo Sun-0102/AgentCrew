@@ -726,7 +726,7 @@ impl Runtime {
         } else {
             previous["thread_id"]
                 .as_str()
-                .filter(|id| !id.is_empty())
+                .filter(|id| !id.is_empty() && !id.starts_with("pending:"))
                 .map(str::to_owned)
         };
         if existing_thread.is_some() && previous["workspace_path"] != root {
@@ -734,7 +734,9 @@ impl Runtime {
         }
 
         let turn = uuid::Uuid::new_v4().to_string();
-        let placeholder_thread = existing_thread.clone().unwrap_or_default();
+        let placeholder_thread = existing_thread
+            .clone()
+            .unwrap_or_else(|| format!("pending:{turn}"));
         let mut connection = store.connect()?;
         let logical_cid = logical_conversation(&connection, conversation);
         let tx = connection

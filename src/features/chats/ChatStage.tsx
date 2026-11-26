@@ -463,7 +463,9 @@ export default function ChatStage(p: Props) {
       setText(current => current || draftText);
       setFiles(current => current.length ? current : draftFiles);
       setReply(current => current ?? draftReply);
-      setError(String(cause));
+      const message = String(cause).replace(/^Error:\s*/, "");
+      setError(message);
+      notify(`发送失败：${message}`);
     } finally { setSending(false); }
   }
   async function action(command: string, args: Record<string, unknown> = {}, reportFailure = false) {

@@ -56,6 +56,7 @@ impl Store {
             include_str!("../../migrations/020_project_removal.sql"),
             include_str!("../../migrations/021_project_sessions.sql"),
             include_str!("../../migrations/022_single_chat_queue.sql"),
+            include_str!("../../migrations/023_parallel_group_tasks.sql"),
         ];
         if version > migrations.len() as u32 {
             return Err(format!(
