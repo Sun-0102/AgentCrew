@@ -116,22 +116,26 @@ const MAX_HIGHLIGHT_CHARS = 80_000;
 const MAX_CACHE_ENTRIES = 200;
 
 let highlighterPromise: Promise<HighlighterCore> | null = null;
+let highlighterInstance: HighlighterCore | null = null;
 const loadedLangs = new Set<string>();
 const pendingLangLoads = new Map<string, Promise<void>>();
 const htmlCache = new Map<string, string>();
 
 async function getHighlighter(): Promise<HighlighterCore> {
+  if (highlighterInstance) return highlighterInstance;
   if (!highlighterPromise) {
     highlighterPromise = (async () => {
       const [lightTheme, darkTheme] = await Promise.all([
         import("shiki/themes/github-light.mjs"),
         import("shiki/themes/github-dark.mjs"),
       ]);
-      return createHighlighterCore({
+      const instance = await createHighlighterCore({
         themes: [lightTheme.default, darkTheme.default],
         langs: [],
         engine: createJavaScriptRegexEngine({ forgiving: true }),
       });
+      highlighterInstance = instance;
+      return instance;
     })();
   }
   return highlighterPromise;
@@ -163,7 +167,19 @@ async function ensureLanguageLoaded(highlighter: HighlighterCore, lang: string):
   return task;
 }
 
-export async function highlightCode(code: string, language?: string): Promise<string | null> {
+function storeCachedHtml(cacheKey: string, html: string): void {
+  if (htmlCache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = htmlCache.keys().next().value;
+    if (oldestKey !== undefined) htmlCache.delete(oldestKey);
+  }
+  htmlCache.set(cacheKey, html);
+}
+
+/**
+ * Synchronously returns highlighted HTML when cached or when the language
+ * grammar is already loaded in memory, avoiding async DOM swaps during streaming.
+ */
+export function highlightCodeSync(code: string, language?: string): string | null {
   if (!code || code.length > MAX_HIGHLIGHT_CHARS) return null;
   const canonicalLang = resolveHighlightLanguage(language);
   if (!canonicalLang) return null;
@@ -172,10 +188,40 @@ export async function highlightCode(code: string, language?: string): Promise<st
   const cached = htmlCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
+  if (!highlighterInstance || !loadedLangs.has(canonicalLang)) return null;
+
+  try {
+    const html = highlighterInstance.codeToHtml(code, {
+      lang: canonicalLang,
+      themes: {
+        light: "github-light",
+        dark: "github-dark",
+      },
+      defaultColor: false,
+    });
+    storeCachedHtml(cacheKey, html);
+    return html;
+  } catch {
+    return null;
+  }
+}
+
+export async function highlightCode(code: string, language?: string): Promise<string | null> {
+  if (!code || code.length > MAX_HIGHLIGHT_CHARS) return null;
+  const syncResult = highlightCodeSync(code, language);
+  if (syncResult !== null) return syncResult;
+
+  const canonicalLang = resolveHighlightLanguage(language);
+  if (!canonicalLang) return null;
+
+  const cacheKey = `${canonicalLang}\0${code}`;
   try {
     const highlighter = await getHighlighter();
     await ensureLanguageLoaded(highlighter, canonicalLang);
     if (!loadedLangs.has(canonicalLang)) return null;
+
+    const cached = htmlCache.get(cacheKey);
+    if (cached !== undefined) return cached;
 
     const html = highlighter.codeToHtml(code, {
       lang: canonicalLang,
@@ -186,11 +232,7 @@ export async function highlightCode(code: string, language?: string): Promise<st
       defaultColor: false,
     });
 
-    if (htmlCache.size >= MAX_CACHE_ENTRIES) {
-      const oldestKey = htmlCache.keys().next().value;
-      if (oldestKey !== undefined) htmlCache.delete(oldestKey);
-    }
-    htmlCache.set(cacheKey, html);
+    storeCachedHtml(cacheKey, html);
     return html;
   } catch {
     return null;

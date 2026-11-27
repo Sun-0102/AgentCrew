@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { desktop, type Message, type Snapshot } from "./api";
+import { desktop, running, type Message, type Snapshot } from "./api";
 
 export const STREAM_EVENT = "agentcrew:stream";
 export const SYNC_EVENT = "agentcrew:sync";
@@ -92,6 +92,74 @@ export function applyStreamDeltas(snapshot: Snapshot, deltas: StreamDelta[]): Sn
   }
 
   return messages ? { ...snapshot, messages } : snapshot;
+}
+
+const STREAMABLE_ROLES = new Set(["assistant", "thinking", "tool"]);
+
+/**
+ * Prevents an asynchronous `getSnapshot` response from regressing live streaming
+ * text that arrived via `agentcrew:stream` while the IPC query was in flight.
+ */
+export function mergeSnapshotWithLiveStream(prev: Snapshot, incoming: Snapshot): Snapshot {
+  if (
+    !prev.conversation_id ||
+    prev.conversation_id !== incoming.conversation_id ||
+    !prev.messages.length
+  ) {
+    return incoming;
+  }
+
+  const anyActive =
+    running(incoming.session?.status) ||
+    Object.values(incoming.sessions ?? {}).some(s => running(s?.status)) ||
+    incoming.task?.status === "running";
+  if (!anyActive) {
+    return incoming;
+  }
+
+  const prevById = new Map<string, Message>();
+  for (const m of prev.messages) {
+    prevById.set(m.id, m);
+  }
+
+  let changed = false;
+  const incomingIds = new Set<string>();
+  const merged = incoming.messages.map(msg => {
+    incomingIds.add(msg.id);
+    const live = prevById.get(msg.id);
+    if (
+      live &&
+      live.role === msg.role &&
+      STREAMABLE_ROLES.has(msg.role) &&
+      live.text.length > msg.text.length &&
+      live.text.startsWith(msg.text)
+    ) {
+      changed = true;
+      return { ...msg, text: live.text };
+    }
+    return msg;
+  });
+
+  // Preserve newly started streaming items at the tail of `prev` that were not yet
+  // visible to `getSnapshot` when its DB read ran.
+  let lastMatchedPrevIdx = -1;
+  for (let i = prev.messages.length - 1; i >= 0; i -= 1) {
+    if (incomingIds.has(prev.messages[i].id)) {
+      lastMatchedPrevIdx = i;
+      break;
+    }
+  }
+  if (lastMatchedPrevIdx >= 0 && lastMatchedPrevIdx < prev.messages.length - 1) {
+    for (let i = lastMatchedPrevIdx + 1; i < prev.messages.length; i += 1) {
+      const tailMsg = prev.messages[i];
+      if (!incomingIds.has(tailMsg.id) && STREAMABLE_ROLES.has(tailMsg.role)) {
+        merged.push(tailMsg);
+        changed = true;
+      }
+    }
+  }
+
+  return changed ? { ...incoming, messages: merged } : incoming;
 }
 
 export interface RealtimeHandlers {

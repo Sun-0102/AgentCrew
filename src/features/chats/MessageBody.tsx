@@ -8,7 +8,7 @@ import Dialog from "../../components/Dialog";
 import Icon from "../../components/Icon";
 import { desktop, useAgents } from "./api";
 import { serializeMarkdownSelection, useCopyToClipboard } from "./clipboard";
-import { highlightCode } from "./code-highlight";
+import { highlightCode, highlightCodeSync } from "./code-highlight";
 import { remarkMentions, remarkSkills } from "./mention-markdown";
 
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -210,18 +210,31 @@ function MarkdownCodeBlock({
   const { copied, copy } = useCopyToClipboard({
     onError: () => onNotify?.("复制失败，请选择文字后手动复制"),
   });
-  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
+  const syncHighlightedHtml = highlightCodeSync(code, language);
+  const [asyncHighlight, setAsyncHighlight] = useState<{
+    code: string;
+    language?: string;
+    html: string;
+  } | null>(null);
 
   useEffect(() => {
+    if (syncHighlightedHtml !== null) return;
     let cancelled = false;
-    setHighlightedHtml(null);
     void highlightCode(code, language).then(html => {
-      if (!cancelled && html) setHighlightedHtml(html);
+      if (!cancelled && html) {
+        setAsyncHighlight({ code, language, html });
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [code, language]);
+  }, [code, language, syncHighlightedHtml]);
+
+  const highlightedHtml =
+    syncHighlightedHtml ??
+    (asyncHighlight && asyncHighlight.code === code && asyncHighlight.language === language
+      ? asyncHighlight.html
+      : null);
 
   return (
     <div className="message-code-block">

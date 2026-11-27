@@ -10,6 +10,10 @@
   --muted: #94a3b8;
   --accent: #818cf8;
   --accent-soft: #1e1b4b;
+  --provider-codex: #818cf8;
+  --provider-deepseek: #34d399;
+  --provider-gemini: #f472b6;
+  --provider-claude: #fbbf24;
 }
 
 :root[data-theme="dark"] body {
@@ -588,3 +592,46 @@
 :root[data-theme="dark"] .usage-provider-note-warn { background: rgba(245, 158, 11, 0.14); color: #fcd34d; border-color: rgba(245, 158, 11, 0.35); }
 :root[data-theme="dark"] .quota-alert-btn { background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
 :root[data-theme="dark"] .quota-alert-btn:hover { background: rgba(245, 158, 11, 0.24); }
+:root[data-theme="dark"] .scroll-bottom-btn { background: rgba(17, 24, 39, 0.9); border-color: #334155; color: #e2e8f0; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); }
+:root[data-theme="dark"] .scroll-bottom-btn:hover { background: #1e293b; border-color: #6366f1; color: #a5b4fc; }
+:root[data-theme="dark"] .usage-segmented,
+:root[data-theme="dark"] .usage-mini-seg { background: #0f172a; border-color: #334155; }
+:root[data-theme="dark"] .usage-segmented button,
+:root[data-theme="dark"] .usage-mini-seg button { color: #94a3b8; }
+:root[data-theme="dark"] .usage-segmented button:hover,
+:root[data-theme="dark"] .usage-mini-seg button:hover { color: #f1f5f9; }
+:root[data-theme="dark"] .usage-segmented button.active,
+:root[data-theme="dark"] .usage-mini-seg button.active { background: #1e293b; color: #f8fafc; }
+:root[data-theme="dark"] .usage-btn-outline { background: #1e293b; border-color: #334155; color: #e2e8f0; }
+:root[data-theme="dark"] .usage-btn-outline:hover:not(:disabled) { background: #334155; }
+:root[data-theme="dark"] .usage-section-title { color: #cbd5e1; }
+:root[data-theme="dark"] .usage-provider-card { background: var(--surface); border-color: var(--line); }
+:root[data-theme="dark"] .usage-provider-card.accent-codex { border-top-color: var(--provider-codex); }
+:root[data-theme="dark"] .usage-provider-card.accent-deepseek { border-top-color: var(--provider-deepseek); }
+:root[data-theme="dark"] .usage-provider-card.accent-gemini { border-top-color: var(--provider-gemini); }
+:root[data-theme="dark"] .usage-provider-card.accent-claude { border-top-color: var(--provider-claude); }
+:root[data-theme="dark"] .usage-highlight-box,
+:root[data-theme="dark"] .usage-provider-note { background: #0f172a; border-color: #253249; }
+:root[data-theme="dark"] .usage-metric-row strong,
+:root[data-theme="dark"] .usage-tooltip-head strong,
+:root[data-theme="dark"] .usage-tooltip-vals b,
+:root[data-theme="dark"] .usage-chart-total b { color: #f1f5f9; }
+:root[data-theme="dark"] .usage-tooltip-agent,
+:root[data-theme="dark"] .usage-model-id { color: #cbd5e1; }
+:root[data-theme="dark"] .usage-chart-label.is-active-day { fill: #cbd5e1; }
+:root[data-theme="dark"] .legend-pill { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+:root[data-theme="dark"] .legend-pill:hover { background: #1e293b; border-color: #475569; }
+:root[data-theme="dark"] .legend-pill.is-focused { background: #1e1b4b; border-color: var(--accent); }
+:root[data-theme="dark"] .kpi-saved-pill { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
+:root[data-theme="dark"] .kpi-mini-bar,
+:root[data-theme="dark"] .usage-share-bar-track,
+:root[data-theme="dark"] .usage-cost-cell-bar,
+:root[data-theme="dark"] .progress-track,
+:root[data-theme="dark"] .progress-track-lg { background: #1e293b; border-color: #334155; }
+:root[data-theme="dark"] .usage-plan-badge { background: #1e293b; color: #cbd5e1; }
+:root[data-theme="dark"] .usage-status-pill.ok { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
+:root[data-theme="dark"] .usage-status-pill.warn { background: rgba(245, 158, 11, 0.2); color: #fcd34d; }
+:root[data-theme="dark"] .usage-status-pill.muted { background: #1e293b; color: #94a3b8; }
+:root[data-theme="dark"] .usage-table td { border-bottom-color: #1f2937; }
+:root[data-theme="dark"] .usage-table tbody tr:hover,
+:root[data-theme="dark"] .usage-table tfoot td { background: #0f172a; }

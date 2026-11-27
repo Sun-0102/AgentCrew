@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Icon from "../../components/Icon";
 import Avatar from "../../components/Avatar";
@@ -143,7 +143,32 @@ export default function ChatStage(p: Props) {
   const highlight = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const nearBottom = useRef(true);
-  const members = useMemo(() => group?.members ?? [agent], [group?.members, agent]);
+  const [following, setFollowing] = useState(true);
+  const programmaticScrollRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const touchYRef = useRef<number | null>(null);
+  const updateFollowing = useCallback((next: boolean) => {
+    nearBottom.current = next;
+    setFollowing(prev => (prev === next ? prev : next));
+  }, []);
+  const scrollToBottom = useCallback(() => {
+    updateFollowing(true);
+    const el = feed.current;
+    if (!el) return;
+    programmaticScrollRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+  }, [updateFollowing]);
+  useEffect(() => {
+    nearBottom.current = true;
+    setFollowing(true);
+    lastScrollTopRef.current = 0;
+    lastScrollHeightRef.current = 0;
+  }, [scopeKey]);
+  const membersKey = group ? group.members.join("\0") : agent;
+  const members = useMemo(() => group?.members ?? [agent], [membersKey]);
   const mentionItems = (() => {
     const q = mentionQuery.trim().toLowerCase();
     if (!q) return members;
@@ -290,7 +315,32 @@ export default function ChatStage(p: Props) {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [scopeKey, text, files, reply]);
-  useEffect(() => { if (feed.current && (!hasMessages || nearBottom.current)) feed.current.scrollTop = hasMessages ? feed.current.scrollHeight : 0; }, [hasMessages, pendingMessages.length, snapshot.messages.map(m => `${m.id}:${m.text.length}`).join("|")]);
+  const feedSignature = useMemo(
+    () =>
+      visibleMessages
+        .map(m => {
+          const notesSig = m.active
+            ? m.activity
+                .filter(a => a.role === "assistant")
+                .map(a => a.text.length)
+                .join(",")
+            : "";
+          return `${m.id}:${m.text.length}:${m.active ? 1 : 0}:${m.activity.length > 0 ? 1 : 0}:${notesSig}:${m.turnDiff ? m.turnDiff.files.length : 0}`;
+        })
+        .join("|"),
+    [visibleMessages],
+  );
+  useLayoutEffect(() => {
+    const el = feed.current;
+    if (!el || (hasMessages && !nearBottom.current)) return;
+    const targetTop = hasMessages ? el.scrollHeight : 0;
+    if (Math.abs(el.scrollTop - targetTop) > 0.5) {
+      programmaticScrollRef.current = true;
+      el.scrollTop = targetTop;
+    }
+    lastScrollTopRef.current = el.scrollTop;
+    lastScrollHeightRef.current = el.scrollHeight;
+  }, [scopeKey, hasMessages, feedSignature]);
   useEffect(() => {
     if (!group || composingBlocked) return;
     if (members.includes(recipient) && recipient !== agent) onAgent(recipient);
@@ -439,7 +489,7 @@ export default function ChatStage(p: Props) {
     if (showOptimistic) {
       setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: optimisticContent, created_at: new Date().toISOString(), agent: targetAgent }]);
     }
-    setSending(true); setError(null); nearBottom.current = true;
+    setSending(true); setError(null); updateFollowing(true);
     let createdDraftSession: GroupSession | PrivateSession | ProjectSession | null = null;
     try {
       let effectiveScope = scope;
@@ -530,9 +580,57 @@ export default function ChatStage(p: Props) {
     {resultsOpen && group && scope.groupId && <TaskResults groupId={scope.groupId} latestTask={task} acting={acting} members={members} onClose={() => setResultsOpen(false)} notify={notify} onAction={async value => { if (!task) throw new Error("任务不存在，请刷新后重试。"); await action("group_task_control", { taskId: task.id, action: value }, true); }} />}
     {(p.session || p.isDraft) && group ? <header className="chat-header session-chat-header"><div className="session-chat-lead">{p.sidebarControls}<div className="session-chat-heading"><div className="session-breadcrumb"><button onClick={p.onGroups}><Icon name="group" size={12} />所有群聊</button><span>/</span><span>{group.name}</span><Icon name="right" size={12} /><span>{project?.name ?? "群专用目录"}</span></div><h1 title={title}><span className="session-heading-name">{title}</span>{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1></div></div><div className="chat-header-actions">{p.onOpenGit && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span>{members.length} 位 Agent · 你</button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || taskControllable} title={taskControllable ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || taskControllable} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); setResultsOpen(true); }}>任务结果</button><button onClick={() => { setSessionMenu(false); onInvite(); }}>群设置</button><button onClick={() => { setSessionMenu(false); setPanel(panel === "evidence" ? null : "evidence"); }}>聊天详情</button><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="群设置" onClick={onInvite}><Icon name="settings" size={17} /></button>}</div></header> : <header className="chat-header"><div className="chat-title">{p.sidebarControls}<Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}{!group && <span className="node-badge">本地节点</span>}{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : `${agentName(agent)} · 独立会话`}</p></div></div><div className="chat-header-actions">{p.onOpenGit && (project || snapshot.session?.workspace_path) && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button type="button" className="outline-button task-results-trigger" onClick={() => setResultsOpen(true)}><Icon name="file" size={17} />任务结果</button>}{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || busy} title={busy ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || busy} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button>}</div></header>}
     <div className={`chat-stage-body ${panel === "diff" ? "with-diff-panel" : panel ? "with-panel" : ""}`}><div className="chat-main">
-      <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
+      <div className="message-feed-shell">
+      <div
+        className={`message-feed ${following ? "is-following" : ""}`}
+        ref={feed}
+        onWheel={event => {
+          if (event.deltaY < 0) updateFollowing(false);
+        }}
+        onTouchStart={event => {
+          touchYRef.current = event.touches[0]?.clientY ?? null;
+        }}
+        onTouchMove={event => {
+          const y = event.touches[0]?.clientY;
+          if (y !== undefined && touchYRef.current !== null && y - touchYRef.current > 2) {
+            updateFollowing(false);
+          }
+          if (y !== undefined) touchYRef.current = y;
+        }}
+        onScroll={event => {
+          const el = event.currentTarget;
+          const prevTop = lastScrollTopRef.current;
+          const prevHeight = lastScrollHeightRef.current;
+          lastScrollTopRef.current = el.scrollTop;
+          lastScrollHeightRef.current = el.scrollHeight;
+          if (programmaticScrollRef.current) {
+            programmaticScrollRef.current = false;
+            return;
+          }
+          const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+          const scrolledUp = el.scrollTop < prevTop - 1 && el.scrollHeight >= prevHeight;
+          const scrolledDown = el.scrollTop > prevTop + 1;
+          if (scrolledUp) {
+            updateFollowing(false);
+          } else if (distanceFromBottom <= 24 && (nearBottom.current || scrolledDown)) {
+            updateFollowing(true);
+          } else if (nearBottom.current && distanceFromBottom > 80) {
+            updateFollowing(false);
+          }
+        }}
+        role="log"
+        aria-label="聊天消息"
+      >
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.isDraft || p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.isDraft ? "直接输入你的需求，发送首条消息后将自动创建并命名会话。" : p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
         {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
+      </div>
+      {!following && hasMessages && (
+        <button type="button" className="scroll-bottom-btn" onClick={scrollToBottom} aria-label="滚动到最新消息">
+          {busy && <span className="scroll-bottom-dot" aria-hidden="true" />}
+          <span>{busy ? "回到最新输出" : "回到底部"}</span>
+          <Icon name="down" size={14} />
+        </button>
+      )}
       </div>
       <div className="composer-area">
         <div className={`chat-status ${attention ? "needs-attention" : ""}`} role="status" aria-live="polite">

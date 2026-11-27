@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Mous
 import { open } from "@tauri-apps/plugin-dialog";
 import { addProject, getAppInfo, listProjects, type AppInfo, type Project } from "./features/projects/api";
 import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getProjectSessions, getSnapshot, probeAgent, running, saveGroupSession, savePrivateSession, saveProjectSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
-import { applyStreamDeltas, subscribeRealtimeEvents, type CoalescedSync, type StreamDelta } from "./features/chats/events";
+import { applyStreamDeltas, mergeSnapshotWithLiveStream, subscribeRealtimeEvents, type CoalescedSync, type StreamDelta } from "./features/chats/events";
 import { discardSessionDraft } from "./features/chats/ChatStage";
 import GroupDialog from "./features/chats/GroupDialog";
 import { GroupSidebarList, GroupHub, SessionSidebar, SessionDialog, DeleteSessionDialog, type ChatSession } from "./features/chats/GroupSessions";
@@ -357,9 +357,10 @@ export default function Workbench() {
   }, [agentsLoaded, hasCodexConnected, selectedAgent, selection.kind]);
   const scope: Scope = { projectId: selection.kind === "project" ? selection.id : null, groupId: selection.kind === "group" ? (isGroupDraft ? selection.id : session?.id ?? selection.id) : null, sessionId: isDraft ? null : (inAgent ? privateSession?.id ?? null : inProject ? projectSession?.id ?? null : null), agent: selectedAgent };
   const key = isGroupDraft && group ? `group:${group.id}:draft` : isProjectDraft && project ? `project:${project.id}:draft` : isAgentDraft ? `private:${selectedAgent}:draft` : selection.kind === "group" ? session?.id === selection.id ? `group:${selection.id}` : `group:${selection.id}:${session?.id ?? "loading"}` : selection.kind === "project" ? (projectSession ? (projectSession.is_default ? `project:${selection.id}` : `project:${selection.id}:${projectSession.id}`) : `project:${selection.id}:loading`) : inAgent ? (privateSession ? (privateSession.is_default ? `private:${selectedAgent}` : `private:${selectedAgent}:${privateSession.id}`) : `private:${selectedAgent}:loading`) : selection.kind === "agent" ? `agent:${selection.id}` : selection.kind;
-  const snapshotKey = `${key}:${selectedAgent}`;
+  const snapshotKey = group ? key : `${key}:${selectedAgent}`;
   const currentKey = useRef(snapshotKey); currentKey.current = snapshotKey;
   const pollingKey = useRef(snapshotKey);
+  const snapshotReqSeq = useRef(0);
   const visibleSnapshot = isDraft ? emptySnapshot : (pollingKey.current === snapshotKey ? snapshot : emptySnapshot);
   const title = isDraft ? "新会话" : (activeSession?.name ?? group?.name ?? (project ? `${project.name} · ${agentName(selectedAgent)}` : agentName(selectedAgent)));
   function selectExecutionAgent(agent: string) {
@@ -750,13 +751,22 @@ export default function Workbench() {
     if (!isProjectDraft && inProject && project && projectSession && projectSessionSelection[project.id] !== projectSession.id) selectProjectSession(projectSession);
   }, [inProject, project?.id, projectSession?.id, isProjectDraft]);
   useEffect(() => {
-    if (isDraft || !agentsLoaded || !selectedExists || (inAgent && !privateSession) || (inGroup && !session) || (inProject && !projectSession)) { setSnapshot(emptySnapshot); return; }
+    if (isDraft || !agentsLoaded || !selectedExists || (inAgent && !privateSession) || (inGroup && !session) || (inProject && !projectSession)) {
+      snapshotReqSeq.current += 1;
+      setSnapshot(emptySnapshot);
+      return;
+    }
     let active = true;
-    if (pollingKey.current !== snapshotKey) { setSnapshot(emptySnapshot); pollingKey.current = snapshotKey; }
+    const switchedConversation = pollingKey.current !== snapshotKey;
+    if (switchedConversation) {
+      setSnapshot(emptySnapshot);
+      pollingKey.current = snapshotKey;
+    }
+    const reqSeq = ++snapshotReqSeq.current;
     void getSnapshot(scope)
       .then(result => {
-        if (active && currentKey.current === snapshotKey) {
-          setSnapshot(result);
+        if (active && currentKey.current === snapshotKey && reqSeq === snapshotReqSeq.current) {
+          setSnapshot(prev => switchedConversation ? result : mergeSnapshotWithLiveStream(prev, result));
           if (selection.kind === "personal") setPrivatePreview(result.messages.filter(m => m.role === "user" || m.role === "assistant").at(-1)?.text ?? "");
         }
       })
@@ -786,10 +796,11 @@ export default function Workbench() {
         const matchesCurrent = batch.resyncAll || batch.conversationIds.size === 0 || !activeConvId || batch.conversationIds.has(activeConvId);
         if (matchesCurrent) {
           const targetKey = snapshotKey;
+          const reqSeq = ++snapshotReqSeq.current;
           void getSnapshot(scope)
             .then(result => {
-              if (currentKey.current === targetKey) {
-                setSnapshot(result);
+              if (currentKey.current === targetKey && reqSeq === snapshotReqSeq.current) {
+                setSnapshot(prev => mergeSnapshotWithLiveStream(prev, result));
                 if (selection.kind === "personal") setPrivatePreview(result.messages.filter(m => m.role === "user" || m.role === "assistant").at(-1)?.text ?? "");
               }
             })
@@ -840,8 +851,11 @@ export default function Workbench() {
   }, []);
   async function refreshCurrent() {
     const selected = snapshotKey;
+    const reqSeq = ++snapshotReqSeq.current;
     const [result, list, conversations, privateList, projectList] = await Promise.all([getSnapshot(scope), getGroups(), group ? getGroupSessions(group.id) : Promise.resolve(null), inAgent ? getPrivateSessions(selectedAgent) : Promise.resolve(null), inProject && project ? getProjectSessions(project.id) : Promise.resolve(null)]);
-    if (currentKey.current === selected) setSnapshot(result);
+    if (currentKey.current === selected && reqSeq === snapshotReqSeq.current) {
+      setSnapshot(prev => mergeSnapshotWithLiveStream(prev, result));
+    }
     if (currentKey.current === selected && conversations) setSessions(conversations);
     if (currentKey.current === selected && privateList) setPrivateSessions(privateList);
     if (currentKey.current === selected && projectList) setProjectSessions(projectList);

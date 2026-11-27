@@ -191,8 +191,6 @@ pub fn parse_codex_rate_limits(raw: &Value) -> Value {
 pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<Value, String> {
     let range_days = days.clamp(1, 90) as i64;
     let now = now_unix();
-    let since = now - range_days * 86_400;
-    let today_since = now - (now.rem_euclid(86_400));
 
     let agent_list = agents::list(store)?;
     let codex_ready = agent_list
@@ -219,14 +217,31 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
 
     let connection = store.connect()?;
 
+    let today_since: i64 = connection
+        .query_row(
+            "SELECT CAST(strftime('%s', ?1, 'unixepoch', 'localtime', 'start of day', 'utc') AS INTEGER)",
+            [now],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| now - now.rem_euclid(86_400));
+    let since = if range_days <= 1 {
+        today_since
+    } else {
+        today_since - (range_days - 1) * 86_400
+    };
+
     // Aggregate summary for the selected range
     let mut total_cost = 0.0_f64;
+    let mut saved_cost = 0.0_f64;
     let mut total_in = 0_i64;
     let mut total_out = 0_i64;
     let mut total_cached = 0_i64;
     let mut total_turns = 0_i64;
     let mut group_turns = 0_i64;
     let mut private_turns = 0_i64;
+    let mut completed_turns = 0_i64;
+    let mut failed_turns = 0_i64;
+    let mut active_day_set: BTreeMap<String, bool> = BTreeMap::new();
 
     let mut summary_stmt = connection
         .prepare(
@@ -236,7 +251,9 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 scope_kind,
                 input_tokens,
                 output_tokens,
-                cached_tokens
+                cached_tokens,
+                status,
+                strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime')
              FROM usage_records
              WHERE created_at >= ?1",
         )
@@ -250,21 +267,33 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     for row in summary_rows.flatten() {
-        let (provider, model, scope, inp, out, cached) = row;
+        let (provider, model, scope, inp, out, cached, status, day_key) = row;
         total_turns += 1;
         if scope == "group" {
             group_turns += 1;
         } else {
             private_turns += 1;
         }
-        total_in += effective_input_tokens(&provider, inp, cached);
+        if status == "completed" {
+            completed_turns += 1;
+        } else if matches!(status.as_str(), "failed" | "quota_exhausted" | "interrupted") {
+            failed_turns += 1;
+        }
+        active_day_set.insert(day_key, true);
+        let eff_in = effective_input_tokens(&provider, inp, cached);
+        total_in += eff_in;
         total_out += out.max(0);
         total_cached += cached.max(0);
-        total_cost += estimate_cost_usd(&provider, &model, inp, out, cached);
+        let cost = estimate_cost_usd(&provider, &model, inp, out, cached);
+        let uncached = estimate_cost_usd(&provider, &model, eff_in, out, 0);
+        total_cost += cost;
+        saved_cost += (uncached - cost).max(0.0);
     }
 
     let cache_hit_rate = if total_in > 0 {
@@ -273,38 +302,74 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
         0.0
     };
 
-    // Daily series (last min(range_days, 14) days)
-    let chart_days = range_days.min(14);
+    // Time-series: hourly when range_days == 1 ("今日"), otherwise daily up to min(range_days, 30)
+    let is_hourly = range_days == 1;
+    let granularity = if is_hourly { "hour" } else { "day" };
+    let chart_days = range_days.min(30);
     let mut daily_map: BTreeMap<String, [f64; 4]> = BTreeMap::new();
     let mut daily_turns_map: BTreeMap<String, [i64; 4]> = BTreeMap::new();
-    for offset in (0..chart_days).rev() {
-        let day_ts = now - offset * 86_400;
-        let date_label: String = connection
+    let mut daily_tokens_map: BTreeMap<String, [i64; 4]> = BTreeMap::new();
+
+    if is_hourly {
+        let current_hour: i64 = connection
             .query_row(
-                "SELECT strftime('%m-%d', ?1, 'unixepoch', 'localtime')",
-                [day_ts],
+                "SELECT CAST(strftime('%H', ?1, 'unixepoch', 'localtime') AS INTEGER)",
+                [now],
                 |r| r.get(0),
             )
-            .unwrap_or_else(|_| String::from("--"));
-        daily_map.entry(date_label.clone()).or_insert([0.0; 4]);
-        daily_turns_map.entry(date_label).or_insert([0; 4]);
+            .unwrap_or(23);
+        let max_hour = current_hour.clamp(0, 23);
+        for h in 0..=max_hour {
+            let label = format!("{h:02}:00");
+            daily_map.insert(label.clone(), [0.0; 4]);
+            daily_turns_map.insert(label.clone(), [0; 4]);
+            daily_tokens_map.insert(label, [0; 4]);
+        }
+    } else {
+        for offset in (0..chart_days).rev() {
+            let day_ts = today_since - offset * 86_400 + 43_200;
+            let date_label: String = connection
+                .query_row(
+                    "SELECT strftime('%m-%d', ?1, 'unixepoch', 'localtime')",
+                    [day_ts],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| String::from("--"));
+            daily_map.entry(date_label.clone()).or_insert([0.0; 4]);
+            daily_turns_map.entry(date_label.clone()).or_insert([0; 4]);
+            daily_tokens_map.entry(date_label).or_insert([0; 4]);
+        }
     }
 
-    let mut daily_stmt = connection
-        .prepare(
-            "SELECT
-                strftime('%m-%d', created_at, 'unixepoch', 'localtime') AS d,
-                provider_kind,
-                model,
-                input_tokens,
-                output_tokens,
-                cached_tokens
-             FROM usage_records
-             WHERE created_at >= ?1",
-        )
-        .map_err(|e| e.to_string())?;
+    let series_since = if is_hourly {
+        today_since
+    } else {
+        today_since - (chart_days - 1) * 86_400
+    };
+    let bucket_sql = if is_hourly {
+        "SELECT
+            strftime('%H:00', created_at, 'unixepoch', 'localtime') AS d,
+            provider_kind,
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens
+         FROM usage_records
+         WHERE created_at >= ?1"
+    } else {
+        "SELECT
+            strftime('%m-%d', created_at, 'unixepoch', 'localtime') AS d,
+            provider_kind,
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens
+         FROM usage_records
+         WHERE created_at >= ?1"
+    };
+    let mut daily_stmt = connection.prepare(bucket_sql).map_err(|e| e.to_string())?;
     let daily_rows = daily_stmt
-        .query_map([now - (chart_days - 1) * 86_400 - now.rem_euclid(86_400)], |r| {
+        .query_map([series_since], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -324,11 +389,15 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
             _ => continue,
         };
         let cost = estimate_cost_usd(&provider, &model, inp, out, cached);
+        let tokens = effective_input_tokens(&provider, inp, cached) + out.max(0);
         if let Some(entry) = daily_map.get_mut(&date) {
             entry[idx] += cost;
         }
         if let Some(entry) = daily_turns_map.get_mut(&date) {
             entry[idx] += 1;
+        }
+        if let Some(entry) = daily_tokens_map.get_mut(&date) {
+            entry[idx] += tokens;
         }
     }
 
@@ -336,6 +405,7 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
         .into_iter()
         .map(|(date, costs)| {
             let turns = daily_turns_map.get(&date).copied().unwrap_or([0; 4]);
+            let tokens = daily_tokens_map.get(&date).copied().unwrap_or([0; 4]);
             json!({
                 "date": date,
                 "codexCost": costs[0],
@@ -346,6 +416,10 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 "deepseekTurns": turns[1],
                 "geminiTurns": turns[2],
                 "claudeTurns": turns[3],
+                "codexTokens": tokens[0],
+                "deepseekTokens": tokens[1],
+                "geminiTokens": tokens[2],
+                "claudeTokens": tokens[3],
             })
         })
         .collect();
@@ -457,6 +531,17 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
         }
     }
 
+    let mut last_used_by_agent: HashMap<String, i64> = HashMap::new();
+    if let Ok(mut last_stmt) = connection.prepare(
+        "SELECT agent_id, MAX(created_at) FROM usage_records GROUP BY agent_id",
+    ) {
+        if let Ok(rows) = last_stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+            for (aid, ts) in rows.flatten() {
+                last_used_by_agent.insert(aid, ts);
+            }
+        }
+    }
+
     let agents_summary: Vec<Value> = agent_list
         .into_iter()
         .map(|a| {
@@ -483,6 +568,7 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 "costUsd": s.5,
                 "quotaExhaustedRecent": quota_exhausted_recent,
                 "lastQuotaErrorAt": s.6,
+                "lastUsedAt": last_used_by_agent.get(&a.id).copied(),
             })
         })
         .collect();
@@ -490,9 +576,11 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
     Ok(json!({
         "updatedAt": now,
         "rangeDays": range_days,
+        "granularity": granularity,
         "codexLimits": codex_limits,
         "summary": {
             "totalCostUsd": total_cost,
+            "savedCostUsd": saved_cost,
             "totalInputTokens": total_in,
             "totalOutputTokens": total_out,
             "totalCachedTokens": total_cached,
@@ -500,6 +588,9 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
             "totalTurns": total_turns,
             "groupTurns": group_turns,
             "privateTurns": private_turns,
+            "completedTurns": completed_turns,
+            "failedTurns": failed_turns,
+            "activeDays": active_day_set.len(),
         },
         "daily": daily,
         "models": models,

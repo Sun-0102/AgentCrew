@@ -20,6 +20,7 @@ export interface CodexLimits {
 
 export interface UsageSummary {
   totalCostUsd: number;
+  savedCostUsd?: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCachedTokens: number;
@@ -27,6 +28,9 @@ export interface UsageSummary {
   totalTurns: number;
   groupTurns: number;
   privateTurns: number;
+  completedTurns?: number;
+  failedTurns?: number;
+  activeDays?: number;
 }
 
 export interface DailyUsagePoint {
@@ -39,6 +43,10 @@ export interface DailyUsagePoint {
   deepseekTurns: number;
   geminiTurns: number;
   claudeTurns: number;
+  codexTokens?: number;
+  deepseekTokens?: number;
+  geminiTokens?: number;
+  claudeTokens?: number;
 }
 
 export interface ModelUsageRow {
@@ -68,11 +76,13 @@ export interface AgentUsageSummary {
   costUsd: number;
   quotaExhaustedRecent: boolean;
   lastQuotaErrorAt: number | null;
+  lastUsedAt?: number | null;
 }
 
 export interface UsageDashboardData {
   updatedAt: number;
   rangeDays: number;
+  granularity?: "hour" | "day";
   codexLimits: CodexLimits;
   summary: UsageSummary;
   daily: DailyUsagePoint[];
@@ -83,9 +93,11 @@ export interface UsageDashboardData {
 export const emptyUsageDashboard: UsageDashboardData = {
   updatedAt: 0,
   rangeDays: 7,
+  granularity: "day",
   codexLimits: { available: false, windows: [], resetCreditsCount: 0 },
   summary: {
     totalCostUsd: 0,
+    savedCostUsd: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalCachedTokens: 0,
@@ -93,6 +105,9 @@ export const emptyUsageDashboard: UsageDashboardData = {
     totalTurns: 0,
     groupTurns: 0,
     privateTurns: 0,
+    completedTurns: 0,
+    failedTurns: 0,
+    activeDays: 0,
   },
   daily: [],
   models: [],
