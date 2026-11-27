@@ -234,7 +234,7 @@ impl Client {
         let mut cmd = match &install.launch {
             Launch::Agy(bin) => {
                 let mut c = command(bin);
-                c.arg("acp");
+                c.args(["acp", "--dangerously-skip-permissions"]);
                 c
             }
             Launch::GeminiCli { node, entry } => {
