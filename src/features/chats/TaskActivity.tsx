@@ -39,8 +39,8 @@ function itemIcon(kind: WorkLogItem["kind"]): IconName {
   }
 }
 
-function statusPillLabel(status: WorkLogStatus): string {
-  if (status === "running") return "运行中";
+function statusPillLabel(status: WorkLogStatus, turnActive: boolean): string {
+  if (status === "running") return turnActive ? "运行中" : "后台运行中";
   if (status === "failed") return "失败";
   return "";
 }
@@ -80,7 +80,7 @@ function DiffBlock({ entry }: { entry: FileDiffEntry }) {
   );
 }
 
-function WorkLogRow({ item, defaultOpen }: { item: WorkLogItem; defaultOpen: boolean }) {
+function WorkLogRow({ item, defaultOpen, turnActive }: { item: WorkLogItem; defaultOpen: boolean; turnActive: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
 
@@ -97,7 +97,7 @@ function WorkLogRow({ item, defaultOpen }: { item: WorkLogItem; defaultOpen: boo
   }
 
   const hasDetails = Boolean(item.body || item.diffs?.length || item.plan?.length);
-  const pill = statusPillLabel(item.status);
+  const pill = statusPillLabel(item.status, turnActive);
   const isMonoTitle =
     item.kind === "command" || item.kind === "file_read" || item.kind === "file_change";
 
@@ -238,10 +238,17 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
   );
   if (!block.active && rawItems.length === 0) return null;
 
-  const parsedItems = rawItems.map((message, index) =>
-    parseWorkLogItem(message, block.active, index === rawItems.length - 1),
-  );
+  const turnTerminated =
+    !block.active && Boolean(block.outcome && ["cancelled", "failed", "interrupted"].includes(block.outcome));
+  const parsedItems = rawItems.map((message, index) => {
+    const item = parseWorkLogItem(message, block.active, index === rawItems.length - 1);
+    if (turnTerminated && item.status === "running") {
+      return { ...item, status: "failed" as const };
+    }
+    return item;
+  });
   const timelineItems = collapseWorkLogItems(parsedItems.filter(item => item.kind !== "handoff"));
+  const backgroundRunning = !block.active && timelineItems.some(i => i.status === "running");
   // Keep progress messages visible while commands and tool output stay folded.
   // The trailing assistant message is already rendered in the main reply bubble.
   const progressItems = block.active ? timelineItems.filter(item => item.kind === "note") : [];
@@ -296,9 +303,11 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
     ? `${activeHeadline} · ${durationText}`
     : outcomes[block.outcome ?? ""]
       ? `${outcomes[block.outcome!]} · ${durationText}`
-      : summaryParts.length
-        ? `${summaryParts.join(" · ")} · ${durationText}`
-        : `过程记录 · ${durationText}`;
+      : backgroundRunning
+        ? `${summaryParts.length ? `${summaryParts.join(" · ")} · ` : ""}后台命令运行中 · ${durationText}`
+        : summaryParts.length
+          ? `${summaryParts.join(" · ")} · ${durationText}`
+          : `过程记录 · ${durationText}`;
 
   const canFoldOverflow = !block.active && !showAll && timelineItems.length > MAX_COMPACT_ITEMS;
   const visibleItems = canFoldOverflow
@@ -331,7 +340,7 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
       {!open && progressItems.length > 0 && (
         <div className="worklog-progress">
           {progressItems.map(item => (
-            <WorkLogRow key={item.id} item={item} defaultOpen={false} />
+            <WorkLogRow key={item.id} item={item} defaultOpen={false} turnActive={block.active} />
           ))}
         </div>
       )}
@@ -341,7 +350,7 @@ export default function TaskActivity({ block }: { block: ReplyBlock }) {
           {visibleItems.length > 0 ? (
             <div className="worklog-list">
               {visibleItems.map(item => (
-                <WorkLogRow key={item.id} item={item} defaultOpen={false} />
+                <WorkLogRow key={item.id} item={item} defaultOpen={false} turnActive={block.active} />
               ))}
               {hiddenCount > 0 && (
                 <button

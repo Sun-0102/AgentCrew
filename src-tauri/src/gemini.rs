@@ -15,12 +15,104 @@ use std::{
 
 type Reply = Result<Value, String>;
 const ACTIVE: &str = "('starting','running','waiting_approval','cancel_requested','stopping')";
+const PROMPT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const IDLE_SESSION_REAP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const PROMPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const STDERR_TAIL_LIMIT: usize = 8192;
+const BACKGROUND_TOOL_NOTICE_PREFIX: &str = "Gemini 本轮已返回，但仍有";
 
 #[derive(Default)]
 pub struct Runtime {
     clients: Arc<Mutex<HashMap<String, Arc<Client>>>>,
     operation: Arc<Mutex<()>>,
     cached_probe: Mutex<Option<Value>>,
+    reaper_started: AtomicBool,
+}
+
+fn tool_status_is_terminal(status: Option<&str>) -> bool {
+    let Some(raw) = status else {
+        return false;
+    };
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "completed"
+            | "succeeded"
+            | "success"
+            | "done"
+            | "ok"
+            | "failed"
+            | "error"
+            | "declined"
+            | "cancelled"
+            | "canceled"
+            | "interrupted"
+            | "denied"
+    )
+}
+
+fn background_tools_notice(count: usize) -> String {
+    format!(
+        "{BACKGROUND_TOOL_NOTICE_PREFIX} {count} 条后台命令尚未结束；后台结果会自动更新，如需继续后续步骤请发送「继续」。"
+    )
+}
+
+fn merge_tool_update(existing: Option<&str>, update: &Value) -> Result<String, String> {
+    if let (Some(prev_raw), Some(patch)) = (existing, update.as_object()) {
+        if let Ok(Value::Object(mut base)) = serde_json::from_str::<Value>(prev_raw) {
+            for (key, value) in patch {
+                if !value.is_null() {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+            return serde_json::to_string(&Value::Object(base)).map_err(|e| e.to_string());
+        }
+    }
+    serde_json::to_string(update).map_err(|e| e.to_string())
+}
+
+fn append_stderr_tail(buf: &mut String, line: &str) {
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    if trimmed.is_empty() {
+        return;
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+    buf.push_str(trimmed);
+    if buf.len() > STDERR_TAIL_LIMIT {
+        let mut cut = buf.len() - STDERR_TAIL_LIMIT;
+        while cut < buf.len() && !buf.is_char_boundary(cut) {
+            cut += 1;
+        }
+        buf.drain(..cut);
+    }
+}
+
+fn sanitized_stderr_hint(tail: &str) -> Option<String> {
+    tail.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            if line.is_empty() {
+                return false;
+            }
+            let lower = line.to_ascii_lowercase();
+            !(lower.contains("token")
+                || lower.contains("api_key")
+                || lower.contains("apikey")
+                || lower.contains("authorization")
+                || lower.contains("bearer ")
+                || lower.contains("cookie")
+                || lower.contains("secret")
+                || lower.contains("password"))
+        })
+        .map(|line| {
+            let mut out = String::new();
+            for ch in line.chars().take(180) {
+                out.push(ch);
+            }
+            out
+        })
 }
 
 fn command(program: &Path) -> Command {
@@ -207,9 +299,13 @@ struct Client {
     input: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
     approvals: Mutex<HashMap<String, Value>>,
+    running_tools: Mutex<HashMap<String, String>>,
     next: AtomicU64,
     healthy: AtomicBool,
     recording: AtomicBool,
+    turn_active: AtomicBool,
+    last_activity: Mutex<Instant>,
+    stderr_tail: Arc<Mutex<String>>,
     database: PathBuf,
     root: String,
     conversation: String,
@@ -225,6 +321,44 @@ struct Client {
 }
 
 impl Client {
+    fn touch_activity(&self) {
+        if let Ok(mut guard) = self.last_activity.lock() {
+            *guard = Instant::now();
+        }
+    }
+
+    fn inactivity_elapsed(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .map(|t| t.elapsed())
+            .unwrap_or_default()
+    }
+
+    fn running_tools_for_turn(&self, turn: &str) -> usize {
+        self.running_tools
+            .lock()
+            .map(|tools| tools.values().filter(|t| t.as_str() == turn).count())
+            .unwrap_or(0)
+    }
+
+    fn has_any_running_tools(&self) -> bool {
+        self.running_tools
+            .lock()
+            .map(|tools| !tools.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn is_idle_for_reap(&self) -> bool {
+        !self.turn_active.load(Ordering::SeqCst)
+            && !self.has_any_running_tools()
+            && self.inactivity_elapsed() >= IDLE_SESSION_REAP_TIMEOUT
+    }
+
+    fn stderr_diagnostic(&self) -> Option<String> {
+        let guard = self.stderr_tail.lock().ok()?;
+        sanitized_stderr_hint(&guard)
+    }
+
     fn start(
         store: &Store,
         install: &Installation,
@@ -262,14 +396,19 @@ impl Client {
         let input = child.stdin.take().ok_or("Gemini stdin 不可用")?;
         let output = child.stdout.take().ok_or("Gemini stdout 不可用")?;
         let stderr = child.stderr.take().ok_or("Gemini stderr 不可用")?;
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
         let client = Arc::new(Self {
             child: Mutex::new(child),
             input: Mutex::new(input),
             pending: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
+            running_tools: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             recording: AtomicBool::new(false),
+            turn_active: AtomicBool::new(false),
+            last_activity: Mutex::new(Instant::now()),
+            stderr_tail: stderr_tail.clone(),
             database: store.path.clone(),
             root: root.into(),
             conversation: conversation.into(),
@@ -284,7 +423,19 @@ impl Client {
             job,
         });
         std::thread::spawn(move || {
-            let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink());
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Ok(mut buf) = stderr_tail.lock() {
+                            append_stderr_tail(&mut buf, &line);
+                        }
+                    }
+                }
+            }
         });
         let weak = Arc::downgrade(&client);
         std::thread::spawn(move || {
@@ -307,7 +458,11 @@ impl Client {
                 }
             }
             if let Some(client) = weak.upgrade() {
-                client.disconnect("Gemini 连接已断开，未完成执行的结果未知。");
+                let reason = match client.stderr_diagnostic() {
+                    Some(hint) => format!("Gemini 连接已断开，未完成执行的结果未知。（诊断：{hint}）"),
+                    None => "Gemini 连接已断开，未完成执行的结果未知。".to_owned(),
+                };
+                client.disconnect(&reason);
                 let _ = client.stop();
             }
         });
@@ -369,6 +524,7 @@ impl Client {
         result
     }
     fn receive(&self, message: Value) -> Result<(), String> {
+        self.touch_activity();
         if message["method"].is_null() {
             if let Some(id) = message["id"].as_u64() {
                 if let Some(sender) = self.pending.lock().map_err(|e| e.to_string())?.remove(&id) {
@@ -449,24 +605,80 @@ impl Client {
         if method != "session/update" {
             return Ok(());
         }
-        let update = &p["update"];
-        if !self.recording.load(Ordering::SeqCst)
-            || p["sessionId"].as_str()
-                != Some(self.session_id.lock().map_err(|e| e.to_string())?.as_str())
+        if p["sessionId"].as_str()
+            != Some(self.session_id.lock().map_err(|e| e.to_string())?.as_str())
         {
             return Ok(());
         }
+        let update = &p["update"];
+        let update_kind = update["sessionUpdate"].as_str();
         let store = Store {
             path: self.database.clone(),
         };
-        let turn = self.turn_id.lock().map_err(|e| e.to_string())?.clone();
         let connection = store.connect()?;
+        let logical_cid = logical_conversation(&connection, &self.conversation);
+
+        // Accept late tool_call_update notifications for background tools that were still running
+        // when `session/prompt` returned `end_turn` (common in `agy acp` background commands).
+        if !self.recording.load(Ordering::SeqCst) {
+            if matches!(update_kind, Some("tool_call" | "tool_call_update")) {
+                if let Some(tool_call_id) = update["toolCallId"].as_str() {
+                    let tracked_turn = self
+                        .running_tools
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .get(tool_call_id)
+                        .cloned();
+                    if let Some(orig_turn) = tracked_turn {
+                        let id = format!("gemini:{orig_turn}:{tool_call_id}");
+                        let existing: Option<String> = connection
+                            .query_row(
+                                "SELECT text FROM codex_messages WHERE conversation_id=?1 AND item_id=?2",
+                                params![self.conversation, id.as_str()],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .map_err(|e| e.to_string())?;
+                        let text = merge_tool_update(existing.as_deref(), update)?;
+                        connection.execute(
+                            "INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",
+                            params![self.conversation, id.as_str(), &text],
+                        ).map_err(|e| e.to_string())?;
+                        crate::events::emit_delta(&logical_cid, id, "tool", Some("gemini"), "replace", text);
+                        if tool_status_is_terminal(update["status"].as_str()) {
+                            let remaining = {
+                                let mut tools = self.running_tools.lock().map_err(|e| e.to_string())?;
+                                tools.remove(tool_call_id);
+                                tools.values().filter(|t| t.as_str() == orig_turn.as_str()).count()
+                            };
+                            let next_error = if remaining == 0 {
+                                None
+                            } else {
+                                Some(background_tools_notice(remaining))
+                            };
+                            let _ = connection.execute(
+                                "UPDATE gemini_sessions SET error=?3 WHERE conversation_id=?1 AND turn_id=?2 AND status='completed' AND error LIKE ?4",
+                                params![
+                                    self.conversation,
+                                    orig_turn,
+                                    next_error.as_deref(),
+                                    format!("{BACKGROUND_TOOL_NOTICE_PREFIX}%")
+                                ],
+                            );
+                        }
+                        crate::events::emit_conversation_sync(&logical_cid);
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        let turn = self.turn_id.lock().map_err(|e| e.to_string())?.clone();
         let active:bool=connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM gemini_sessions WHERE conversation_id=?1 AND turn_id=?2 AND status IN {ACTIVE})"),params![self.conversation,turn],|r|r.get(0)).map_err(|e|e.to_string())?;
         if !active {
             return Ok(());
         }
-        let logical_cid = logical_conversation(&connection, &self.conversation);
-        match update["sessionUpdate"].as_str() {
+        match update_kind {
             Some("agent_thought_chunk") => {
                 let text = update["content"]["text"]
                     .as_str()
@@ -491,13 +703,27 @@ impl Client {
             Some("tool_call" | "tool_call_update") => {
                 *self.message_id.lock().map_err(|e| e.to_string())? = None;
                 *self.thought_id.lock().map_err(|e| e.to_string())? = None;
-                let id = format!(
-                    "gemini:{turn}:{}",
-                    update["toolCallId"]
-                        .as_str()
-                        .ok_or("Gemini 工具事件缺少标识")?
-                );
-                let text = serde_json::to_string(update).map_err(|e| e.to_string())?;
+                let tool_call_id = update["toolCallId"]
+                    .as_str()
+                    .ok_or("Gemini 工具事件缺少标识")?;
+                {
+                    let mut tools = self.running_tools.lock().map_err(|e| e.to_string())?;
+                    if tool_status_is_terminal(update["status"].as_str()) {
+                        tools.remove(tool_call_id);
+                    } else {
+                        tools.insert(tool_call_id.to_owned(), turn.clone());
+                    }
+                }
+                let id = format!("gemini:{turn}:{tool_call_id}");
+                let existing: Option<String> = connection
+                    .query_row(
+                        "SELECT text FROM codex_messages WHERE conversation_id=?1 AND item_id=?2",
+                        params![self.conversation, id.as_str()],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let text = merge_tool_update(existing.as_deref(), update)?;
                 connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,'tool',?3,'gemini') ON CONFLICT(conversation_id,item_id) DO UPDATE SET text=excluded.text",params![self.conversation,id.as_str(),&text]).map_err(|e|e.to_string())?;
                 crate::events::emit_delta(&logical_cid, id, "tool", Some("gemini"), "replace", text);
             }
@@ -537,6 +763,7 @@ impl Client {
     }
     fn stop(&self) -> Result<(), String> {
         self.recording.store(false, Ordering::SeqCst);
+        self.turn_active.store(false, Ordering::SeqCst);
         #[cfg(any(windows, unix))]
         self.job.terminate()?;
         let mut child = self.child.lock().map_err(|e| e.to_string())?;
@@ -551,6 +778,8 @@ impl Client {
         if !self.healthy.swap(false, Ordering::SeqCst) {
             return;
         }
+        self.recording.store(false, Ordering::SeqCst);
+        self.turn_active.store(false, Ordering::SeqCst);
         let turn = self
             .turn_id
             .lock()
@@ -566,6 +795,10 @@ impl Client {
             Some(reason),
         );
         self.approvals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.running_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -646,7 +879,32 @@ pub fn recover(store: &Store) -> Result<(), String> {
 }
 
 impl Runtime {
+    fn ensure_reaper(&self) {
+        if self.reaper_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let clients = self.clients.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let idle: Vec<Arc<Client>> = match clients.lock() {
+                Ok(mut map) => {
+                    let keys: Vec<String> = map
+                        .iter()
+                        .filter(|(_, client)| client.is_idle_for_reap())
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+                }
+                Err(_) => Vec::new(),
+            };
+            for client in idle {
+                let _ = client.stop();
+            }
+        });
+    }
+
     pub fn probe(&self, store: &Store) -> Reply {
+        self.ensure_reaper();
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         if let Some(cached) = self.cached_probe.lock().map_err(|e| e.to_string())?.as_ref() {
             if cached["auth"].is_string() {
@@ -700,6 +958,7 @@ impl Runtime {
         text: &str,
         role: &str,
     ) -> Reply {
+        self.ensure_reaper();
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         if text.trim().is_empty() || text.len() > 100_000 || model.is_empty() {
             return Err("请选择 Gemini 模型，并填写有效消息。".into());
@@ -861,6 +1120,8 @@ impl Runtime {
                     )
                     .map_err(|e| e.to_string())?;
                 client.recording.store(true, Ordering::SeqCst);
+                client.turn_active.store(true, Ordering::SeqCst);
+                client.touch_activity();
                 // Save the prompt correlation before writing; completion comes only from its real RPC response.
                 let request_id = client.next.fetch_add(1, Ordering::Relaxed);
                 let (send, receive) = mpsc::channel();
@@ -897,7 +1158,29 @@ impl Runtime {
             };
             drop(_operation);
 
-            let outcome = receive.recv_timeout(Duration::from_secs(24 * 60 * 60));
+            // Inactivity watchdog modeled after T3 Code's 15-minute prompt stall guard.
+            let mut stalled = false;
+            let outcome: Result<Reply, mpsc::RecvTimeoutError> = loop {
+                match receive.recv_timeout(PROMPT_POLL_INTERVAL) {
+                    Ok(reply) => break Ok(reply),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        break Err(mpsc::RecvTimeoutError::Disconnected);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let waiting_approval = client
+                            .approvals
+                            .lock()
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if !waiting_approval
+                            && client.inactivity_elapsed() >= PROMPT_INACTIVITY_TIMEOUT
+                        {
+                            stalled = true;
+                            break Err(mpsc::RecvTimeoutError::Timeout);
+                        }
+                    }
+                }
+            };
             let (usage_inp, usage_out, usage_cached) = match &outcome {
                 Ok(Ok(result)) => {
                     let u = &result["usage"];
@@ -910,7 +1193,14 @@ impl Runtime {
                 _ => (0, 0, 0),
             };
             let (status, reason): (&str, Option<String>) = match outcome {
-                Ok(Ok(result)) if result["stopReason"] == "end_turn" => ("completed", None),
+                Ok(Ok(result)) if result["stopReason"] == "end_turn" => {
+                    let pending_bg = client.running_tools_for_turn(&turn_bg);
+                    if pending_bg > 0 {
+                        ("completed", Some(background_tools_notice(pending_bg)))
+                    } else {
+                        ("completed", None)
+                    }
+                }
                 Ok(Ok(result)) if result["stopReason"] == "cancelled" => ("cancelled", None),
                 Ok(Ok(result)) => (
                     "failed",
@@ -920,6 +1210,10 @@ impl Runtime {
                     )),
                 ),
                 Ok(Err(error)) => ("failed", Some(error)),
+                Err(mpsc::RecvTimeoutError::Timeout) if stalled => (
+                    "interrupted",
+                    Some("Gemini 连续 15 分钟无任何输出，已自动停止当前轮次，请核对文件后继续。".into()),
+                ),
                 _ => (
                     "interrupted",
                     Some("Gemini 执行未得到可确认的完成结果，请核对文件后处理。".into()),
@@ -952,6 +1246,8 @@ impl Runtime {
                 reason.as_deref(),
             );
             client.recording.store(false, Ordering::SeqCst);
+            client.turn_active.store(false, Ordering::SeqCst);
+            client.touch_activity();
             *client
                 .message_id
                 .lock()
@@ -1019,6 +1315,7 @@ impl Runtime {
         Ok(Value::Null)
     }
     pub fn cancel(&self, store: &Store, conversation: &str) -> Reply {
+        self.ensure_reaper();
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         let slots = self.clients.lock().map_err(|e| e.to_string())?;
         let client = slots
@@ -1069,5 +1366,60 @@ impl Runtime {
                 let _ = client.stop();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_status_terminal_classification() {
+        assert!(!tool_status_is_terminal(None));
+        assert!(!tool_status_is_terminal(Some("in_progress")));
+        assert!(!tool_status_is_terminal(Some("pending")));
+        assert!(!tool_status_is_terminal(Some("running")));
+        assert!(tool_status_is_terminal(Some("completed")));
+        assert!(tool_status_is_terminal(Some("FAILED")));
+        assert!(tool_status_is_terminal(Some("cancelled")));
+    }
+
+    #[test]
+    fn merge_tool_update_preserves_initial_fields() {
+        let initial = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "kind": "execute",
+            "title": "python3 cleanup.py",
+            "status": "in_progress"
+        })
+        .to_string();
+        let patch = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_1",
+            "status": "completed",
+            "rawOutput": "done"
+        });
+        let merged_str = merge_tool_update(Some(&initial), &patch).unwrap();
+        let merged: Value = serde_json::from_str(&merged_str).unwrap();
+        assert_eq!(merged["title"], "python3 cleanup.py");
+        assert_eq!(merged["kind"], "execute");
+        assert_eq!(merged["status"], "completed");
+        assert_eq!(merged["rawOutput"], "done");
+    }
+
+    #[test]
+    fn stderr_tail_bounds_and_redacts_secrets() {
+        let mut buf = String::new();
+        for _ in 0..300 {
+            append_stderr_tail(&mut buf, "some long stderr diagnostic line 0123456789abcdef");
+        }
+        assert!(buf.len() <= STDERR_TAIL_LIMIT);
+        append_stderr_tail(&mut buf, "fatal: child exited unexpectedly");
+        append_stderr_tail(&mut buf, "Authorization: Bearer secret-token-123");
+        assert_eq!(
+            sanitized_stderr_hint(&buf).as_deref(),
+            Some("fatal: child exited unexpectedly")
+        );
     }
 }
