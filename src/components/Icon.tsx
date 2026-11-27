@@ -41,6 +41,8 @@ const paths = {
   steer: "M5 17a2 2 0 0 1 2-2h12m-4-4 4 4-4 4M5 7v8",
   edit: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z",
   play: "M7 5v14l11-7-11-7Z",
+  clock: "M12 7v5l3 2M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z",
+  download: "M12 4v11m0 0-4-4m4 4 4-4M4 18h16",
 };
 export type IconName = keyof typeof paths;
 export default function Icon({ name, size = 20 }: { name: IconName; size?: number }) {

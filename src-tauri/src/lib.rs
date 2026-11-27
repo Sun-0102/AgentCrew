@@ -23,6 +23,7 @@ mod process;
 mod project_sessions;
 mod providers;
 mod reasoning;
+mod schedules;
 mod skills;
 mod speed;
 mod storage;
@@ -47,6 +48,7 @@ pub fn run() {
             claude::recover(&store)?;
             collaboration::recover(&store)?;
             chat_queue::recover(&store)?;
+            schedules::recover(&store)?;
             pairing::recover(&store)?;
             app.manage(store);
             app.manage(codex::Runtime::default());
@@ -180,7 +182,15 @@ pub fn run() {
             git::git_turn_revert,
             local_files::local_file_action,
             local_files::local_image_read,
-            git::workspace_read_file
+            git::workspace_read_file,
+            schedules::schedule_list,
+            schedules::schedule_save,
+            schedules::schedule_toggle,
+            schedules::schedule_delete,
+            schedules::schedule_run_now,
+            schedules::schedule_runs,
+            schedules::schedule_codex_scan,
+            schedules::schedule_codex_import
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")

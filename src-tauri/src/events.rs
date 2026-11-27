@@ -214,6 +214,10 @@ pub fn emit_private_sessions_sync(agent_id: Option<&str>) {
     emit_sync(&["private_sessions"], None, None, agent_id);
 }
 
+pub fn emit_schedules_sync() {
+    emit_sync(&["schedules"], None, None, None);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

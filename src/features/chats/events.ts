@@ -24,7 +24,8 @@ export type SyncScope =
   | "group_sessions"
   | "private_sessions"
   | "agents"
-  | "dispatch";
+  | "dispatch"
+  | "schedules";
 
 export interface SyncEvent {
   seq: number;
