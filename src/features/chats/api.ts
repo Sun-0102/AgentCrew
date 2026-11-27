@@ -2,9 +2,9 @@ import { useSyncExternalStore } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 export const desktop = isTauri();
 export interface Group { id: string; name: string; members: string[]; project_id: string | null; created_at: string; preview: string | null; updated_at: string | null; status: string | null; session_count?: number }
-export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
-export interface PrivateSession { id: string; agent_id: string; name: string; archived: boolean; is_default?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
-export interface ProjectSession { id: string; project_id: string; name: string; archived: boolean; is_default?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface GroupSession { id: string; group_id: string; name: string; archived: boolean; is_scheduled?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface PrivateSession { id: string; agent_id: string; name: string; archived: boolean; is_default?: boolean; is_scheduled?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
+export interface ProjectSession { id: string; project_id: string; name: string; archived: boolean; is_default?: boolean; is_scheduled?: boolean; created_at: string; preview: string | null; updated_at: string | null; status: string | null }
 export interface Model { model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts?: { reasoningEffort: string; description: string }[]; defaultReasoningEffort?: string; serviceTiers?: { id: string; name: string; description: string }[] }
 export interface Probe { version: string; executable: string; auth: string | null; requires_auth: boolean; models: Model[]; sidebar_warning: string | null }
 export interface Message { agent?: string; id: string; role: string; text: string; created_at: string | null }

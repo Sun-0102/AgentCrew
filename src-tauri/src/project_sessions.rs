@@ -9,6 +9,7 @@ pub struct ProjectSession {
     pub name: String,
     pub archived: bool,
     pub is_default: bool,
+    pub is_scheduled: bool,
     pub created_at: String,
     pub preview: Option<String>,
     pub updated_at: Option<String>,
@@ -85,7 +86,11 @@ impl Store {
                         (SELECT g.status FROM gemini_sessions g JOIN agent_sessions a ON a.runtime_conversation_id=g.conversation_id WHERE a.conversation_id=s.conversation_id AND g.status IN ('starting','running','waiting_approval','cancel_requested','stopping') LIMIT 1),
                         (SELECT c.status FROM claude_sessions c JOIN agent_sessions a ON a.runtime_conversation_id=c.conversation_id WHERE a.conversation_id=s.conversation_id AND c.status IN ('starting','running','waiting_approval','cancel_requested','stopping') LIMIT 1)
                     ),
-                    COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=s.conversation_id), 0) AS last_seq
+                    COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=s.conversation_id), 0) AS last_seq,
+                    (s.is_default = 0 AND (
+                        EXISTS(SELECT 1 FROM scheduled_task_runs r WHERE r.conversation_id=s.conversation_id)
+                        OR EXISTS(SELECT 1 FROM scheduled_tasks t WHERE t.session_id=s.conversation_id)
+                    )) AS is_scheduled
                  FROM project_sessions s
                  WHERE s.project_id=?1
                  ORDER BY last_seq DESC, s.created_at DESC",
@@ -103,6 +108,7 @@ impl Store {
                     preview: r.get(6)?,
                     updated_at: r.get(7)?,
                     status: r.get(8)?,
+                    is_scheduled: r.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?;

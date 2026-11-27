@@ -7,6 +7,7 @@ import { type Project } from "../projects/api";
 import {
   saveSchedule,
   type ScheduleKind,
+  type ScheduleSessionMode,
   type ScheduledTask,
   type TargetType,
 } from "./api";
@@ -134,6 +135,9 @@ export default function ScheduleDialog({
     existing?.target_type === "group" ? (existing.agent_id ?? "all") : "all",
   );
   const [model, setModel] = useState(existing?.model ?? "");
+  const [sessionMode, setSessionMode] = useState<ScheduleSessionMode>(
+    existing?.session_mode ?? "new",
+  );
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>(
     existing?.schedule_kind ?? preset?.schedule_kind ?? "daily",
   );
@@ -277,6 +281,7 @@ export default function ScheduleDialog({
         model: targetType === "group" ? "" : model.trim(),
         reasoning_effort: existing?.reasoning_effort ?? null,
         service_tier: existing?.service_tier ?? null,
+        session_mode: sessionMode,
       });
       onSaved(saved, !existing);
     } catch (cause) {
@@ -441,6 +446,37 @@ export default function ScheduleDialog({
               </div>
             </div>
           )}
+
+          <div className="sched-sub-field" style={{ marginTop: 8 }}>
+            <div className="sched-group-head">
+              <span>会话方式</span>
+              <div className="sched-segmented" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sessionMode === "new"}
+                  className={sessionMode === "new" ? "active" : ""}
+                  onClick={() => setSessionMode("new")}
+                >
+                  每次新建会话
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sessionMode === "dedicated"}
+                  className={sessionMode === "dedicated" ? "active" : ""}
+                  onClick={() => setSessionMode("dedicated")}
+                >
+                  复用专属会话
+                </button>
+              </div>
+            </div>
+            <small className="sched-hint">
+              {sessionMode === "new"
+                ? "每次触发自动新建独立会话，上下文干净且不打扰默认会话。"
+                : "为该任务创建并持续复用一个专属会话，保留历史执行上下文。"}
+            </small>
+          </div>
         </div>
 
         <div className="sched-card-group">

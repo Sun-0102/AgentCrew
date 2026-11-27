@@ -3,6 +3,7 @@ import { desktop } from "../chats/api";
 
 export type ScheduleKind = "interval" | "daily" | "weekly" | "cron";
 export type TargetType = "agent" | "project" | "group";
+export type ScheduleSessionMode = "new" | "dedicated";
 
 export interface ScheduledTask {
   id: string;
@@ -21,6 +22,8 @@ export interface ScheduledTask {
   model: string;
   reasoning_effort: string | null;
   service_tier: string | null;
+  session_mode: ScheduleSessionMode;
+  session_id: string | null;
   source: string;
   source_external_id: string | null;
   next_run_at: number | null;
@@ -61,6 +64,7 @@ export interface ScheduledTaskInput {
   model?: string | null;
   reasoning_effort?: string | null;
   service_tier?: string | null;
+  session_mode?: ScheduleSessionMode;
 }
 
 export interface CodexAutomationCandidate {

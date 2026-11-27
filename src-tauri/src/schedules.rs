@@ -29,6 +29,8 @@ pub struct ScheduledTask {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    pub session_mode: String,
+    pub session_id: Option<String>,
     pub source: String,
     pub source_external_id: Option<String>,
     pub next_run_at: Option<i64>,
@@ -71,6 +73,7 @@ pub struct ScheduledTaskInput {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    pub session_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -521,10 +524,12 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         run_count: row.get(22)?,
         created_at: row.get(23)?,
         updated_at: row.get(24)?,
+        session_mode: row.get(25)?,
+        session_id: row.get(26)?,
     })
 }
 
-const SELECT_TASK_SQL: &str = "SELECT id,name,prompt,enabled,schedule_kind,interval_minutes,time_of_day,weekdays,cron_expr,target_type,agent_id,project_id,group_id,model,reasoning_effort,service_tier,source,source_external_id,next_run_at,last_run_at,last_status,last_error,run_count,created_at,updated_at FROM scheduled_tasks";
+const SELECT_TASK_SQL: &str = "SELECT id,name,prompt,enabled,schedule_kind,interval_minutes,time_of_day,weekdays,cron_expr,target_type,agent_id,project_id,group_id,model,reasoning_effort,service_tier,source,source_external_id,next_run_at,last_run_at,last_status,last_error,run_count,created_at,updated_at,session_mode,session_id FROM scheduled_tasks";
 
 pub fn list(store: &Store) -> Result<Vec<ScheduledTask>, String> {
     let conn = store.connect()?;
@@ -634,6 +639,11 @@ fn validate_and_normalize(store: &Store, input: &ScheduledTaskInput) -> Result<O
         }
         _ => return Err("不支持的目标类型。".into()),
     }
+    if let Some(mode) = input.session_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !matches!(mode, "new" | "dedicated") {
+            return Err("不支持的会话模式。".into());
+        }
+    }
     // Always validate schedule expression even when disabled
     let next = compute_next_run(
         &input.schedule_kind,
@@ -689,10 +699,25 @@ pub fn save(store: &Store, input: ScheduledTaskInput) -> Result<ScheduledTask, S
         None
     };
 
+    let session_mode = match input.session_mode.as_deref().map(str::trim) {
+        Some("dedicated") => "dedicated",
+        _ => "new",
+    };
+
     let id = if let Some(existing_id) = input.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let prev = get(store, existing_id)?;
+        let target_changed = prev.target_type != input.target_type
+            || prev.agent_id != agent_id
+            || prev.project_id != project_id
+            || prev.group_id != group_id;
+        let next_session_id = if session_mode == "dedicated" && !target_changed {
+            prev.session_id
+        } else {
+            None
+        };
         let updated = conn
             .execute(
-                "UPDATE scheduled_tasks SET name=?2,prompt=?3,enabled=?4,schedule_kind=?5,interval_minutes=?6,time_of_day=?7,weekdays=?8,cron_expr=?9,target_type=?10,agent_id=?11,project_id=?12,group_id=?13,model=?14,reasoning_effort=?15,service_tier=?16,next_run_at=?17,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                "UPDATE scheduled_tasks SET name=?2,prompt=?3,enabled=?4,schedule_kind=?5,interval_minutes=?6,time_of_day=?7,weekdays=?8,cron_expr=?9,target_type=?10,agent_id=?11,project_id=?12,group_id=?13,model=?14,reasoning_effort=?15,service_tier=?16,next_run_at=?17,session_mode=?18,session_id=?19,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
                 params![
                     existing_id,
                     input.name.trim(),
@@ -711,6 +736,8 @@ pub fn save(store: &Store, input: ScheduledTaskInput) -> Result<ScheduledTask, S
                     reasoning,
                     tier,
                     next_run_at,
+                    session_mode,
+                    next_session_id,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -721,7 +748,7 @@ pub fn save(store: &Store, input: ScheduledTaskInput) -> Result<ScheduledTask, S
     } else {
         let new_id = format!("sched-{}", uuid::Uuid::new_v4());
         conn.execute(
-            "INSERT INTO scheduled_tasks(id,name,prompt,enabled,schedule_kind,interval_minutes,time_of_day,weekdays,cron_expr,target_type,agent_id,project_id,group_id,model,reasoning_effort,service_tier,next_run_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            "INSERT INTO scheduled_tasks(id,name,prompt,enabled,schedule_kind,interval_minutes,time_of_day,weekdays,cron_expr,target_type,agent_id,project_id,group_id,model,reasoning_effort,service_tier,next_run_at,session_mode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 new_id,
                 input.name.trim(),
@@ -740,6 +767,7 @@ pub fn save(store: &Store, input: ScheduledTaskInput) -> Result<ScheduledTask, S
                 reasoning,
                 tier,
                 next_run_at,
+                session_mode,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -841,6 +869,106 @@ fn build_scheduled_prompt(task: &ScheduledTask) -> String {
     )
 }
 
+fn build_session_title(task_name: &str, started_at: i64, dedicated: bool) -> String {
+    let base = task_name.trim();
+    let base = if base.is_empty() { "定时任务" } else { base };
+    if dedicated {
+        let truncated: String = base.chars().take(35).collect();
+        return format!("定时 · {truncated}");
+    }
+    let suffix = epoch_to_local(started_at)
+        .map(|dt| format!(" {:02}-{:02} {:02}:{:02}", dt.month, dt.day, dt.hour, dt.minute))
+        .unwrap_or_default();
+    let max_name_chars = 40usize.saturating_sub("定时 · ".chars().count() + suffix.chars().count());
+    let truncated: String = base.chars().take(max_name_chars.max(1)).collect();
+    format!("定时 · {truncated}{suffix}")
+}
+
+fn dedicated_session_usable(store: &Store, task: &ScheduledTask, conv_id: &str) -> Result<bool, String> {
+    let conn = store.connect()?;
+    let usable: bool = match task.target_type.as_str() {
+        "agent" => {
+            let Some(agent_id) = task.agent_id.as_deref() else {
+                return Ok(false);
+            };
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM private_sessions WHERE conversation_id=?1 AND agent_id=?2 AND archived=0 AND is_default=0)",
+                params![conv_id, agent_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        }
+        "project" => {
+            let Some(project_id) = task.project_id.as_deref() else {
+                return Ok(false);
+            };
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project_sessions WHERE conversation_id=?1 AND project_id=?2 AND archived=0 AND is_default=0)",
+                params![conv_id, project_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        }
+        "group" => {
+            let Some(group_id) = task.group_id.as_deref() else {
+                return Ok(false);
+            };
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM group_sessions WHERE conversation_id=?1 AND group_id=?2 AND archived=0 AND conversation_id != group_id)",
+                params![conv_id, group_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        }
+        _ => false,
+    };
+    Ok(usable)
+}
+
+fn resolve_task_conversation(
+    store: &Store,
+    task: &ScheduledTask,
+    started_at: i64,
+) -> Result<String, String> {
+    let dedicated = task.session_mode == "dedicated";
+    if dedicated {
+        if let Some(existing_id) = task.session_id.as_deref().filter(|s| !s.is_empty()) {
+            if dedicated_session_usable(store, task, existing_id)? {
+                return Ok(existing_id.to_owned());
+            }
+        }
+    }
+
+    let title = build_session_title(&task.name, started_at, dedicated);
+    let conv_id = match task.target_type.as_str() {
+        "agent" => {
+            let agent_id = task.agent_id.as_deref().ok_or("任务未指定执行 Agent。")?;
+            store.create_private_session(agent_id, &title)?.id
+        }
+        "project" => {
+            let project_id = task.project_id.as_deref().ok_or("任务未绑定项目空间。")?;
+            store.create_project_session(project_id, &title)?.id
+        }
+        "group" => {
+            let group_id = task.group_id.as_deref().ok_or("任务未选择目标群聊。")?;
+            store.create_group_session(group_id, &title)?.id
+        }
+        _ => return Err("不支持的目标类型。".into()),
+    };
+
+    if dedicated {
+        store
+            .connect()?
+            .execute(
+                "UPDATE scheduled_tasks SET session_id=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                params![task.id, conv_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(conv_id)
+}
+
 fn dispatch_task(
     app: &tauri::AppHandle,
     store: &Store,
@@ -883,7 +1011,7 @@ fn dispatch_task(
                 } else {
                     None
                 };
-                let conv_id = if task.target_type == "project" {
+                if task.target_type == "project" {
                     let project_id = task
                         .project_id
                         .as_deref()
@@ -895,11 +1023,10 @@ fn dispatch_task(
                         .map_err(|e| e.to_string())?
                         .ok_or("绑定的项目已不存在。")?;
                     target_summary = format!("{project_name} · {agent_id}");
-                    agents::private_conversation(store, agent_id, Some(project_id))?
                 } else {
                     target_summary = format!("{agent_id} 私聊");
-                    agents::private_conversation(store, agent_id, None)?
-                };
+                }
+                let conv_id = resolve_task_conversation(store, task, started_at)?;
                 conversation_id = Some(conv_id.clone());
 
                 let status = chat_queue::session_status(app, store, agent_id, &conv_id)?;
@@ -914,7 +1041,6 @@ fn dispatch_task(
                         task.reasoning_effort.as_deref(),
                         task.service_tier.as_deref(),
                     )?;
-                    crate::events::emit_conversation_sync(&conv_id);
                     return Ok("queued");
                 }
                 let runtime = agents::binding(store, agent_id, &conv_id)?;
@@ -929,7 +1055,6 @@ fn dispatch_task(
                     crate::speed::save(store, &runtime, &model, task.service_tier.as_deref())?;
                 }
                 agents::send(app, store, agent_id, &conv_id, &model, &dispatched_prompt, "user")?;
-                crate::events::emit_conversation_sync(&conv_id);
                 Ok("dispatched")
             }
             "group" => {
@@ -939,7 +1064,8 @@ fn dispatch_task(
                     .ok_or("任务未选择目标群聊。")?;
                 let group = store.group(group_id)?;
                 target_summary = format!("群聊 · {}", group.name);
-                conversation_id = Some(group_id.to_owned());
+                let conv_id = resolve_task_conversation(store, task, started_at)?;
+                conversation_id = Some(conv_id.clone());
                 let gate = app.state::<crate::deepseek::ExecutionGate>();
                 let _guard = gate.0.lock().map_err(|e| e.to_string())?;
 
@@ -954,7 +1080,7 @@ fn dispatch_task(
                             resolve_fallback_model(store, &kind).unwrap_or_default()
                         };
                         if !resolved.is_empty() {
-                            if let Ok(runtime) = agents::binding(store, member, group_id) {
+                            if let Ok(runtime) = agents::binding(store, member, &conv_id) {
                                 let _ = crate::reasoning::save(
                                     store,
                                     &runtime,
@@ -983,14 +1109,13 @@ fn dispatch_task(
                 collaboration::start_instances(
                     app,
                     store,
-                    group_id,
+                    &conv_id,
                     target_agent,
                     models.get("codex").map(String::as_str).unwrap_or(""),
                     models.get("deepseek").map(String::as_str).unwrap_or(""),
                     &dispatched_prompt,
                     &models,
                 )?;
-                crate::events::emit_conversation_sync(group_id);
                 Ok("dispatched")
             }
             _ => Err("不支持的目标类型。".into()),
@@ -1023,6 +1148,9 @@ fn dispatch_task(
             "UPDATE scheduled_tasks SET last_run_at=?2,last_status=?3,last_error=?4,run_count=run_count+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
             params![task.id, started_at, last_status, error],
         );
+    }
+    if let Some(ref conv_id) = conversation_id {
+        crate::events::emit_conversation_sync(conv_id);
     }
     crate::events::emit_schedules_sync();
 
@@ -1540,5 +1668,87 @@ mod tests {
 
         let scanned_again = scan_codex_in(&codex_db, &store).unwrap();
         assert!(scanned_again.items[0].already_imported);
+    }
+
+    #[test]
+    fn resolves_isolated_sessions_for_new_and_dedicated_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("app.sqlite")).unwrap();
+        let project = store.add_project(dir.path().to_str().unwrap()).unwrap();
+
+        let new_task = save(
+            &store,
+            ScheduledTaskInput {
+                id: None,
+                name: "每天天气预报".into(),
+                prompt: "查询天气".into(),
+                enabled: true,
+                schedule_kind: "daily".into(),
+                interval_minutes: None,
+                time_of_day: Some("08:00".into()),
+                weekdays: None,
+                cron_expr: None,
+                target_type: "project".into(),
+                agent_id: Some("codex".into()),
+                project_id: Some(project.id.clone()),
+                group_id: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                session_mode: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(new_task.session_mode, "new");
+        let run1 = resolve_task_conversation(&store, &new_task, 1_750_000_000).unwrap();
+        let run2 = resolve_task_conversation(&store, &new_task, 1_750_003_600).unwrap();
+        assert_ne!(run1, project.id);
+        assert_ne!(run2, project.id);
+        assert_ne!(run1, run2);
+
+        let dedicated_task = save(
+            &store,
+            ScheduledTaskInput {
+                id: None,
+                name: "每日项目进度追踪".into(),
+                prompt: "汇总进度".into(),
+                enabled: true,
+                schedule_kind: "daily".into(),
+                interval_minutes: None,
+                time_of_day: Some("18:00".into()),
+                weekdays: None,
+                cron_expr: None,
+                target_type: "project".into(),
+                agent_id: Some("codex".into()),
+                project_id: Some(project.id.clone()),
+                group_id: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                session_mode: Some("dedicated".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(dedicated_task.session_mode, "dedicated");
+        let d1 = resolve_task_conversation(&store, &dedicated_task, 1_750_000_000).unwrap();
+        assert_ne!(d1, project.id);
+
+        let reloaded = get(&store, &dedicated_task.id).unwrap();
+        assert_eq!(reloaded.session_id.as_deref(), Some(d1.as_str()));
+        let d2 = resolve_task_conversation(&store, &reloaded, 1_750_003_600).unwrap();
+        assert_eq!(d1, d2);
+
+        let sessions = store.project_sessions(&project.id).unwrap();
+        let default_session = sessions.iter().find(|s| s.id == project.id).unwrap();
+        let dedicated_session = sessions.iter().find(|s| s.id == d1).unwrap();
+        assert!(!default_session.is_scheduled);
+        assert!(dedicated_session.is_scheduled);
+
+        // Archiving the dedicated session causes next run to create a fresh one
+        store
+            .update_project_session(&project.id, &d1, &dedicated_session.name, true)
+            .unwrap();
+        let d3 = resolve_task_conversation(&store, &reloaded, 1_750_007_200).unwrap();
+        assert_ne!(d3, d1);
     }
 }

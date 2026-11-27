@@ -8,6 +8,7 @@ pub struct GroupSession {
     pub group_id: String,
     pub name: String,
     pub archived: bool,
+    pub is_scheduled: bool,
     pub created_at: String,
     pub preview: Option<String>,
     pub updated_at: Option<String>,
@@ -34,10 +35,11 @@ impl Store {
         let parent = self.parent_group_id(group)?;
         if parent != group { return Err("请从群聊打开会话列表。".into()); }
         let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT s.conversation_id,s.group_id,s.name,s.archived,s.created_at,(SELECT text FROM codex_messages WHERE conversation_id=s.conversation_id AND role IN ('user','assistant') ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=s.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT status FROM group_tasks WHERE conversation_id=s.conversation_id ORDER BY rowid DESC LIMIT 1) FROM group_sessions s WHERE s.group_id=?1 ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=s.conversation_id),0) DESC,s.created_at DESC").map_err(|e| e.to_string())?;
+        let mut statement = connection.prepare("SELECT s.conversation_id,s.group_id,s.name,s.archived,s.created_at,(SELECT text FROM codex_messages WHERE conversation_id=s.conversation_id AND role IN ('user','assistant') ORDER BY sequence DESC LIMIT 1),(SELECT created_at FROM codex_messages WHERE conversation_id=s.conversation_id ORDER BY sequence DESC LIMIT 1),(SELECT status FROM group_tasks WHERE conversation_id=s.conversation_id ORDER BY rowid DESC LIMIT 1),(s.conversation_id != s.group_id AND (EXISTS(SELECT 1 FROM scheduled_task_runs r WHERE r.conversation_id=s.conversation_id) OR EXISTS(SELECT 1 FROM scheduled_tasks t WHERE t.session_id=s.conversation_id))) FROM group_sessions s WHERE s.group_id=?1 ORDER BY COALESCE((SELECT MAX(sequence) FROM codex_messages WHERE conversation_id=s.conversation_id),0) DESC,s.created_at DESC").map_err(|e| e.to_string())?;
         let rows = statement.query_map([group], |r| Ok(GroupSession {
             id: r.get(0)?, group_id: r.get(1)?, name: r.get(2)?, archived: r.get(3)?,
             created_at: r.get(4)?, preview: r.get(5)?, updated_at: r.get(6)?, status: r.get(7)?,
+            is_scheduled: r.get(8)?,
         })).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }

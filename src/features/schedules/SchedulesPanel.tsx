@@ -60,7 +60,7 @@ export default function SchedulesPanel({
   probes: Record<string, Probe>;
   onRefresh: () => Promise<void>;
   onToggleDispatch: () => Promise<void>;
-  onOpenTarget: (task: ScheduledTask) => void;
+  onOpenTarget: (task: ScheduledTask, conversationId?: string | null) => void;
   onNotify: (msg: string) => void;
   onError: (msg: string) => void;
 }) {
@@ -359,6 +359,9 @@ export default function SchedulesPanel({
                                 {formatScheduleRule(task)}
                               </span>
                               <span className="schedule-chip subtle">{targetLabel(task)}</span>
+                              <span className="schedule-chip subtle">
+                                {task.session_mode === "dedicated" ? "专属会话" : "独立会话"}
+                              </span>
                               {task.model && (
                                 <span className="schedule-chip subtle">{task.model}</span>
                               )}
@@ -422,9 +425,14 @@ export default function SchedulesPanel({
                           <button
                             type="button"
                             className="icon-button"
-                            title="前往对应对话"
-                            aria-label="前往对应对话"
-                            onClick={() => onOpenTarget(task)}
+                            title="前往最近一次执行对话"
+                            aria-label="前往最近一次执行对话"
+                            onClick={() => {
+                              const latestRunConv = runs.find(
+                                r => r.task_id === task.id && r.conversation_id,
+                              )?.conversation_id;
+                              onOpenTarget(task, task.session_id ?? latestRunConv ?? null);
+                            }}
                           >
                             <Icon name="external" size={15} />
                           </button>
@@ -510,7 +518,7 @@ export default function SchedulesPanel({
                           <button
                             type="button"
                             className="schedule-jump-btn"
-                            onClick={() => onOpenTarget(owner)}
+                            onClick={() => onOpenTarget(owner, run.conversation_id)}
                           >
                             查看对话 →
                           </button>

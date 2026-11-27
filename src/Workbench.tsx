@@ -286,11 +286,11 @@ export default function Workbench() {
   }, []);
   const group = selection.kind === "group" ? groups.find(g => g.id === selection.id) : undefined;
   const groupSessions = sessionsOwner === group?.id ? sessions : [];
-  const session = groupSessions.find(s => s.id === sessionSelection[group?.id ?? ""]) ?? groupSessions.find(s => !s.archived) ?? groupSessions[0];
+  const session = groupSessions.find(s => s.id === sessionSelection[group?.id ?? ""]) ?? groupSessions.find(s => !s.archived && !s.is_scheduled) ?? groupSessions.find(s => !s.archived) ?? groupSessions[0];
   const inGroup = mode === "chats" && !!group && !groupHub;
   const project = selection.kind === "project" ? projects.find(p => p.id === selection.id) : projects.find(p => p.id === group?.project_id);
   const currentProjectSessions = projectSessionsOwner === project?.id ? projectSessions : [];
-  const projectSession = currentProjectSessions.find(s => s.id === projectSessionSelection[project?.id ?? ""]) ?? currentProjectSessions.find(s => !s.archived) ?? currentProjectSessions[0];
+  const projectSession = currentProjectSessions.find(s => s.id === projectSessionSelection[project?.id ?? ""]) ?? currentProjectSessions.find(s => !s.archived && !s.is_scheduled) ?? currentProjectSessions.find(s => !s.archived) ?? currentProjectSessions[0];
   const projectAgentKey = selection.kind === "project" && projectSession ? `${selection.id}:${projectSession.id}` : "";
   const savedProjectAgent = projectAgents[projectAgentKey];
   const defaultAgent = hasCodexConnected ? "codex" : connectedAgents[0]?.id ?? "";
@@ -338,7 +338,7 @@ export default function Workbench() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   const agentSessions = privateSessionsOwner === selectedAgent ? privateSessions : [];
-  const privateSession = agentSessions.find(s => s.id === privateSessionSelection[selectedAgent]) ?? agentSessions.find(s => !s.archived) ?? agentSessions[0];
+  const privateSession = agentSessions.find(s => s.id === privateSessionSelection[selectedAgent]) ?? agentSessions.find(s => !s.archived && !s.is_scheduled) ?? agentSessions.find(s => !s.archived) ?? agentSessions[0];
   const activeSession: ChatSession | undefined = inGroup ? session : inAgent ? privateSession : inProject ? projectSession : undefined;
   useEffect(() => {
     if (agentsLoaded && selection.kind === "personal" && !hasCodexConnected && selectedAgent) setSelection(selectedAgent === "deepseek" ? {kind:"deepseek"} : {kind:"agent",id:selectedAgent});
@@ -378,24 +378,68 @@ export default function Workbench() {
     setSchedulesOpen(true);
     void refreshSchedules();
   }
-  function openScheduleTarget(task: ScheduledTask) {
-    setSchedulesOpen(false);
-    setUsageOpen(false);
-    setGitOpen(false);
+  async function openScheduleTarget(task: ScheduledTask, conversationId?: string | null) {
     if (task.target_type === "group" && task.group_id) {
+      if (conversationId) {
+        const next = { ...sessionSelection, [task.group_id]: conversationId };
+        setSessionSelection(next);
+        try { localStorage.setItem("ai-gent.selected-sessions.v1", JSON.stringify(next)); } catch { /* ignore */ }
+        try {
+          sessionsRevision.current += 1;
+          const list = await getGroupSessions(task.group_id);
+          setSessionsOwner(task.group_id);
+          setSessions(list);
+        } catch { /* ignore */ }
+      }
       openGroup(task.group_id);
       return;
     }
     if (task.target_type === "project" && task.project_id) {
+      if (conversationId) {
+        const next = { ...projectSessionSelection, [task.project_id]: conversationId };
+        setProjectSessionSelection(next);
+        try { localStorage.setItem("ai-gent.selected-project-sessions.v1", JSON.stringify(next)); } catch { /* ignore */ }
+        if (task.agent_id) {
+          const nextAgents = { ...projectAgents, [`${task.project_id}:${conversationId}`]: task.agent_id };
+          setProjectAgents(nextAgents);
+          try { localStorage.setItem("ai-gent.project-agents.v1", JSON.stringify(nextAgents)); } catch { /* ignore */ }
+        }
+        try {
+          projectSessionsRevision.current += 1;
+          const list = await getProjectSessions(task.project_id);
+          setProjectSessionsOwner(task.project_id);
+          setProjectSessions(list);
+        } catch { /* ignore */ }
+      }
+      setSchedulesOpen(false);
+      setUsageOpen(false);
+      setGitOpen(false);
       setGroupHub(false);
       setMode("projects");
       setSelection({ kind: "project", id: task.project_id });
       return;
     }
     if (task.agent_id) {
+      if (conversationId) {
+        const next = { ...privateSessionSelection, [task.agent_id]: conversationId };
+        setPrivateSessionSelection(next);
+        try { localStorage.setItem("ai-gent.selected-private-sessions.v1", JSON.stringify(next)); } catch { /* ignore */ }
+        try {
+          privateSessionsRevision.current += 1;
+          const list = await getPrivateSessions(task.agent_id);
+          setPrivateSessionsOwner(task.agent_id);
+          setPrivateSessions(list);
+        } catch { /* ignore */ }
+      }
+      setSchedulesOpen(false);
+      setUsageOpen(false);
+      setGitOpen(false);
       selectAgent(task.agent_id);
       return;
     }
+    setSchedulesOpen(false);
+    setUsageOpen(false);
+    setGitOpen(false);
     showAllChats();
   }
   async function addProjectPath(path: string): Promise<Project | null> {
