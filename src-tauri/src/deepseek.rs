@@ -144,6 +144,8 @@ struct Client {
     input: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
     turn_usage: Mutex<(i64, i64, i64)>,
+    stream_active: AtomicBool,
+    stream_logical_cid: Mutex<Option<String>>,
     next: AtomicU64,
     healthy: AtomicBool,
     database: PathBuf,
@@ -176,7 +178,11 @@ impl Client {
             let skills_plugin = runtime_dir(store)?.join("skills-plugin.cjs");
             std::fs::write(&skills_plugin, include_str!("deepseek_skills_plugin.cjs")).map_err(|e| e.to_string())?;
             format!("{runtime_patch}- insert:\n    - id: ai-gent-skills\n      name: {}\n", serde_json::to_string(&skills_plugin.to_string_lossy()).map_err(|e| e.to_string())?)
-        } else { runtime_patch };
+        } else {
+            let stream_plugin = runtime_dir(store)?.join("stream-plugin.cjs");
+            std::fs::write(&stream_plugin, include_str!("deepseek_stream_plugin.cjs")).map_err(|e| e.to_string())?;
+            format!("{runtime_patch}- insert:\n    - id: ai-gent-stream\n      name: {}\n", serde_json::to_string(&stream_plugin.to_string_lossy()).map_err(|e| e.to_string())?)
+        };
         std::fs::write(&patch, runtime_patch).map_err(|e| e.to_string())?;
         let home = std::env::var_os("DSH_HOME")
             .map(PathBuf::from)
@@ -219,6 +225,8 @@ impl Client {
             input: Mutex::new(input),
             pending: Mutex::new(HashMap::new()),
             turn_usage: Mutex::new((0, 0, 0)),
+            stream_active: AtomicBool::new(false),
+            stream_logical_cid: Mutex::new(None),
             next: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database: store.path.clone(),
@@ -294,7 +302,68 @@ impl Client {
                 return self.write(json!({"jsonrpc":"2.0","id":value["id"],"error":{"code":-32601,"message":"Unsupported host request; approval not granted"}}));
             }
             let p = &value["params"];
-            if p["sessionId"] != self.thread || method != "session.event" {
+            if p["sessionId"] != self.thread {
+                return Ok(());
+            }
+            if method == "ai-gent.stream" {
+                let kind = p["kind"].as_str().unwrap_or("");
+                let text = p["text"].as_str().unwrap_or("");
+                if !matches!(kind, "assistant" | "thinking") || text.is_empty() {
+                    return Ok(());
+                }
+                let logical_cid = {
+                    let cached = self
+                        .stream_logical_cid
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone());
+                    if let Some(cid) = cached {
+                        cid
+                    } else {
+                        let store = Store {
+                            path: self.database.clone(),
+                        };
+                        let connection = store.connect()?;
+                        let active: bool = connection
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM deepseek_sessions WHERE thread_id=?1 AND status='running')",
+                                [&self.thread],
+                                |r| r.get(0),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if !active {
+                            return Ok(());
+                        }
+                        let cid = logical_conversation(&connection, &self.conversation);
+                        if let Ok(mut guard) = self.stream_logical_cid.lock() {
+                            *guard = Some(cid.clone());
+                        }
+                        cid
+                    }
+                };
+                self.stream_active.store(true, Ordering::SeqCst);
+                let attempt = p["attemptId"].as_str().unwrap_or("live");
+                let raw_id = if kind == "thinking" {
+                    format!("stream:reasoning:{attempt}")
+                } else {
+                    format!("stream:{attempt}")
+                };
+                let emitted_id = if self.conversation == PERSONAL {
+                    raw_id
+                } else {
+                    format!("deepseek:{raw_id}")
+                };
+                crate::events::emit_delta(
+                    logical_cid,
+                    emitted_id,
+                    kind,
+                    Some("deepseek"),
+                    "append",
+                    text,
+                );
+                return Ok(());
+            }
+            if method != "session.event" {
                 return Ok(());
             }
             let event = &p["event"];
@@ -313,6 +382,10 @@ impl Client {
                     if let Ok(mut acc) = self.turn_usage.lock() {
                         *acc = (0, 0, 0);
                     }
+                    self.stream_active.store(false, Ordering::SeqCst);
+                    if let Ok(mut guard) = self.stream_logical_cid.lock() {
+                        *guard = Some(logical_conversation(&connection, &self.conversation));
+                    }
                 }
                 "assistant/message" | "tool/result" => {
                     let message = &data["message"];
@@ -321,6 +394,7 @@ impl Client {
                     } else {
                         "assistant"
                     };
+                    let had_stream = role == "assistant" && self.stream_active.swap(false, Ordering::SeqCst);
                     if role == "assistant" {
                         let (step_in, step_out, step_cached) = extract_usage(data);
                         if step_in > 0 || step_out > 0 || step_cached > 0 {
@@ -333,19 +407,33 @@ impl Client {
                         let reasoning = reasoning_text(message);
                         if !reasoning.is_empty() {
                             let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
-                            append_message(
-                                &connection,
-                                &self.conversation,
-                                &format!("reasoning:{id}"),
-                                "thinking",
-                                &reasoning,
-                            )?;
+                            if had_stream {
+                                persist_message(
+                                    &connection,
+                                    &self.conversation,
+                                    &format!("reasoning:{id}"),
+                                    "thinking",
+                                    &reasoning,
+                                )?;
+                            } else {
+                                append_message(
+                                    &connection,
+                                    &self.conversation,
+                                    &format!("reasoning:{id}"),
+                                    "thinking",
+                                    &reasoning,
+                                )?;
+                            }
                         }
                     }
                     let text = message_text(message);
                     if !text.is_empty() {
                         let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
-                        append_message(&connection, &self.conversation, id, role, &text)?;
+                        if had_stream {
+                            persist_message(&connection, &self.conversation, id, role, &text)?;
+                        } else {
+                            append_message(&connection, &self.conversation, id, role, &text)?;
+                        }
                     }
                     if let Some(blocks) = message["content"].as_array() {
                         for block in blocks.iter().filter(|b| b["type"] == "tool-call") {
@@ -363,8 +451,16 @@ impl Client {
                             )?;
                         }
                     }
+                    if had_stream {
+                        let logical_cid = logical_conversation(&connection, &self.conversation);
+                        crate::events::emit_conversation_sync(&logical_cid);
+                    }
                 }
                 "turn/end" => {
+                    self.stream_active.store(false, Ordering::SeqCst);
+                    if let Ok(mut guard) = self.stream_logical_cid.lock() {
+                        *guard = None;
+                    }
                     let reason = data["reason"]["kind"].as_str().unwrap_or("unknown");
                     let (mut inp, mut out, mut cached) = self
                         .turn_usage
@@ -472,6 +568,23 @@ fn logical_conversation(connection: &rusqlite::Connection, conversation: &str) -
         .unwrap_or_else(|_| conversation.to_owned())
 }
 
+fn persist_message(
+    connection: &rusqlite::Connection,
+    conversation: &str,
+    id: &str,
+    role: &str,
+    text: &str,
+) -> Result<String, String> {
+    if conversation == PERSONAL {
+        connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,?2,?3) ON CONFLICT(item_id) DO NOTHING", params![id,role,text]).map_err(|e|e.to_string())?;
+        Ok(id.to_owned())
+    } else {
+        let prefixed = format!("deepseek:{id}");
+        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'deepseek') ON CONFLICT(conversation_id,item_id) DO NOTHING", params![conversation,&prefixed,role,text]).map_err(|e|e.to_string())?;
+        Ok(prefixed)
+    }
+}
+
 fn append_message(
     connection: &rusqlite::Connection,
     conversation: &str,
@@ -479,14 +592,7 @@ fn append_message(
     role: &str,
     text: &str,
 ) -> Result<(), String> {
-    let emitted_id = if conversation == PERSONAL {
-        connection.execute("INSERT INTO deepseek_messages(item_id,role,text) VALUES(?1,?2,?3) ON CONFLICT(item_id) DO NOTHING", params![id,role,text]).map_err(|e|e.to_string())?;
-        id.to_owned()
-    } else {
-        let prefixed = format!("deepseek:{id}");
-        connection.execute("INSERT INTO codex_messages(conversation_id,item_id,role,text,agent) VALUES(?1,?2,?3,?4,'deepseek') ON CONFLICT(conversation_id,item_id) DO NOTHING", params![conversation,&prefixed,role,text]).map_err(|e|e.to_string())?;
-        prefixed
-    };
+    let emitted_id = persist_message(connection, conversation, id, role, text)?;
     if matches!(role, "assistant" | "thinking" | "tool") {
         let logical_cid = logical_conversation(connection, conversation);
         crate::events::emit_delta(logical_cid, emitted_id, role, Some("deepseek"), "replace", text);
@@ -611,7 +717,7 @@ impl Runtime {
         let install = Installation::find()?;
         let models = install.models(store)?;
         Ok(
-            json!({"version":install.version,"executable":install.executable,"auth":"Harness 配置（发送时验证认证）","requires_auth":true,"models":models,"sidebar_warning":null,"catalog_source":"已安装 Harness 内置目录","capabilities":{"streaming":"message-events","resume":true,"cancel":"process-group","approval":false}}),
+            json!({"version":install.version,"executable":install.executable,"auth":"Harness 配置（发送时验证认证）","requires_auth":true,"models":models,"sidebar_warning":null,"catalog_source":"已安装 Harness 内置目录","capabilities":{"streaming":"token-deltas","resume":true,"cancel":"process-group","approval":false}}),
         )
     }
     pub fn snapshot(&self, store: &Store) -> Reply {
