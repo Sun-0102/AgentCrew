@@ -3,7 +3,7 @@ use crate::storage::Store;
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -38,6 +38,7 @@ struct Client {
     approvals: Mutex<HashMap<String, Value>>,
     loaded: Mutex<HashSet<String>>,
     token_usage: Mutex<HashMap<String, LiveTokenUsage>>,
+    stderr_tail: Mutex<VecDeque<String>>,
     next_id: AtomicU64,
     healthy: AtomicBool,
     database: PathBuf,
@@ -45,6 +46,35 @@ struct Client {
     executable: PathBuf,
     #[cfg(any(windows, unix))]
     job: ProcessJob,
+}
+
+fn sanitize_stderr_line(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for secret_marker in [
+        "bearer ",
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "cookie",
+        "secret",
+        "sk-",
+    ] {
+        if lower.contains(secret_marker) {
+            return None;
+        }
+    }
+    let mut cleaned: String = trimmed.chars().take(240).collect();
+    if trimmed.chars().count() > 240 {
+        cleaned.push_str("...");
+    }
+    Some(cleaned)
 }
 
 #[cfg(windows)]
@@ -250,6 +280,7 @@ impl Client {
             approvals: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::new()),
             token_usage: Mutex::new(HashMap::new()),
+            stderr_tail: Mutex::new(VecDeque::with_capacity(20)),
             next_id: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database,
@@ -258,37 +289,93 @@ impl Client {
             #[cfg(any(windows, unix))]
             job,
         });
-        // Drain diagnostics separately. Never put authentication diagnostics in the UI or database.
+        // Drain diagnostics separately and retain a small sanitized tail (never auth tokens).
+        let stderr_weak = Arc::downgrade(&client);
         std::thread::spawn(move || {
-            let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink());
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let Some(client) = stderr_weak.upgrade() else { break };
+                        let line = String::from_utf8_lossy(&buf);
+                        if let Some(cleaned) = sanitize_stderr_line(&line) {
+                            if let Ok(mut tail) = client.stderr_tail.lock() {
+                                if tail.len() >= 20 {
+                                    tail.pop_front();
+                                }
+                                tail.push_back(cleaned);
+                            }
+                        }
+                    }
+                }
+            }
         });
         let weak = Arc::downgrade(&client);
         std::thread::spawn(move || {
-            for line in BufReader::new(output).lines() {
-                let Some(client) = weak.upgrade() else { break };
-                let result = line.map_err(|e| e.to_string()).and_then(|line| {
-                    serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())
-                });
-                match result {
-                    Ok(message) => {
-                        if let Err(error) = client.receive(message) {
-                            client.disconnected(&error);
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        client.disconnected("Codex 协议读取失败，执行结果未知。");
+            let mut reader = BufReader::new(output);
+            let mut buf = Vec::new();
+            let mut cached_conn: Option<rusqlite::Connection> = None;
+            let mut disconnect_reason: Option<String> = None;
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Err(err) => {
+                        disconnect_reason = Some(format!("Codex 输出流读取失败：{err}"));
                         break;
+                    }
+                    Ok(_) => {}
+                }
+                let Some(client) = weak.upgrade() else { break };
+                let line = String::from_utf8_lossy(&buf);
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
+                    // Ignore stray non-JSON diagnostic lines instead of tearing down the shared app-server stream.
+                    continue;
+                };
+                if let Err(error) = client.receive_with_connection(&mut cached_conn, message) {
+                    // Reset cached SQLite connection on transient DB errors and keep draining stdout.
+                    cached_conn = None;
+                    if let Ok(mut tail) = client.stderr_tail.lock() {
+                        if tail.len() >= 20 {
+                            tail.pop_front();
+                        }
+                        if let Some(cleaned) = sanitize_stderr_line(&format!("receive error: {error}")) {
+                            tail.push_back(cleaned);
+                        }
                     }
                 }
             }
             if let Some(client) = weak.upgrade() {
-                client.disconnected("Codex 连接已断开，未完成任务的结果未知。");
+                let base = disconnect_reason
+                    .unwrap_or_else(|| "Codex 连接已断开，未完成任务的结果未知。".into());
+                let detail = match client.recent_stderr() {
+                    Some(tail) => format!("{base}（{tail}）"),
+                    None => base,
+                };
+                client.disconnected(&detail);
             }
         });
         client.request("initialize", json!({"clientInfo":{"name":"ai_gent","title":"AgentCrew","version":env!("CARGO_PKG_VERSION")}}))?;
         client.write(json!({"method":"initialized"}))?;
         Ok(client)
+    }
+
+    fn recent_stderr(&self) -> Option<String> {
+        let tail = self.stderr_tail.lock().ok()?;
+        let lines: Vec<&str> = tail.iter().rev().take(3).map(String::as_str).collect();
+        if lines.is_empty() {
+            None
+        } else {
+            let ordered: Vec<&str> = lines.into_iter().rev().collect();
+            Some(ordered.join(" | "))
+        }
     }
 
     fn write(&self, value: Value) -> Result<(), String> {
@@ -299,25 +386,34 @@ impl Client {
     }
 
     fn request(&self, method: &str, params: Value) -> Reply {
+        self.request_with_timeout(method, params, Duration::from_secs(45))
+    }
+
+    fn request_with_timeout(&self, method: &str, params: Value, timeout: Duration) -> Reply {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (send, receive) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, send);
         let result = self
             .write(json!({"id":id,"method":method,"params":params}))
-            .and_then(|_| match receive.recv_timeout(Duration::from_secs(45)) {
+            .and_then(|_| match receive.recv_timeout(timeout) {
                 Ok(reply) => reply,
-                Err(_) => {
-                    let _ = self.stop();
-                    Err(format!(
-                        "Codex 请求超时：{method}；后台已停止，请核对已产生的文件。"
-                    ))
-                }
+                Err(_) => Err(format!("Codex 请求超时：{method}")),
             });
         self.pending.lock().unwrap().remove(&id);
         result
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn receive(&self, message: Value) -> Result<(), String> {
+        let mut cached = None;
+        self.receive_with_connection(&mut cached, message)
+    }
+
+    fn receive_with_connection(
+        &self,
+        cached_conn: &mut Option<rusqlite::Connection>,
+        message: Value,
+    ) -> Result<(), String> {
         if message.get("method").is_none() {
             if let Some(id) = message["id"].as_u64() {
                 if let Some(send) = self.pending.lock().unwrap().remove(&id) {
@@ -367,10 +463,15 @@ impl Client {
         if thread.is_empty() {
             return Ok(());
         }
-        let connection = Store {
-            path: self.database.clone(),
+        if cached_conn.is_none() {
+            *cached_conn = Some(
+                Store {
+                    path: self.database.clone(),
+                }
+                .connect()?,
+            );
         }
-        .connect()?;
+        let connection = cached_conn.as_ref().unwrap();
         let current = connection
             .query_row(
                 "SELECT conversation_id,turn_id,status FROM codex_sessions WHERE thread_id=?1",
@@ -651,22 +752,37 @@ impl Client {
         for (_, send) in self.pending.lock().unwrap().drain() {
             let _ = send.send(Err(error.to_owned()));
         }
-        for thread in self.loaded.lock().unwrap().iter() {
-            if let Ok(connection) = (Store {
-                path: self.database.clone(),
-            })
-            .connect()
-            {
+        let threads: Vec<String> = self.loaded.lock().unwrap().iter().cloned().collect();
+        let store = Store {
+            path: self.database.clone(),
+        };
+        if let Ok(mut connection) = store.connect() {
+            for thread in threads {
                 let cid: Option<String> = connection
                     .query_row(
                         "SELECT conversation_id FROM codex_sessions WHERE thread_id=?1",
-                        [thread],
+                        [&thread],
                         |row| row.get(0),
                     )
                     .ok();
-                let _ = connection.execute("UPDATE codex_sessions SET status='interrupted',error=?2 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')", params![thread,error]);
-                if let Some(cid) = cid.as_deref() {
-                    crate::events::emit_conversation_sync(cid);
+                if let Ok(tx) = connection.transaction() {
+                    let changed = tx
+                        .execute(
+                            "INSERT INTO codex_messages(conversation_id,item_id,role,text) SELECT conversation_id,?2,'task_end','interrupted' FROM codex_sessions WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')",
+                            params![&thread, uuid::Uuid::new_v4().to_string()],
+                        )
+                        .unwrap_or(0);
+                    let _ = tx.execute(
+                        "UPDATE codex_sessions SET status='interrupted',error=?2 WHERE thread_id=?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping')",
+                        params![&thread, error],
+                    );
+                    let _ = tx.commit();
+                    if let Some(cid) = cid.as_deref() {
+                        if changed > 0 {
+                            crate::git::finish_turn_snapshot(&store, cid, "codex");
+                        }
+                        crate::events::emit_conversation_sync(cid);
+                    }
                 }
             }
         }
@@ -766,11 +882,19 @@ fn mark_startup_failed(store: &Store, conversation_id: &str, error: &str) {
 
 impl Runtime {
     pub(crate) fn skills(&self, store: &Store, workspace: &Path) -> Reply {
-        self.client(store)?.request("skills/list", json!({"cwds":[workspace],"forceReload":true}))
+        self.client(store)?.request_with_timeout(
+            "skills/list",
+            json!({"cwds":[workspace],"forceReload":true}),
+            Duration::from_secs(15),
+        )
     }
 
     pub fn rate_limits(&self, store: &Store) -> Reply {
-        self.client(store)?.request("account/rateLimits/read", json!({}))
+        self.client(store)?.request_with_timeout(
+            "account/rateLimits/read",
+            json!({}),
+            Duration::from_secs(15),
+        )
     }
 
     pub fn live_token_usage(&self, thread_id: &str) -> Option<LiveTokenUsage> {
@@ -1056,21 +1180,33 @@ impl Runtime {
             std::thread::sleep(Duration::from_millis(50));
         }
         let confirmed = session(store, conversation_id)?.is_some_and(|s| s["status"] == "stopping");
-        client.stop()?;
-        client.disconnected("Codex 后台已停止。");
-        client.update_status(
-            thread,
-            if confirmed {
-                "cancelled"
-            } else {
-                "interrupted"
-            },
-            if confirmed {
-                None
-            } else {
-                Some("后台已停止，但未收到取消终态；请核对已产生的文件。")
-            },
-        )?;
+        if confirmed {
+            client.update_status(thread, "cancelled", None)?;
+            return result;
+        }
+        let other_active: bool = store
+            .connect()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM codex_sessions WHERE conversation_id<>?1 AND status IN ('starting','running','waiting_approval','cancel_requested','stopping'))",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if other_active {
+            client.update_status(
+                thread,
+                "interrupted",
+                Some("已发送取消请求，但未在 5 秒内收到终态；其他运行中的会话未受影响，请核对已产生的文件。"),
+            )?;
+        } else {
+            client.stop()?;
+            client.disconnected("Codex 后台已停止。");
+            client.update_status(
+                thread,
+                "interrupted",
+                Some("后台已停止，但未收到取消终态；请核对已产生的文件。"),
+            )?;
+        }
         result
     }
 
@@ -1257,7 +1393,34 @@ fn current_status(connection: &rusqlite::Connection, thread: &str) -> Option<Str
 }
 
 pub fn recover(store: &Store) -> Result<(), String> {
-    store.connect()?.execute("UPDATE codex_sessions SET status='interrupted',error='程序已重启，上次执行结果未知；请核对文件后继续。' WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')", []).map_err(|e| e.to_string())?;
+    let mut connection = store.connect()?;
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    let active_ids: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT conversation_id FROM codex_sessions WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    for cid in active_ids {
+        tx.execute(
+            "INSERT INTO codex_messages(conversation_id,item_id,role,text) VALUES(?1,?2,'task_end','interrupted')",
+            params![cid, uuid::Uuid::new_v4().to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.execute(
+        "UPDATE codex_sessions SET status='interrupted',error='程序已重启，上次执行结果未知；请核对文件后继续。' WHERE status IN ('starting','running','waiting_approval','cancel_requested','stopping')",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1270,7 +1433,7 @@ mod tests {
         let store = Store::open(dir.path().join("test.sqlite")).unwrap();
         let project = store.add_project(dir.path().to_str().unwrap()).unwrap();
         store.connect().unwrap().execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status) VALUES(?1,'thread','model','test','test','starting')", [&project.id]).unwrap();
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = command(&std::env::current_exe().unwrap())
             .arg("--list")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1286,6 +1449,7 @@ mod tests {
             approvals: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::from(["thread".to_owned()])),
             token_usage: Mutex::new(HashMap::new()),
+            stderr_tail: Mutex::new(VecDeque::with_capacity(20)),
             next_id: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database: store.path.clone(),
@@ -1503,6 +1667,42 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn disconnect_writes_task_end_and_timeout_does_not_kill_shared_client() {
+        let (_dir, store, project, client) = fixture();
+        client
+            .receive(json!({"method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}}))
+            .unwrap();
+        // A timed-out secondary RPC must not mark the shared client unhealthy.
+        let err = client
+            .request_with_timeout("account/rateLimits/read", json!({}), Duration::from_millis(20))
+            .unwrap_err();
+        assert!(err.contains("Codex 请求超时"));
+        assert!(client.healthy.load(Ordering::SeqCst));
+        // An unexpected disconnect must record an explicit task_end='interrupted' marker.
+        client.disconnected("stream closed");
+        assert!(!client.healthy.load(Ordering::SeqCst));
+        let sess = session(&store, &project).unwrap().unwrap();
+        assert_eq!(sess["status"], "interrupted");
+        assert_eq!(sess["error"], "stream closed");
+        let end: String = store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT text FROM codex_messages WHERE conversation_id=?1 AND role='task_end'",
+                [&project],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(end, "interrupted");
+        // Sensitive stderr lines are redacted while normal diagnostics are retained.
+        assert!(sanitize_stderr_line("Authorization: Bearer sk-12345").is_none());
+        assert_eq!(
+            sanitize_stderr_line("  upstream websocket reset  ").as_deref(),
+            Some("upstream websocket reset")
+        );
     }
 
     #[test]

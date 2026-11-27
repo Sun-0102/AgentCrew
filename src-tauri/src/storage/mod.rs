@@ -18,6 +18,9 @@ impl Store {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let store = Self { path };
         let mut connection = store.connect()?;
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+            .map_err(|e| e.to_string())?;
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
@@ -80,8 +83,9 @@ impl Store {
             .pragma_update(None, "foreign_keys", true)
             .map_err(|e| e.to_string())?;
         connection
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|e| e.to_string())?;
+        let _ = connection.pragma_update(None, "synchronous", "NORMAL");
         Ok(connection)
     }
 
