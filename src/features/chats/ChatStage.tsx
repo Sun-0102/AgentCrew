@@ -18,6 +18,7 @@ import QueuedMessagesBar from "./QueuedMessagesBar";
 import { deleteSkillTokenAtCursor, requestedSkills, skillCommandSpans, skillPrefix, type Skill } from "./skills";
 import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_ATTACHMENTS, prepareAttachments, type Attachment, type SavedAttachment } from "./attachments";
 import { useCopyToClipboard } from "./clipboard";
+import { deriveSessionTitle } from "./sessionTitle";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
 
@@ -35,6 +36,9 @@ interface Props {
   onDeleteSession?: () => void; onGroupUpdated?: (group: Group) => void;
   sidebarControls?: ReactNode;
   onOpenGit?: (path?: string) => void;
+  isDraft?: boolean;
+  onCreateDraftSession?: (seedTitle: string) => Promise<{ scope: Scope; session: GroupSession | PrivateSession | ProjectSession } | null>;
+  onCommitDraftSession?: (session: GroupSession | PrivateSession | ProjectSession) => void;
 }
 interface Reply { author: string; text: string }
 
@@ -98,6 +102,11 @@ export default function ChatStage(p: Props) {
     document.addEventListener("click", click); document.addEventListener("keydown", key);
     return () => { document.removeEventListener("click", click); document.removeEventListener("keydown", key); };
   }, [sessionMenu]);
+  useEffect(() => {
+    if (!p.isDraft) return;
+    const frame = requestAnimationFrame(() => input.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [p.isDraft, scopeKey]);
   const [mentions, setMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -431,7 +440,18 @@ export default function ChatStage(p: Props) {
       setOptimistic(current => [...current, { scopeKey, baselineCount, id: optimisticId, role: "user", text: optimisticContent, created_at: new Date().toISOString(), agent: targetAgent }]);
     }
     setSending(true); setError(null); nearBottom.current = true;
+    let createdDraftSession: GroupSession | PrivateSession | ProjectSession | null = null;
     try {
+      let effectiveScope = scope;
+      if (p.isDraft && p.onCreateDraftSession) {
+        const seedTitle = deriveSessionTitle(draftText, draftFiles);
+        const created = await p.onCreateDraftSession(seedTitle);
+        if (!created) {
+          throw new Error("无法创建新会话，请重试。");
+        }
+        effectiveScope = created.scope;
+        createdDraftSession = created.session;
+      }
       let content = baseText;
       if (draftReply) content = `> 回复 ${draftReply.author}：${draftReply.text.replace(/\n/g, " ").slice(0, 500)}\n\n${content}`;
       for (const file of draftFiles) {
@@ -441,12 +461,12 @@ export default function ChatStage(p: Props) {
           : `\n\n附件：${saved.name}（${formatAttachmentSize(saved.size)}）\n文件路径：${saved.path}`;
       }
       const names = requestedSkills(draftText);
-      if (names.length) content += await invoke<string>("skills_prepare", { ...scope, agents: recipients, names });
+      if (names.length) content += await invoke<string>("skills_prepare", { ...effectiveScope, agents: recipients, names });
       if (group) {
-        await invoke("agent_group_send", { groupId: scope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content });
+        await invoke("agent_group_send", { groupId: effectiveScope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content });
       } else {
         await invoke("agent_send", {
-          ...scope,
+          ...effectiveScope,
           agent,
           model,
           serviceTier: provider === "codex" ? p.codexServiceTier ?? "default" : null,
@@ -455,10 +475,19 @@ export default function ChatStage(p: Props) {
           text: content,
         });
       }
-      await onRefresh();
+      if (createdDraftSession) {
+        drafts.delete(scopeKey);
+        try { localStorage.removeItem(`ai-gent.draft.${scopeKey}`); } catch {}
+        p.onCommitDraftSession?.(createdDraftSession);
+      } else {
+        await onRefresh();
+      }
       if (showOptimistic) setOptimistic(current => current.filter(item => item.id !== optimisticId));
     }
     catch (cause) {
+      if (createdDraftSession) {
+        p.onCommitDraftSession?.(createdDraftSession);
+      }
       if (showOptimistic) setOptimistic(current => current.filter(item => item.id !== optimisticId));
       setText(current => current || draftText);
       setFiles(current => current.length ? current : draftFiles);
@@ -497,12 +526,12 @@ export default function ChatStage(p: Props) {
       input.current?.setSelectionRange(next.cursor, next.cursor);
     });
   }
-  return <section className={`chat-stage ${p.session ? "session-chat" : ""}`} aria-label={title}>
+  return <section className={`chat-stage ${(p.session || p.isDraft) ? "session-chat" : ""}`} aria-label={title}>
     {resultsOpen && group && scope.groupId && <TaskResults groupId={scope.groupId} latestTask={task} acting={acting} members={members} onClose={() => setResultsOpen(false)} notify={notify} onAction={async value => { if (!task) throw new Error("任务不存在，请刷新后重试。"); await action("group_task_control", { taskId: task.id, action: value }, true); }} />}
-    {p.session && group ? <header className="chat-header session-chat-header"><div className="session-chat-lead">{p.sidebarControls}<div className="session-chat-heading"><div className="session-breadcrumb"><button onClick={p.onGroups}><Icon name="group" size={12} />所有群聊</button><span>/</span><span>{group.name}</span><Icon name="right" size={12} /><span>{project?.name ?? "群专用目录"}</span></div><h1 title={title}><span className="session-heading-name">{title}</span>{p.session.archived && <span className="session-archived-badge">已归档</span>}</h1></div></div><div className="chat-header-actions">{p.onOpenGit && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span>{members.length} 位 Agent · 你</button><div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || taskControllable} title={taskControllable ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || taskControllable} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); setResultsOpen(true); }}>任务结果</button><button onClick={() => { setSessionMenu(false); onInvite(); }}>群设置</button><button onClick={() => { setSessionMenu(false); setPanel(panel === "evidence" ? null : "evidence"); }}>聊天详情</button><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div></div></header> : <header className="chat-header"><div className="chat-title">{p.sidebarControls}<Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}{!group && <span className="node-badge">本地节点</span>}{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : `${agentName(agent)} · 独立会话`}</p></div></div><div className="chat-header-actions">{p.onOpenGit && (project || snapshot.session?.workspace_path) && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button type="button" className="outline-button task-results-trigger" onClick={() => setResultsOpen(true)}><Icon name="file" size={17} />任务结果</button>}{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || busy} title={busy ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || busy} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button>}</div></header>}
+    {(p.session || p.isDraft) && group ? <header className="chat-header session-chat-header"><div className="session-chat-lead">{p.sidebarControls}<div className="session-chat-heading"><div className="session-breadcrumb"><button onClick={p.onGroups}><Icon name="group" size={12} />所有群聊</button><span>/</span><span>{group.name}</span><Icon name="right" size={12} /><span>{project?.name ?? "群专用目录"}</span></div><h1 title={title}><span className="session-heading-name">{title}</span>{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1></div></div><div className="chat-header-actions">{p.onOpenGit && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span>{members.length} 位 Agent · 你</button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || taskControllable} title={taskControllable ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || taskControllable} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); setResultsOpen(true); }}>任务结果</button><button onClick={() => { setSessionMenu(false); onInvite(); }}>群设置</button><button onClick={() => { setSessionMenu(false); setPanel(panel === "evidence" ? null : "evidence"); }}>聊天详情</button><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="群设置" onClick={onInvite}><Icon name="settings" size={17} /></button>}</div></header> : <header className="chat-header"><div className="chat-title">{p.sidebarControls}<Avatar agent={group ? "group" : agent} /><div><h1 title={title}>{title}{!group && <span className="node-badge">本地节点</span>}{p.session?.archived && <span className="session-archived-badge">已归档</span>}</h1><p><span className={`presence-dot ${ready ? "connected" : ""}`} />{group ? project ? `关联项目 · ${project.name}` : "本机协作群 · 独立上下文" : project ? project.name : `${agentName(agent)} · 独立会话`}</p></div></div><div className="chat-header-actions">{p.onOpenGit && (project || snapshot.session?.workspace_path) && <button type="button" className="outline-button" onClick={() => p.onOpenGit?.(project?.primary_root ?? snapshot.session?.workspace_path ?? undefined)} title="查看代码变更与 Git (⌘G)"><Icon name="diff" size={16} />代码变更</button>}<button className={`members-trigger ${panel === "members" ? "selected" : ""}`} onClick={() => setPanel(panel === "members" ? null : "members")} aria-label="查看聊天成员"><span className="stacked-avatars">{members.map(id => <Avatar agent={id} small key={id} />)}</span><span>{members.length} 位 Agent<span className="members-human"> · 你</span></span><Icon name="down" size={14} /></button>{group && <button type="button" className="outline-button task-results-trigger" onClick={() => setResultsOpen(true)}><Icon name="file" size={17} />任务结果</button>}{group && <button className="outline-button invite-button" onClick={onInvite}><Icon name="settings" size={17} />群设置</button>}<button className={`icon-button ${panel === "evidence" ? "selected" : ""}`} onClick={() => setPanel(panel === "evidence" ? null : "evidence")} aria-label="查看聊天详情" title="聊天详情"><Icon name="panel" /></button>{p.session ? <div className="session-menu-control" ref={sessionMenuRef}><button className="icon-button" aria-label="会话操作" aria-expanded={sessionMenu} aria-controls="session-actions" onClick={() => setSessionMenu(!sessionMenu)}><Icon name="more" size={18} /></button>{sessionMenu && <div className="session-actions" id="session-actions"><button onClick={() => { setSessionMenu(false); p.onRenameSession?.(); }}>重命名会话</button><button disabled={p.sessionSaving || busy} title={busy ? "请先完成或停止当前任务" : undefined} onClick={() => { setSessionMenu(false); p.onArchiveSession?.(); }}>{p.session.archived ? "恢复会话" : "归档会话"}</button><button className="destructive-action" disabled={p.sessionSaving || busy} onClick={() => { setSessionMenu(false); p.onDeleteSession?.(); }}>删除会话</button><hr /><button onClick={() => { setSessionMenu(false); onSettings(); }}>连接与设置</button></div>}</div> : <button className="icon-button" aria-label="连接与设置" onClick={onSettings}><Icon name="more" /></button>}</div></header>}
     <div className={`chat-stage-body ${panel === "diff" ? "with-diff-panel" : panel ? "with-panel" : ""}`}><div className="chat-main">
       <div className="message-feed" ref={feed} onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }} role="log" aria-label="聊天消息">
-        {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
+        {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.isDraft || p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.isDraft ? "直接输入你的需求，发送首条消息后将自动创建并命名会话。" : p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
         {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
       </div>
       <div className="composer-area">

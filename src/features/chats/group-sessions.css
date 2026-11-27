@@ -94,10 +94,12 @@
 .session-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 13px 11px; background: none; border: 1px solid transparent; border-radius: 8px; text-align: left; margin-bottom: 4px; position: relative; }
 .session-row:hover { background: #f1f5f9; }
 .session-row.active { background: #e0e7ff; border-color: #c7d2fe; }
+.session-row.is-draft { border-style: dashed; background: #eef2ff; }
 .session-row.active::before { content: ""; height: 19px; width: 3px; background: var(--accent); position: absolute; left: -1px; border-radius: 2px; }
 .session-icon { color: #64748b; align-self: flex-start; padding-top: 2px; }
 .session-copy { min-width: 0; flex: 1; }
 .session-copy strong { font-size: 13px; font-weight: 500; display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.session-inline-input { width: 100%; padding: 2px 6px; margin: -3px 0 -2px -6px; font-size: 13px; font-weight: 500; font-family: inherit; color: inherit; background: #ffffff; border: 1px solid var(--accent); border-radius: 5px; outline: none; box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.14); }
 .session-copy small { display: block; margin: 7px 0 0; font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-row time { font-size: 10px; color: #64748b; align-self: flex-start; padding-top: 2px; }
 .session-row { padding: 0; gap: 0; }

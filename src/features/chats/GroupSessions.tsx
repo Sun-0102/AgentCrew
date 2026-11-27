@@ -65,12 +65,17 @@ export function GroupHub({ groups, projects, onSelect, onCreate }: { groups: Gro
   </div></section>;
 }
 
-export function SessionSidebar<T extends ChatSession>({ sessions, selected, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete, onCollapse, resizing, onResizeStart, onResizeReset }: { sessions: T[]; selected?: T; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T) => void; onArchive: (session: T) => void; onDelete: (session: T) => void; onCollapse?: () => void; resizing?: boolean; onResizeStart?: (event: ReactMouseEvent<HTMLDivElement>) => void; onResizeReset?: () => void }) {
+export function SessionSidebar<T extends ChatSession>({ sessions, selected, isDraft = false, loading, saving, searchPlaceholder = "搜索本群会话", bottomNote = "会话独立 · 项目共享", onSelect, onCreate, onRename, onArchive, onDelete, onCollapse, resizing, onResizeStart, onResizeReset }: { sessions: T[]; selected?: T; isDraft?: boolean; loading: boolean; saving: boolean; searchPlaceholder?: string; bottomNote?: string; onSelect: (session: T) => void; onCreate: () => void; onRename: (session: T, nextName: string) => Promise<void>; onArchive: (session: T) => void; onDelete: (session: T) => void; onCollapse?: () => void; resizing?: boolean; onResizeStart?: (event: ReactMouseEvent<HTMLDivElement>) => void; onResizeReset?: () => void }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"active" | "scheduled" | "archived">(
     selected?.archived ? "archived" : selected?.is_scheduled ? "scheduled" : "active",
   );
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingSaving, setEditingSaving] = useState(false);
+  const editingInputRef = useRef<HTMLInputElement>(null);
+  const committingRenameRef = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -83,8 +88,52 @@ export function SessionSidebar<T extends ChatSession>({ sessions, selected, load
     return () => { document.removeEventListener("click", click); document.removeEventListener("keydown", key); window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
   }, [menu]);
   useEffect(() => {
+    if (isDraft) {
+      setFilter("active");
+      return;
+    }
     setFilter(selected?.archived ? "archived" : selected?.is_scheduled ? "scheduled" : "active");
-  }, [selected?.id, selected?.archived, selected?.is_scheduled]);
+  }, [isDraft, selected?.id, selected?.archived, selected?.is_scheduled]);
+  useEffect(() => {
+    if (!editingId) return;
+    const frame = requestAnimationFrame(() => {
+      editingInputRef.current?.focus();
+      editingInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editingId]);
+  function startInlineRename(session: T) {
+    setMenu(null);
+    committingRenameRef.current = false;
+    setEditingId(session.id);
+    setEditingName(session.name);
+  }
+  function cancelInlineRename() {
+    committingRenameRef.current = false;
+    setEditingId(null);
+    setEditingName("");
+  }
+  async function commitInlineRename(session: T) {
+    if (committingRenameRef.current) return;
+    const trimmed = editingName.trim();
+    if (!trimmed || trimmed === session.name) {
+      cancelInlineRename();
+      return;
+    }
+    committingRenameRef.current = true;
+    setEditingSaving(true);
+    try {
+      await onRename(session, trimmed);
+      setEditingId(null);
+      setEditingName("");
+    } catch {
+      // Error is reported by parent; keep inline editor open so user can adjust.
+      requestAnimationFrame(() => editingInputRef.current?.focus());
+    } finally {
+      committingRenameRef.current = false;
+      setEditingSaving(false);
+    }
+  }
   const activeCount = sessions.filter(s => !s.archived && !s.is_scheduled).length;
   const scheduledCount = sessions.filter(s => !s.archived && !!s.is_scheduled).length;
   const filtered = sessions.filter(s => {
@@ -93,6 +142,7 @@ export function SessionSidebar<T extends ChatSession>({ sessions, selected, load
     }
     return s.name.toLowerCase().includes(query.trim().toLowerCase());
   });
+  const showDraftRow = isDraft && filter === "active" && !query.trim();
   const menuSession = filtered.find(s => s.id === menu?.id);
   const menuBusy = !!menuSession?.status && ["running", "paused", "cancelling"].includes(menuSession.status);
   return <aside className="group-session-sidebar" aria-label="会话列表">
@@ -106,10 +156,61 @@ export function SessionSidebar<T extends ChatSession>({ sessions, selected, load
       )}
       <button className={filter === "archived" ? "active" : ""} aria-pressed={filter === "archived"} onClick={() => setFilter("archived")}>已归档</button>
     </div>
-    <div className="session-list">{filtered.map(session => <div className={`session-row ${selected?.id === session.id ? "active" : ""}`} key={session.id}><button className="session-select" aria-pressed={selected?.id === session.id} onClick={() => { setMenu(null); onSelect(session); }}><span className="session-icon"><Icon name={session.is_scheduled ? "clock" : "chat"} size={15} /></span><span className="session-copy"><strong title={session.name}>{session.name}</strong><small>{preview(session)}</small></span><time>{time(session.updated_at ?? session.created_at)}</time></button><button className="session-row-menu" aria-label={`${session.name}的操作`} aria-expanded={menu?.id === session.id} disabled={saving} onClick={e => { menuTrigger.current = e.currentTarget; const rect = e.currentTarget.getBoundingClientRect(); setMenu(menu?.id === session.id ? null : { id: session.id, top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 160)), left: Math.max(8, Math.min(rect.right - 155, window.innerWidth - 163)) }); }}><Icon name="more" size={16} /></button></div>)}
-      {loading ? <p className="session-empty" role="status">正在读取会话…</p> : !filtered.length && <p className="session-empty">{query ? "没有找到相关会话" : filter === "archived" ? "还没有归档会话" : filter === "scheduled" ? "还没有定时任务会话" : "还没有会话，创建一个吧"}</p>}
+    <div className="session-list">
+      {showDraftRow && (
+        <div className="session-row active is-draft" aria-current="page">
+          <div className="session-select">
+            <span className="session-icon"><Icon name="plus" size={15} /></span>
+            <span className="session-copy">
+              <strong>新会话</strong>
+              <small>发送首条消息后自动命名</small>
+            </span>
+          </div>
+        </div>
+      )}
+      {filtered.map(session => {
+        const isEditing = editingId === session.id;
+        return <div className={`session-row ${selected?.id === session.id ? "active" : ""}`} key={session.id}>
+          {isEditing ? (
+            <div className="session-select is-editing">
+              <span className="session-icon"><Icon name={session.is_scheduled ? "clock" : "chat"} size={15} /></span>
+              <span className="session-copy">
+                <input
+                  ref={editingInputRef}
+                  className="session-inline-input"
+                  aria-label="重命名会话"
+                  maxLength={40}
+                  value={editingName}
+                  disabled={editingSaving}
+                  onChange={e => setEditingName(e.target.value)}
+                  onBlur={() => { if (!editingSaving) void commitInlineRename(session); }}
+                  onKeyDown={e => {
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitInlineRename(session);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelInlineRename();
+                    }
+                  }}
+                />
+                <small>{preview(session)}</small>
+              </span>
+            </div>
+          ) : (
+            <button className="session-select" aria-pressed={selected?.id === session.id} onClick={() => { setMenu(null); onSelect(session); }} onDoubleClick={() => { if (!saving) startInlineRename(session); }}>
+              <span className="session-icon"><Icon name={session.is_scheduled ? "clock" : "chat"} size={15} /></span>
+              <span className="session-copy"><strong title={`${session.name}（双击可重命名）`}>{session.name}</strong><small>{preview(session)}</small></span>
+              <time>{time(session.updated_at ?? session.created_at)}</time>
+            </button>
+          )}
+          <button className="session-row-menu" aria-label={`${session.name}的操作`} aria-expanded={menu?.id === session.id} disabled={saving || isEditing} onClick={e => { menuTrigger.current = e.currentTarget; const rect = e.currentTarget.getBoundingClientRect(); setMenu(menu?.id === session.id ? null : { id: session.id, top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 160)), left: Math.max(8, Math.min(rect.right - 155, window.innerWidth - 163)) }); }}><Icon name="more" size={16} /></button>
+        </div>;
+      })}
+      {loading ? <p className="session-empty" role="status">正在读取会话…</p> : !filtered.length && !showDraftRow && <p className="session-empty">{query ? "没有找到相关会话" : filter === "archived" ? "还没有归档会话" : filter === "scheduled" ? "还没有定时任务会话" : "还没有会话，创建一个吧"}</p>}
     </div><div className="session-bottom"><Icon name="shield" size={15} />{bottomNote}</div>
-    {menu && menuSession && createPortal(<div className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="会话操作"><button disabled={saving} onClick={() => { setMenu(null); onRename(menuSession); }}>重命名</button><button disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onArchive(menuSession); }}>{menuSession.archived ? "恢复会话" : "归档会话"}</button><hr /><button className="destructive-action" disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onDelete(menuSession); }}>删除会话</button></div>, document.body)}
+    {menu && menuSession && createPortal(<div className="session-actions session-row-actions" ref={menuRef} style={{ top: menu.top, left: menu.left }} aria-label="会话操作"><button disabled={saving} onClick={() => startInlineRename(menuSession)}>重命名</button><button disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onArchive(menuSession); }}>{menuSession.archived ? "恢复会话" : "归档会话"}</button><hr /><button className="destructive-action" disabled={saving || menuBusy} title={menuBusy ? "请先完成或停止任务" : undefined} onClick={() => { setMenu(null); onDelete(menuSession); }}>删除会话</button></div>, document.body)}
     {onResizeStart && <div className={`sidebar-resize-handle ${resizing ? "is-resizing" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整会话侧栏宽度" title="拖动调整宽度，双击恢复默认" onMouseDown={onResizeStart} onDoubleClick={onResizeReset} />}
   </aside>;
 }

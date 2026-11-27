@@ -27,6 +27,9 @@ type Props = Pick<
   | "onGroupUpdated"
   | "sidebarControls"
   | "onOpenGit"
+  | "isDraft"
+  | "onCreateDraftSession"
+  | "onCommitDraftSession"
 > & {
   probes: Record<string, Probe>;
   connectingByAgent: Record<string, boolean>;
