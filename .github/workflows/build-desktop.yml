@@ -1,0 +1,200 @@
+name: Build Desktop Apps
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Apple Silicon (arm64)
+            os: macos-14
+            platform: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+            artifact_name: AgentCrew-macOS-AppleSilicon
+          - label: macOS Intel (x64)
+            os: macos-14
+            platform: macos
+            arch: x64
+            target: x86_64-apple-darwin
+            artifact_name: AgentCrew-macOS-Intel
+          - label: Windows (x64)
+            os: windows-2022
+            platform: windows
+            arch: x64
+            target: x86_64-pc-windows-msvc
+            artifact_name: AgentCrew-Windows-x64
+
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+          cargo --version
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build macOS (.app + .dmg)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          npx tauri build --config src-tauri/tauri.macos.conf.json --target "${{ matrix.target }}"
+
+      - name: Build Windows (.exe)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          npx tauri build --target "${{ matrix.target }}"
+
+      - name: Collect macOS artifacts and checksums
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          shopt -s nullglob
+          DMGS=("${BUNDLE_DIR}/dmg/"*.dmg)
+          if [ ${#DMGS[@]} -eq 0 ]; then
+            echo "No .dmg produced in ${BUNDLE_DIR}/dmg" >&2
+            exit 1
+          fi
+          cp "${DMGS[@]}" release-assets/
+
+          APP_DIR="${BUNDLE_DIR}/macos/AgentCrew.app"
+          if [ ! -d "${APP_DIR}" ]; then
+            echo "AgentCrew.app not found in ${BUNDLE_DIR}/macos" >&2
+            exit 1
+          fi
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "release-assets/AgentCrew_${VERSION}_${{ matrix.arch }}.app.zip"
+
+          (cd release-assets && shasum -a 256 *.dmg *.app.zip > "SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt")
+          ls -lh release-assets
+
+      - name: Collect Windows artifacts and checksums
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $nsisDir = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+          $installers = @(Get-ChildItem -Path $nsisDir -Filter *.exe -File)
+          if ($installers.Count -eq 0) {
+            throw "No .exe installer produced in $nsisDir"
+          }
+          foreach ($file in $installers) {
+            Copy-Item -Path $file.FullName -Destination release-assets/
+          }
+          $checksums = Get-ChildItem -Path release-assets -Filter *.exe -File | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $checksums | Set-Content -Path "release-assets/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt" -Encoding utf8
+          Get-ChildItem -Path release-assets
+
+      - name: Upload build artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-${{ github.run_number }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Write job summary
+        shell: bash
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          {
+            echo "## ${{ matrix.label }}"
+            echo ""
+            echo "- Artifact: [Download](${ARTIFACT_URL})"
+            echo "- Target: \`${{ matrix.target }}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          merge-multiple: true
+
+      - name: Combine checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd all-artifacts
+          cat SHA256SUMS-*.txt > SHA256SUMS.txt
+          rm -f SHA256SUMS-*.txt
+          ls -lh
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" all-artifacts/* --clobber
+          else
+            gh release create "${TAG}" all-artifacts/* \
+              --title "AgentCrew ${TAG}" \
+              --generate-notes
+          fi
