@@ -331,7 +331,7 @@ export default function SettingsDialog({
       </div>
 
       <div className="dialog-footer">
-        <span>AgentCrew v{info?.version ?? "0.1.5"}</span>
+        <span>AgentCrew v{info?.version ?? "0.1.6"}</span>
         <button className="primary" onClick={onClose}>
           完成<Icon name="check" size={16} />
         </button>
