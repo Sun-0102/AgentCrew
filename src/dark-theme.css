@@ -583,7 +583,8 @@
 :root[data-theme="dark"] .queue-action-btn.danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.18); color: #f87171; }
 :root[data-theme="dark"] .queue-edit-banner { background: #1e1b4b; color: #a5b4fc; }
 :root[data-theme="dark"] .queue-edit-banner .icon-button { color: #a5b4fc; }
-:root[data-theme="dark"] .settings-tabs button:hover { color: #f8fafc; }
+:root[data-theme="dark"] .settings-nav-item:hover { background: #1e293b; color: #f8fafc; }
+:root[data-theme="dark"] .settings-nav-item.active { background: rgba(99, 102, 241, 0.2); color: #a5b4fc; }
 :root[data-theme="dark"] .usage-provider-note-warn { background: rgba(245, 158, 11, 0.14); color: #fcd34d; border-color: rgba(245, 158, 11, 0.35); }
 :root[data-theme="dark"] .quota-alert-btn { background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
 :root[data-theme="dark"] .quota-alert-btn:hover { background: rgba(245, 158, 11, 0.24); }
