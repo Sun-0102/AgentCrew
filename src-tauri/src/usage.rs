@@ -12,6 +12,22 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Providers whose reported `input_tokens` excludes `cached_tokens`
+/// (so total prompt input = `input_tokens + cached_tokens`).
+pub fn cached_is_separate(provider_kind: &str) -> bool {
+    matches!(provider_kind, "gemini" | "claude" | "deepseek")
+}
+
+pub fn effective_input_tokens(provider_kind: &str, input_tokens: i64, cached_tokens: i64) -> i64 {
+    let inp = input_tokens.max(0);
+    let cached = cached_tokens.max(0);
+    if cached_is_separate(provider_kind) {
+        inp + cached
+    } else {
+        inp.max(cached)
+    }
+}
+
 pub fn estimate_cost_usd(
     provider_kind: &str,
     model: &str,
@@ -36,10 +52,23 @@ pub fn estimate_cost_usd(
                 (1.25, 0.3125, 10.0)
             }
         }
+        "claude" => {
+            if lower.contains("haiku") {
+                (0.80, 0.08, 4.0)
+            } else if lower.contains("opus") {
+                (15.0, 1.50, 75.0)
+            } else {
+                (3.0, 0.30, 15.0)
+            }
+        }
         _ => (1.0, 0.25, 4.0),
     };
-    let cached = cached_tokens.max(0).min(input_tokens.max(0));
-    let non_cached = (input_tokens - cached).max(0);
+    let (non_cached, cached) = if cached_is_separate(provider_kind) {
+        (input_tokens.max(0), cached_tokens.max(0))
+    } else {
+        let c = cached_tokens.max(0).min(input_tokens.max(0));
+        ((input_tokens - c).max(0), c)
+    };
     (non_cached as f64 * in_per_m
         + cached as f64 * cached_per_m
         + output_tokens.max(0) as f64 * out_per_m)
@@ -191,40 +220,52 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
     let connection = store.connect()?;
 
     // Aggregate summary for the selected range
-    let (total_cost, total_in, total_out, total_cached, total_turns, group_turns, private_turns): (
-        f64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = connection
-        .query_row(
+    let mut total_cost = 0.0_f64;
+    let mut total_in = 0_i64;
+    let mut total_out = 0_i64;
+    let mut total_cached = 0_i64;
+    let mut total_turns = 0_i64;
+    let mut group_turns = 0_i64;
+    let mut private_turns = 0_i64;
+
+    let mut summary_stmt = connection
+        .prepare(
             "SELECT
-                COALESCE(SUM(cost_usd), 0.0),
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cached_tokens), 0),
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN scope_kind='group' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN scope_kind!='group' THEN 1 ELSE 0 END), 0)
+                provider_kind,
+                model,
+                scope_kind,
+                input_tokens,
+                output_tokens,
+                cached_tokens
              FROM usage_records
              WHERE created_at >= ?1",
-            [since],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            },
         )
         .map_err(|e| e.to_string())?;
+    let summary_rows = summary_stmt
+        .query_map([since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in summary_rows.flatten() {
+        let (provider, model, scope, inp, out, cached) = row;
+        total_turns += 1;
+        if scope == "group" {
+            group_turns += 1;
+        } else {
+            private_turns += 1;
+        }
+        total_in += effective_input_tokens(&provider, inp, cached);
+        total_out += out.max(0);
+        total_cached += cached.max(0);
+        total_cost += estimate_cost_usd(&provider, &model, inp, out, cached);
+    }
 
     let cache_hit_rate = if total_in > 0 {
         (total_cached as f64 / total_in as f64 * 100.0).clamp(0.0, 100.0)
@@ -234,8 +275,8 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
 
     // Daily series (last min(range_days, 14) days)
     let chart_days = range_days.min(14);
-    let mut daily_map: BTreeMap<String, [f64; 3]> = BTreeMap::new();
-    let mut daily_turns_map: BTreeMap<String, [i64; 3]> = BTreeMap::new();
+    let mut daily_map: BTreeMap<String, [f64; 4]> = BTreeMap::new();
+    let mut daily_turns_map: BTreeMap<String, [i64; 4]> = BTreeMap::new();
     for offset in (0..chart_days).rev() {
         let day_ts = now - offset * 86_400;
         let date_label: String = connection
@@ -245,8 +286,8 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 |r| r.get(0),
             )
             .unwrap_or_else(|_| String::from("--"));
-        daily_map.entry(date_label.clone()).or_insert([0.0, 0.0, 0.0]);
-        daily_turns_map.entry(date_label).or_insert([0, 0, 0]);
+        daily_map.entry(date_label.clone()).or_insert([0.0; 4]);
+        daily_turns_map.entry(date_label).or_insert([0; 4]);
     }
 
     let mut daily_stmt = connection
@@ -254,11 +295,12 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
             "SELECT
                 strftime('%m-%d', created_at, 'unixepoch', 'localtime') AS d,
                 provider_kind,
-                COALESCE(SUM(cost_usd), 0.0),
-                COUNT(*)
+                model,
+                input_tokens,
+                output_tokens,
+                cached_tokens
              FROM usage_records
-             WHERE created_at >= ?1
-             GROUP BY d, provider_kind",
+             WHERE created_at >= ?1",
         )
         .map_err(|e| e.to_string())?;
     let daily_rows = daily_stmt
@@ -266,38 +308,44 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, f64>(2)?,
+                r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
-    for row in daily_rows.flatten() {
-        let idx = match row.1.as_str() {
+    for (date, provider, model, inp, out, cached) in daily_rows.flatten() {
+        let idx = match provider.as_str() {
             "codex" => 0,
             "deepseek" => 1,
             "gemini" => 2,
+            "claude" => 3,
             _ => continue,
         };
-        if let Some(entry) = daily_map.get_mut(&row.0) {
-            entry[idx] += row.2;
+        let cost = estimate_cost_usd(&provider, &model, inp, out, cached);
+        if let Some(entry) = daily_map.get_mut(&date) {
+            entry[idx] += cost;
         }
-        if let Some(entry) = daily_turns_map.get_mut(&row.0) {
-            entry[idx] += row.3;
+        if let Some(entry) = daily_turns_map.get_mut(&date) {
+            entry[idx] += 1;
         }
     }
 
     let daily: Vec<Value> = daily_map
         .into_iter()
         .map(|(date, costs)| {
-            let turns = daily_turns_map.get(&date).copied().unwrap_or([0, 0, 0]);
+            let turns = daily_turns_map.get(&date).copied().unwrap_or([0; 4]);
             json!({
                 "date": date,
                 "codexCost": costs[0],
                 "deepseekCost": costs[1],
                 "geminiCost": costs[2],
+                "claudeCost": costs[3],
                 "codexTurns": turns[0],
                 "deepseekTurns": turns[1],
                 "geminiTurns": turns[2],
+                "claudeTurns": turns[3],
             })
         })
         .collect();
@@ -312,38 +360,53 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
                 COUNT(*),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cached_tokens), 0),
-                COALESCE(SUM(cost_usd), 0.0)
+                COALESCE(SUM(cached_tokens), 0)
              FROM usage_records
              WHERE created_at >= ?1
-             GROUP BY provider_kind, agent_id, model
-             ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC",
+             GROUP BY provider_kind, agent_id, model",
         )
         .map_err(|e| e.to_string())?;
-    let models: Vec<Value> = model_stmt
+    let mut model_rows: Vec<(f64, i64, Value)> = model_stmt
         .query_map([since], |r| {
-            let input: i64 = r.get(4)?;
+            let provider: String = r.get(0)?;
+            let agent_id: String = r.get(1)?;
+            let model: String = r.get(2)?;
+            let turns: i64 = r.get(3)?;
+            let raw_input: i64 = r.get(4)?;
+            let output: i64 = r.get(5)?;
             let cached: i64 = r.get(6)?;
-            let cache_pct = if input > 0 {
-                (cached as f64 / input as f64 * 100.0).clamp(0.0, 100.0)
+            let eff_input = effective_input_tokens(&provider, raw_input, cached);
+            let cost = estimate_cost_usd(&provider, &model, raw_input, output, cached);
+            let cache_pct = if eff_input > 0 {
+                (cached.max(0) as f64 / eff_input as f64 * 100.0).clamp(0.0, 100.0)
             } else {
                 0.0
             };
-            Ok(json!({
-                "providerKind": r.get::<_, String>(0)?,
-                "agentId": r.get::<_, String>(1)?,
-                "model": r.get::<_, String>(2)?,
-                "turns": r.get::<_, i64>(3)?,
-                "inputTokens": input,
-                "outputTokens": r.get::<_, i64>(5)?,
-                "cachedTokens": cached,
-                "cacheHitRate": cache_pct,
-                "costUsd": r.get::<_, f64>(7)?,
-            }))
+            Ok((
+                cost,
+                turns,
+                json!({
+                    "providerKind": provider,
+                    "agentId": agent_id,
+                    "model": model,
+                    "turns": turns,
+                    "inputTokens": eff_input,
+                    "outputTokens": output.max(0),
+                    "cachedTokens": cached.max(0),
+                    "cacheHitRate": cache_pct,
+                    "costUsd": cost,
+                }),
+            ))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    model_rows.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.cmp(&a.1))
+    });
+    let models: Vec<Value> = model_rows.into_iter().map(|(_, _, v)| v).collect();
 
     // Per-agent summary
     let mut agent_stats: HashMap<String, (i64, i64, i64, i64, i64, f64, Option<i64>)> =
@@ -352,36 +415,46 @@ pub fn dashboard(store: &Store, codex_rt: &codex::Runtime, days: u32) -> Result<
         .prepare(
             "SELECT
                 agent_id,
-                COALESCE(SUM(CASE WHEN created_at >= ?2 THEN 1 ELSE 0 END), 0),
-                COUNT(*),
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cached_tokens), 0),
-                COALESCE(SUM(cost_usd), 0.0),
-                MAX(CASE WHEN status='quota_exhausted' THEN created_at ELSE NULL END)
+                provider_kind,
+                model,
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                status,
+                created_at
              FROM usage_records
-             WHERE created_at >= ?1
-             GROUP BY agent_id",
+             WHERE created_at >= ?1",
         )
         .map_err(|e| e.to_string())?;
     let agent_rows = agent_stmt
-        .query_map(params![since, today_since], |r| {
+        .query_map([since], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                (
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, f64>(6)?,
-                    r.get::<_, Option<i64>>(7)?,
-                ),
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
-    for (id, stats) in agent_rows.flatten() {
-        agent_stats.insert(id, stats);
+    for (agent_id, provider, model, inp, out, cached, status, created_at) in agent_rows.flatten() {
+        let entry = agent_stats
+            .entry(agent_id)
+            .or_insert((0, 0, 0, 0, 0, 0.0, None));
+        if created_at >= today_since {
+            entry.0 += 1;
+        }
+        entry.1 += 1;
+        entry.2 += effective_input_tokens(&provider, inp, cached);
+        entry.3 += out.max(0);
+        entry.4 += cached.max(0);
+        entry.5 += estimate_cost_usd(&provider, &model, inp, out, cached);
+        if status == "quota_exhausted" {
+            entry.6 = Some(entry.6.map_or(created_at, |prev| prev.max(created_at)));
+        }
     }
 
     let agents_summary: Vec<Value> = agent_list
@@ -539,12 +612,9 @@ pub fn conversation_context(
                     rec_model
                 };
                 let window = estimate_context_window(&provider_kind, &model);
-                // Gemini ACP reports cachedReadTokens separately from non-cached inputTokens.
-                let used = if provider_kind == "gemini" {
-                    (inp + cached + out).max(0)
-                } else {
-                    (inp + out).max(0)
-                };
+                // Providers like Gemini ACP, DeepSeek Harness, and Claude report cached read tokens
+                // separately from non-cached inputTokens.
+                let used = (effective_input_tokens(&provider_kind, inp, cached) + out).max(0);
                 (model, inp, out, cached, used, window, "recorded")
             } else {
                 let window = estimate_context_window(&provider_kind, &session_model);
@@ -638,5 +708,23 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn separate_cached_providers_compute_effective_input_and_cost() {
+        // Gemini reports non-cached input separately from cachedReadTokens.
+        assert_eq!(effective_input_tokens("gemini", 1_000_000, 9_000_000), 10_000_000);
+        // Codex input_tokens already includes cached_tokens.
+        assert_eq!(effective_input_tokens("codex", 10_000_000, 9_000_000), 10_000_000);
+        // DeepSeek Harness reports non-cached input separately from cacheReadTokens.
+        assert_eq!(effective_input_tokens("deepseek", 12_054, 5_632), 17_686);
+
+        // Gemini Pro: 1M non-cached ($1.25) + 4M cached ($1.25) + 0.1M output ($1.00) = $3.50
+        let cost = estimate_cost_usd("gemini", "gemini-4-hydrogen-medium", 1_000_000, 100_000, 4_000_000);
+        assert!((cost - 3.50).abs() < 1e-6, "unexpected gemini cost: {cost}");
+
+        // DeepSeek: 1M non-cached ($0.27) + 1M cached ($0.07) + 1M output ($1.10) = $1.44
+        let ds_cost = estimate_cost_usd("deepseek", "deepseek-flash", 1_000_000, 1_000_000, 1_000_000);
+        assert!((ds_cost - 1.44).abs() < 1e-6, "unexpected deepseek cost: {ds_cost}");
     }
 }

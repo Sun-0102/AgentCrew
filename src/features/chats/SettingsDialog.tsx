@@ -1,11 +1,17 @@
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Dialog from "../../components/Dialog";
 import Avatar from "../../components/Avatar";
 import Icon from "../../components/Icon";
 import type { AppInfo } from "../projects/api";
+import UsageDashboard from "../usage/UsageDashboard";
+import type { UsageDashboardData } from "../usage/api";
 import { desktop, refreshAgents, type Agent, type DiscoveryItem, type Probe, type ProviderCapabilities } from "./api";
 
+export type SettingsTab = "agents" | "usage";
+
 interface Props {
+  initialTab?: SettingsTab;
   agents: Agent[];
   discoveryResults: DiscoveryItem[];
   discovering: boolean;
@@ -13,6 +19,11 @@ interface Props {
   probing: Record<string, boolean>;
   paused: boolean;
   info: AppInfo | null;
+  usageData: UsageDashboardData;
+  usageDays: number;
+  usageLoading: boolean;
+  onChangeUsageDays: (days: number) => void;
+  onRefreshUsage: () => void;
   onDiscover: () => void;
   onProbeAgent: (agent: Agent) => void;
   onOpenPairing: () => void;
@@ -53,6 +64,7 @@ function memberStatus(agent: Agent, discovery?: DiscoveryItem, isProbing?: boole
 }
 
 export default function SettingsDialog({
+  initialTab = "agents",
   agents,
   discoveryResults,
   discovering,
@@ -60,6 +72,11 @@ export default function SettingsDialog({
   probing,
   paused,
   info,
+  usageData,
+  usageDays,
+  usageLoading,
+  onChangeUsageDays,
+  onRefreshUsage,
   onDiscover,
   onProbeAgent,
   onOpenPairing,
@@ -67,10 +84,26 @@ export default function SettingsDialog({
   onError,
   onClose,
 }: Props) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (tab === "usage") {
+      onRefreshUsage();
+    }
+  }, [tab]);
+
   const activeMembers = agents.filter(a => a.registration_state !== "revoked");
   const discoveryByProvider = new Map(discoveryResults.map(item => [item.provider_kind, item]));
   const registeredProviders = new Set(activeMembers.map(a => a.provider_kind));
   const unregisteredDiscoveries = discoveryResults.filter(item => !registeredProviders.has(item.provider_kind));
+
+  const hasUsageWarning =
+    usageData.agents.some(a => a.quotaExhaustedRecent) ||
+    usageData.codexLimits.windows.some(w => w.remainingPercent <= 20);
 
   const runtimePaths: { id: string; label: string; version: string | null; executable: string }[] = [];
   for (const member of activeMembers) {
@@ -106,152 +139,197 @@ export default function SettingsDialog({
   }
 
   return (
-    <Dialog title="成员接入与设置" onClose={onClose} wide>
-      <p className="dialog-intro">
-        自动并发探测本机已安装的 CLI Agent 并接入侧边栏，也支持通过一次性邀请手动添加自定义实例。
-      </p>
-
-      <div className="settings-toolbar">
-        <div className="settings-toolbar-main">
-          <button className="primary" disabled={discovering || !desktop} onClick={onDiscover}>
-            {discovering ? "正在扫描本机组件…" : "重新扫描本机组件"}
-          </button>
-          <button className="outline-button" onClick={onOpenPairing}>
-            手动添加 Agent
-          </button>
-        </div>
+    <Dialog
+      title="工作台设置"
+      onClose={onClose}
+      wide
+      className={tab === "usage" ? "dialog-usage-wide" : ""}
+    >
+      <div className="settings-tabs" role="tablist" aria-label="设置分区">
         <button
-          className={`dispatch-toggle ${paused ? "is-paused" : ""}`}
-          onClick={onToggleDispatch}
-          title={paused ? "当前所有自动派发已暂停，点击恢复" : "点击暂停全部后台派发"}
+          type="button"
+          role="tab"
+          aria-selected={tab === "agents"}
+          className={tab === "agents" ? "active" : ""}
+          onClick={() => setTab("agents")}
         >
-          <span className="dispatch-dot" />
-          {paused ? "已暂停派发 · 点击继续" : "派发运行中 · 暂停"}
+          <Icon name="settings" size={14} />
+          成员与接入
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "usage"}
+          className={tab === "usage" ? "active" : ""}
+          onClick={() => setTab("usage")}
+        >
+          <Icon name="chart" size={14} />
+          用量与额度
+          {hasUsageWarning && <span className="settings-tab-dot" aria-label="额度提醒" />}
+          <span className="settings-tab-kbd">⌘U</span>
         </button>
       </div>
 
-      <div className="field-caption settings-section-head">
-        <span>已接入成员 ({activeMembers.length})</span>
-        {discovering && <span className="settings-scanning-hint">正在并行探测…</span>}
-      </div>
-
-      <div className="provider-list" role="group" aria-label="已接入成员">
-        {activeMembers.length ? (
-          activeMembers.map(member => {
-            const liveProbe = probes[member.id];
-            const disc = discoveryByProvider.get(member.provider_kind);
-            const isProbing = !!probing[member.id];
-            const status = memberStatus(member, disc, isProbing);
-            const modelCount = liveProbe?.models.length ?? disc?.model_count ?? 0;
-            const version = formatVersion(liveProbe?.version ?? disc?.version ?? member.runtime_version);
-            const authLabel = liveProbe?.auth ?? disc?.auth ?? null;
-            const runtimeLabel = member.runtime_label ?? disc?.runtime_label ?? member.runtime_kind ?? member.provider_kind;
-            const caps = capabilityTags(member.capabilities ?? disc?.capabilities);
-            const metaParts: string[] = [];
-            if (authLabel) metaParts.push(authLabel);
-            if (modelCount > 0) metaParts.push(`${modelCount} 个模型`);
-            if (version) metaParts.push(version);
-            const warningText =
-              status.tone === "warn"
-                ? (disc?.auth_hint ?? member.error ?? "请检查本机运行组件或原厂登录状态。")
-                : null;
-
-            return (
-              <div className={`provider-card ${!member.enabled ? "is-disabled" : ""}`} key={member.id}>
-                <div className="provider-card-main">
-                  <Avatar agent={member.id} />
-                  <div className="provider-card-body">
-                    <div className="provider-card-title">
-                      <strong>{member.name}</strong>
-                      <span className={`provider-status-badge tone-${status.tone}`}>{status.label}</span>
-                      <span className="provider-runtime-tag">{runtimeLabel}</span>
-                    </div>
-                    <p className="provider-card-meta">
-                      {metaParts.length ? metaParts.join(" · ") : member.description}
-                    </p>
-                    {caps.length > 0 && (
-                      <div className="provider-caps" aria-label="支持能力">
-                        {caps.map(tag => (
-                          <span className="provider-cap-pill" key={tag}>{tag}</span>
-                        ))}
-                      </div>
-                    )}
-                    {warningText && <p className="provider-card-warn">{warningText}</p>}
-                  </div>
-                </div>
-                <div className="provider-card-actions">
-                  {member.registration_state === "active" && member.enabled && (
-                    <button
-                      className="outline-button"
-                      disabled={isProbing || !desktop}
-                      onClick={() => onProbeAgent(member)}
-                    >
-                      {isProbing ? "检测中…" : "重新检测"}
-                    </button>
-                  )}
-                  {member.registration_state === "active" && (
-                    <button className="outline-button" onClick={() => void toggleEnabled(member)}>
-                      {member.enabled ? "停用" : "启用"}
-                    </button>
-                  )}
-                  <button className="outline-button danger-subtle" onClick={() => void revokeAgent(member)}>
-                    移除
-                  </button>
-                </div>
-              </div>
-            );
-          })
-        ) : (
-          <div className="discovery-empty">
-            {discovering
-              ? "正在并行扫描本机已安装的 Agent 组件…"
-              : "暂未接入任何 Agent，请点击上方「重新扫描本机组件」或「手动添加 Agent」。"}
-          </div>
-        )}
-      </div>
-
-      {unregisteredDiscoveries.length > 0 && (
+      {tab === "usage" ? (
+        <div className="settings-usage-body">
+          <UsageDashboard
+            data={usageData}
+            days={usageDays}
+            loading={usageLoading}
+            embedded
+            onChangeDays={onChangeUsageDays}
+            onRefresh={onRefreshUsage}
+          />
+        </div>
+      ) : (
         <>
+          <p className="dialog-intro">
+            自动并发探测本机已安装的 CLI Agent 并接入侧边栏，也支持通过一次性邀请手动添加自定义实例。
+          </p>
+
+          <div className="settings-toolbar">
+            <div className="settings-toolbar-main">
+              <button className="primary" disabled={discovering || !desktop} onClick={onDiscover}>
+                {discovering ? "正在扫描本机组件…" : "重新扫描本机组件"}
+              </button>
+              <button className="outline-button" onClick={onOpenPairing}>
+                手动添加 Agent
+              </button>
+            </div>
+            <button
+              className={`dispatch-toggle ${paused ? "is-paused" : ""}`}
+              onClick={onToggleDispatch}
+              title={paused ? "当前所有自动派发已暂停，点击恢复" : "点击暂停全部后台派发"}
+            >
+              <span className="dispatch-dot" />
+              {paused ? "已暂停派发 / 点击继续" : "派发运行中 / 暂停"}
+            </button>
+          </div>
+
           <div className="field-caption settings-section-head">
-            <span>其他本机探测结果 ({unregisteredDiscoveries.length})</span>
+            <span>已接入成员 ({activeMembers.length})</span>
+            {discovering && <span className="settings-scanning-hint">正在并行探测…</span>}
           </div>
-          <div className="discovery-list" role="group" aria-label="其他本机探测结果">
-            {unregisteredDiscoveries.map(item => {
-              const version = formatVersion(item.version);
-              return (
-                <div className="discovery-item" key={item.provider_kind}>
-                  <Avatar agent={item.provider_kind} />
-                  <div>
-                    <div className="provider-card-title">
-                      <strong>{item.display_name}</strong>
-                      {item.runtime_label && <span className="provider-runtime-tag">{item.runtime_label}</span>}
+
+          <div className="provider-list" role="group" aria-label="已接入成员">
+            {activeMembers.length ? (
+              activeMembers.map(member => {
+                const liveProbe = probes[member.id];
+                const disc = discoveryByProvider.get(member.provider_kind);
+                const isProbing = !!probing[member.id];
+                const status = memberStatus(member, disc, isProbing);
+                const modelCount = liveProbe?.models.length ?? disc?.model_count ?? 0;
+                const version = formatVersion(liveProbe?.version ?? disc?.version ?? member.runtime_version);
+                const authLabel = liveProbe?.auth ?? disc?.auth ?? null;
+                const runtimeLabel = member.runtime_label ?? disc?.runtime_label ?? member.runtime_kind ?? member.provider_kind;
+                const caps = capabilityTags(member.capabilities ?? disc?.capabilities);
+                const metaParts: string[] = [];
+                if (authLabel) metaParts.push(authLabel);
+                if (modelCount > 0) metaParts.push(`${modelCount} 个模型`);
+                if (version) metaParts.push(version);
+                const warningText =
+                  status.tone === "warn"
+                    ? (disc?.auth_hint ?? member.error ?? "请检查本机运行组件或原厂登录状态。")
+                    : null;
+
+                return (
+                  <div className={`provider-card ${!member.enabled ? "is-disabled" : ""}`} key={member.id}>
+                    <div className="provider-card-main">
+                      <Avatar agent={member.id} />
+                      <div className="provider-card-body">
+                        <div className="provider-card-title">
+                          <strong>{member.name}</strong>
+                          <span className={`provider-status-badge tone-${status.tone}`}>{status.label}</span>
+                          <span className="provider-runtime-tag">{runtimeLabel}</span>
+                        </div>
+                        <p className="provider-card-meta">
+                          {metaParts.length ? metaParts.join(" / ") : member.description}
+                        </p>
+                        {caps.length > 0 && (
+                          <div className="provider-caps" aria-label="支持能力">
+                            {caps.map(tag => (
+                              <span className="provider-cap-pill" key={tag}>{tag}</span>
+                            ))}
+                          </div>
+                        )}
+                        {warningText && <p className="provider-card-warn">{warningText}</p>}
+                      </div>
                     </div>
-                    <p>{item.message}{version ? ` · ${version}` : ""}</p>
+                    <div className="provider-card-actions">
+                      {member.registration_state === "active" && member.enabled && (
+                        <button
+                          className="outline-button"
+                          disabled={isProbing || !desktop}
+                          onClick={() => onProbeAgent(member)}
+                        >
+                          {isProbing ? "检测中…" : "重新检测"}
+                        </button>
+                      )}
+                      {member.registration_state === "active" && (
+                        <button className="outline-button" onClick={() => void toggleEnabled(member)}>
+                          {member.enabled ? "停用" : "启用"}
+                        </button>
+                      )}
+                      <button className="outline-button danger-subtle" onClick={() => void revokeAgent(member)}>
+                        移除
+                      </button>
+                    </div>
                   </div>
-                  <span className={`discovery-status ${item.status}`}>
-                    {item.status === "connected" ? "可接入" : item.status === "needs_auth" ? "需原厂登录" : "未检测到"}
-                  </span>
-                </div>
-              );
-            })}
+                );
+              })
+            ) : (
+              <div className="discovery-empty">
+                {discovering
+                  ? "正在并行扫描本机已安装的 Agent 组件…"
+                  : "暂未接入任何 Agent，请点击上方「重新扫描本机组件」或「手动添加 Agent」。"}
+              </div>
+            )}
           </div>
+
+          {unregisteredDiscoveries.length > 0 && (
+            <>
+              <div className="field-caption settings-section-head">
+                <span>其他本机探测结果 ({unregisteredDiscoveries.length})</span>
+              </div>
+              <div className="discovery-list" role="group" aria-label="其他本机探测结果">
+                {unregisteredDiscoveries.map(item => {
+                  const version = formatVersion(item.version);
+                  return (
+                    <div className="discovery-item" key={item.provider_kind}>
+                      <Avatar agent={item.provider_kind} />
+                      <div>
+                        <div className="provider-card-title">
+                          <strong>{item.display_name}</strong>
+                          {item.runtime_label && <span className="provider-runtime-tag">{item.runtime_label}</span>}
+                        </div>
+                        <p>{item.message}{version ? ` (${version})` : ""}</p>
+                      </div>
+                      <span className={`discovery-status ${item.status}`}>
+                        {item.status === "connected" ? "可接入" : item.status === "needs_auth" ? "需原厂登录" : "未检测到"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {(runtimePaths.length > 0 || info) && (
+            <details className="runtime-details">
+              <summary>运行环境与本地数据位置</summary>
+              {runtimePaths.map(item => (
+                <code key={item.id}>
+                  {item.label}{item.version ? ` (${item.version})` : ""}: {item.executable}
+                </code>
+              ))}
+              {info && <code>DB: {info.database_path}</code>}
+            </details>
+          )}
         </>
       )}
 
-      {(runtimePaths.length > 0 || info) && (
-        <details className="runtime-details">
-          <summary>运行环境与本地数据位置</summary>
-          {runtimePaths.map(item => (
-            <code key={item.id}>
-              {item.label}{item.version ? ` (${item.version})` : ""}: {item.executable}
-            </code>
-          ))}
-          {info && <code>DB: {info.database_path}</code>}
-        </details>
-      )}
-
       <div className="dialog-footer">
-        <span>AgentCrew · v{info?.version ?? "0.1.0"}</span>
+        <span>AgentCrew v{info?.version ?? "0.1.3"}</span>
         <button className="primary" onClick={onClose}>
           完成<Icon name="check" size={16} />
         </button>

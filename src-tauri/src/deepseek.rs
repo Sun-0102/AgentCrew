@@ -143,6 +143,7 @@ struct Client {
     child: Mutex<Child>,
     input: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
+    turn_usage: Mutex<(i64, i64, i64)>,
     next: AtomicU64,
     healthy: AtomicBool,
     database: PathBuf,
@@ -217,6 +218,7 @@ impl Client {
             child: Mutex::new(child),
             input: Mutex::new(input),
             pending: Mutex::new(HashMap::new()),
+            turn_usage: Mutex::new((0, 0, 0)),
             next: AtomicU64::new(1),
             healthy: AtomicBool::new(true),
             database: store.path.clone(),
@@ -307,6 +309,11 @@ impl Client {
                 return Ok(());
             }
             match event["type"].as_str().unwrap_or("") {
+                "turn/start" => {
+                    if let Ok(mut acc) = self.turn_usage.lock() {
+                        *acc = (0, 0, 0);
+                    }
+                }
                 "assistant/message" | "tool/result" => {
                     let message = &data["message"];
                     let role = if event["type"] == "tool/result" {
@@ -315,6 +322,14 @@ impl Client {
                         "assistant"
                     };
                     if role == "assistant" {
+                        let (step_in, step_out, step_cached) = extract_usage(data);
+                        if step_in > 0 || step_out > 0 || step_cached > 0 {
+                            if let Ok(mut acc) = self.turn_usage.lock() {
+                                acc.0 += step_in;
+                                acc.1 += step_out;
+                                acc.2 += step_cached;
+                            }
+                        }
                         let reasoning = reasoning_text(message);
                         if !reasoning.is_empty() {
                             let id = message["id"].as_str().ok_or("DeepSeek 消息缺少标识")?;
@@ -351,19 +366,18 @@ impl Client {
                 }
                 "turn/end" => {
                     let reason = data["reason"]["kind"].as_str().unwrap_or("unknown");
-                    let u = &data["usage"];
-                    let inp = u["inputTokens"]
-                        .as_i64()
-                        .or_else(|| u["prompt_tokens"].as_i64())
-                        .unwrap_or(0);
-                    let out = u["outputTokens"]
-                        .as_i64()
-                        .or_else(|| u["completion_tokens"].as_i64())
-                        .unwrap_or(0);
-                    let cached = u["cachedTokens"]
-                        .as_i64()
-                        .or_else(|| u["prompt_cache_hit_tokens"].as_i64())
-                        .unwrap_or(0);
+                    let (mut inp, mut out, mut cached) = self
+                        .turn_usage
+                        .lock()
+                        .map(|mut acc| {
+                            let vals = *acc;
+                            *acc = (0, 0, 0);
+                            vals
+                        })
+                        .unwrap_or((0, 0, 0));
+                    if inp == 0 && out == 0 && cached == 0 {
+                        (inp, out, cached) = extract_usage(data);
+                    }
                     let model_name: String = connection
                         .query_row(
                             "SELECT COALESCE(model, '') FROM deepseek_sessions WHERE thread_id=?1",
@@ -478,6 +492,30 @@ fn append_message(
         crate::events::emit_delta(logical_cid, emitted_id, role, Some("deepseek"), "replace", text);
     }
     Ok(())
+}
+
+fn extract_usage(data: &Value) -> (i64, i64, i64) {
+    let u = &data["usage"];
+    if u.is_null() {
+        return (0, 0, 0);
+    }
+    let inp = u["inputTokens"]
+        .as_i64()
+        .or_else(|| u["prompt_tokens"].as_i64())
+        .unwrap_or(0)
+        .max(0);
+    let out = u["outputTokens"]
+        .as_i64()
+        .or_else(|| u["completion_tokens"].as_i64())
+        .unwrap_or(0)
+        .max(0);
+    let cached = u["cacheReadTokens"]
+        .as_i64()
+        .or_else(|| u["cachedTokens"].as_i64())
+        .or_else(|| u["prompt_cache_hit_tokens"].as_i64())
+        .unwrap_or(0)
+        .max(0);
+    (inp, out, cached)
 }
 
 fn message_text(message: &Value) -> String {

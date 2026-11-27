@@ -34,9 +34,11 @@ export interface DailyUsagePoint {
   codexCost: number;
   deepseekCost: number;
   geminiCost: number;
+  claudeCost: number;
   codexTurns: number;
   deepseekTurns: number;
   geminiTurns: number;
+  claudeTurns: number;
 }
 
 export interface ModelUsageRow {

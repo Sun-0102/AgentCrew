@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import Icon from "./Icon";
-export default function Dialog({ title, children, onClose, wide = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+export default function Dialog({ title, children, onClose, wide = false, className = "" }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null);
   const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const close = useRef(onClose); close.current = onClose;
@@ -11,7 +11,7 @@ export default function Dialog({ title, children, onClose, wide = false }: { tit
     target?.focus();
     return () => { element?.close(); returnFocus.current?.focus(); };
   }, []);
-  return <dialog ref={ref} tabIndex={-1} className={`dialog ${wide ? "dialog-wide" : ""}`} aria-label={title} onCancel={event => { event.preventDefault(); close.current(); }} onClick={event => {
+  return <dialog ref={ref} tabIndex={-1} className={`dialog ${wide ? "dialog-wide" : ""} ${className}`.trim()} aria-label={title} onCancel={event => { event.preventDefault(); close.current(); }} onClick={event => {
     if (event.target !== event.currentTarget) return;
     const rect = event.currentTarget.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close.current();
