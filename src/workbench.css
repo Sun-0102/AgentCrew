@@ -1858,3 +1858,226 @@ button { -webkit-tap-highlight-color: transparent; }
   border-radius: 50%;
   background: #f59e0b;
 }
+
+
+/* Model Defaults Settings & Popover Default Action */
+.mcp-default-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 14px;
+  background: #f8fafc;
+  border-top: 1px solid #eef2f6;
+  font-size: 12px;
+}
+.mcp-default-hint {
+  color: #64748b;
+}
+.mcp-default-synced {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #64748b;
+}
+.mcp-save-default-btn {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+.mcp-save-default-btn:hover {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
+}
+
+.defaults-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.defaults-scope-bar {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 11px;
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+}
+.defaults-scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+.defaults-scope-btn:hover {
+  color: #0f172a;
+}
+.defaults-scope-btn.active {
+  background: #ffffff;
+  color: #0f172a;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.defaults-follow-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  cursor: pointer;
+}
+.defaults-follow-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.defaults-follow-text strong {
+  font-size: 13.5px;
+  color: #0f172a;
+}
+.defaults-follow-text small {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.defaults-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  position: relative;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+.defaults-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+  transition: transform 0.16s ease;
+}
+.defaults-switch:checked {
+  background: var(--accent);
+}
+.defaults-switch:checked::after {
+  transform: translateX(16px);
+}
+.defaults-switch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.defaults-inherited-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  color: #3730a3;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.default-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.default-model-card {
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #ffffff;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.default-model-card.is-disabled {
+  opacity: 0.65;
+}
+.default-model-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.default-model-agent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.default-model-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.default-model-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(0, 1fr);
+  gap: 12px 16px;
+  align-items: start;
+  padding-top: 10px;
+  border-top: 1px solid #f1f5f9;
+}
+.default-model-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.default-model-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+.default-model-select {
+  width: 100%;
+  min-height: 36px;
+  font-size: 13px;
+}
+.default-model-empty-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+}
+@media (max-width: 820px) {
+  .default-model-controls {
+    grid-template-columns: 1fr;
+  }
+}

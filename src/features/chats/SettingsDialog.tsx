@@ -6,9 +6,16 @@ import Icon from "../../components/Icon";
 import type { AppInfo } from "../projects/api";
 import UsageDashboard from "../usage/UsageDashboard";
 import type { UsageDashboardData } from "../usage/api";
-import { desktop, refreshAgents, type Agent, type DiscoveryItem, type Probe, type ProviderCapabilities } from "./api";
+import { desktop, refreshAgents, type Agent, type DiscoveryItem, type Model, type Probe, type ProviderCapabilities } from "./api";
+import {
+  findDirectModelDefault,
+  type ModelDefaultScope,
+  type ModelDefaultsConfig,
+} from "./modelDefaults";
+import { effortLabels } from "./reasoning";
+import { speedChoices } from "./speed";
 
-export type SettingsTab = "agents" | "usage";
+export type SettingsTab = "agents" | "defaults" | "usage";
 
 interface Props {
   initialTab?: SettingsTab;
@@ -22,6 +29,15 @@ interface Props {
   usageData: UsageDashboardData;
   usageDays: number;
   usageLoading: boolean;
+  modelDefaults: ModelDefaultsConfig;
+  onSaveModelDefault: (params: {
+    scope: ModelDefaultScope;
+    agentId: string;
+    model: string;
+    reasoningEffort?: string | null;
+    serviceTier?: string | null;
+  }) => Promise<void>;
+  onToggleGroupFollowPrivate: (follow: boolean) => Promise<void>;
   onChangeUsageDays: (days: number) => void;
   onRefreshUsage: () => void;
   onDiscover: () => void;
@@ -75,6 +91,9 @@ export default function SettingsDialog({
   usageData,
   usageDays,
   usageLoading,
+  modelDefaults,
+  onSaveModelDefault,
+  onToggleGroupFollowPrivate,
   onChangeUsageDays,
   onRefreshUsage,
   onDiscover,
@@ -85,6 +104,8 @@ export default function SettingsDialog({
   onClose,
 }: Props) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [defaultScope, setDefaultScope] = useState<ModelDefaultScope>("private");
+  const [savingDefaultKey, setSavingDefaultKey] = useState<string | null>(null);
 
   useEffect(() => {
     setTab(initialTab);
@@ -138,6 +159,41 @@ export default function SettingsDialog({
     }
   }
 
+  async function saveAgentDefault(
+    scope: ModelDefaultScope,
+    agentId: string,
+    model: string,
+    reasoningEffort: string | null,
+    serviceTier: string | null,
+  ) {
+    const key = `${scope}:${agentId}`;
+    setSavingDefaultKey(key);
+    try {
+      await onSaveModelDefault({
+        scope,
+        agentId,
+        model,
+        reasoningEffort,
+        serviceTier,
+      });
+    } catch (cause) {
+      onError(`保存默认模型失败：${String(cause)}`);
+    } finally {
+      setSavingDefaultKey(prev => (prev === key ? null : prev));
+    }
+  }
+
+  async function toggleGroupFollow(follow: boolean) {
+    setSavingDefaultKey("group_follow");
+    try {
+      await onToggleGroupFollowPrivate(follow);
+    } catch (cause) {
+      onError(`更新群聊默认策略失败：${String(cause)}`);
+    } finally {
+      setSavingDefaultKey(prev => (prev === "group_follow" ? null : prev));
+    }
+  }
+
   return (
     <Dialog
       title="工作台设置"
@@ -156,6 +212,16 @@ export default function SettingsDialog({
           >
             <Icon name="settings" size={15} />
             <span className="settings-nav-label">成员与接入</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "defaults"}
+            className={`settings-nav-item ${tab === "defaults" ? "active" : ""}`}
+            onClick={() => setTab("defaults")}
+          >
+            <Icon name="spark" size={15} />
+            <span className="settings-nav-label">默认模型</span>
           </button>
           <button
             type="button"
@@ -181,6 +247,300 @@ export default function SettingsDialog({
               onChangeDays={onChangeUsageDays}
               onRefresh={onRefreshUsage}
             />
+          ) : tab === "defaults" ? (
+            <div className="defaults-pane">
+              <p className="dialog-intro settings-pane-intro">
+                为私聊（含项目空间）与群聊预设各 Agent 的默认模型、思考程度与响应速度。新建会话将自动套用；在聊天页面内临时调整则仅保留于当前会话，不会覆盖全局默认。
+              </p>
+
+              <div className="defaults-scope-bar" role="tablist" aria-label="默认配置场景">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={defaultScope === "private"}
+                  className={`defaults-scope-btn ${defaultScope === "private" ? "active" : ""}`}
+                  onClick={() => setDefaultScope("private")}
+                >
+                  <Icon name="chat" size={14} />
+                  <span>私聊与项目默认</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={defaultScope === "group"}
+                  className={`defaults-scope-btn ${defaultScope === "group" ? "active" : ""}`}
+                  onClick={() => setDefaultScope("group")}
+                >
+                  <Icon name="group" size={14} />
+                  <span>群聊默认</span>
+                </button>
+              </div>
+
+              {defaultScope === "group" && (
+                <label className="defaults-follow-card">
+                  <div className="defaults-follow-text">
+                    <strong>跟随私聊默认配置</strong>
+                    <small>开启后，新建群聊会话直接沿用「私聊与项目默认」；关闭后可为群聊单独配置更轻量或更偏重协作的模型与速度。</small>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="defaults-switch"
+                    checked={modelDefaults.group_follow_private}
+                    disabled={savingDefaultKey === "group_follow"}
+                    onChange={e => void toggleGroupFollow(e.target.checked)}
+                  />
+                </label>
+              )}
+
+              {defaultScope === "group" && modelDefaults.group_follow_private ? (
+                <div className="defaults-inherited-note">
+                  <Icon name="check" size={15} />
+                  <span>当前群聊已开启「跟随私聊默认配置」，无需重复维护两套参数。如需单独配置群聊模型，请关闭上方开关。</span>
+                </div>
+              ) : activeMembers.length === 0 ? (
+                <div className="discovery-empty">
+                  暂未接入任何 Agent，请先在「成员与接入」中扫描或添加 Agent。
+                </div>
+              ) : (
+                <div className="default-model-list" role="group" aria-label="各 Agent 默认模型配置">
+                  {activeMembers.map(member => {
+                    const liveProbe = probes[member.id];
+                    const models = liveProbe?.models ?? [];
+                    const isProbing = !!probing[member.id];
+                    const entry = findDirectModelDefault(modelDefaults, defaultScope, member.id);
+                    const savedModel = entry?.model ?? "";
+                    const savedEffort = entry?.reasoning_effort ?? "";
+                    const savedTier = entry?.service_tier ?? "default";
+                    const providerDefaultModel = models.find(m => m.isDefault) ?? models[0];
+                    const effectiveModel: Model | undefined =
+                      (savedModel ? models.find(m => m.model === savedModel) : undefined) ??
+                      providerDefaultModel;
+                    const efforts = effectiveModel?.supportedReasoningEfforts ?? [];
+                    const tiers = speedChoices(effectiveModel);
+                    const hasFastTiers = tiers.length > 1;
+                    const isSaving = savingDefaultKey === `${defaultScope}:${member.id}`;
+                    const hasCustom = !!savedModel || !!savedEffort || savedTier !== "default";
+
+                    return (
+                      <div
+                        className={`default-model-card ${!member.enabled ? "is-disabled" : ""}`}
+                        key={`${defaultScope}:${member.id}`}
+                      >
+                        <div className="default-model-card-head">
+                          <div className="default-model-agent">
+                            <Avatar agent={member.id} />
+                            <div>
+                              <div className="provider-card-title">
+                                <strong>{member.name}</strong>
+                                {!member.enabled && (
+                                  <span className="provider-status-badge tone-muted">已停用</span>
+                                )}
+                                {hasCustom && (
+                                  <span className="provider-status-badge tone-ready">已自定义</span>
+                                )}
+                              </div>
+                              <p className="provider-card-meta">
+                                {liveProbe
+                                  ? `${models.length} 个可用模型`
+                                  : isProbing
+                                    ? "正在检测可用模型…"
+                                    : "尚未获取模型列表"}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="default-model-head-actions">
+                            {hasCustom && (
+                              <button
+                                type="button"
+                                className="mcp-reset-link"
+                                disabled={isSaving}
+                                onClick={() =>
+                                  void saveAgentDefault(defaultScope, member.id, "", null, null)
+                                }
+                              >
+                                恢复原厂默认
+                              </button>
+                            )}
+                            {!liveProbe && member.enabled && (
+                              <button
+                                type="button"
+                                className="outline-button"
+                                disabled={isProbing || !desktop}
+                                onClick={() => onProbeAgent(member)}
+                              >
+                                {isProbing ? "检测中…" : "检测模型"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {liveProbe && models.length > 0 ? (
+                          <div className="default-model-controls">
+                            <div className="default-model-field">
+                              <label
+                                className="default-model-label"
+                                htmlFor={`default-model-${defaultScope}-${member.id}`}
+                              >
+                                默认模型
+                              </label>
+                              <select
+                                id={`default-model-${defaultScope}-${member.id}`}
+                                className="text-input default-model-select"
+                                value={savedModel}
+                                disabled={isSaving}
+                                onChange={e => {
+                                  const nextModelId = e.target.value;
+                                  const nextModelObj =
+                                    (nextModelId
+                                      ? models.find(m => m.model === nextModelId)
+                                      : undefined) ?? providerDefaultModel;
+                                  const nextEfforts = nextModelObj?.supportedReasoningEfforts ?? [];
+                                  const nextEffort =
+                                    savedEffort &&
+                                    nextEfforts.some(c => c.reasoningEffort === savedEffort)
+                                      ? savedEffort
+                                      : null;
+                                  const nextTiers = speedChoices(nextModelObj);
+                                  const nextTier =
+                                    savedTier &&
+                                    savedTier !== "default" &&
+                                    nextTiers.some(t => t.id === savedTier)
+                                      ? savedTier
+                                      : null;
+                                  void saveAgentDefault(
+                                    defaultScope,
+                                    member.id,
+                                    nextModelId,
+                                    nextEffort,
+                                    nextTier,
+                                  );
+                                }}
+                              >
+                                <option value="">
+                                  跟随原厂推荐
+                                  {providerDefaultModel
+                                    ? `（${providerDefaultModel.displayName}）`
+                                    : ""}
+                                </option>
+                                {savedModel && !models.some(m => m.model === savedModel) && (
+                                  <option value={savedModel}>{savedModel}（当前列表未包含）</option>
+                                )}
+                                {models.map(item => (
+                                  <option key={item.model} value={item.model}>
+                                    {item.displayName}
+                                    {item.model !== item.displayName ? ` (${item.model})` : ""}
+                                    {item.isDefault ? " · 推荐" : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {efforts.length > 0 && (
+                              <div className="default-model-field">
+                                <span className="default-model-label">
+                                  <Icon name="spark" size={12} />
+                                  思考程度
+                                </span>
+                                <div className="mcp-segmented" role="radiogroup" aria-label={`${member.name} 默认思考程度`}>
+                                  <button
+                                    type="button"
+                                    role="radio"
+                                    aria-checked={!savedEffort}
+                                    disabled={isSaving}
+                                    className={`mcp-seg-btn ${!savedEffort ? "active" : ""}`}
+                                    onClick={() =>
+                                      void saveAgentDefault(
+                                        defaultScope,
+                                        member.id,
+                                        savedModel,
+                                        null,
+                                        savedTier === "default" ? null : savedTier,
+                                      )
+                                    }
+                                  >
+                                    默认
+                                  </button>
+                                  {efforts.map(choice => {
+                                    const active = savedEffort === choice.reasoningEffort;
+                                    const label =
+                                      effortLabels[choice.reasoningEffort] ??
+                                      choice.reasoningEffort;
+                                    return (
+                                      <button
+                                        key={choice.reasoningEffort}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={active}
+                                        disabled={isSaving}
+                                        className={`mcp-seg-btn ${active ? "active" : ""}`}
+                                        onClick={() =>
+                                          void saveAgentDefault(
+                                            defaultScope,
+                                            member.id,
+                                            savedModel,
+                                            choice.reasoningEffort,
+                                            savedTier === "default" ? null : savedTier,
+                                          )
+                                        }
+                                      >
+                                        {label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
+                            {hasFastTiers && (
+                              <div className="default-model-field">
+                                <span className="default-model-label">
+                                  <Icon name="bolt" size={12} />
+                                  响应速度
+                                </span>
+                                <div className="mcp-segmented" role="radiogroup" aria-label={`${member.name} 默认响应速度`}>
+                                  {tiers.map(tier => {
+                                    const active = savedTier === tier.id;
+                                    const isAccel = tier.id !== "default";
+                                    return (
+                                      <button
+                                        key={tier.id}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={active}
+                                        disabled={isSaving}
+                                        className={`mcp-seg-btn ${active ? (isAccel ? "active-fast" : "active") : ""}`}
+                                        onClick={() =>
+                                          void saveAgentDefault(
+                                            defaultScope,
+                                            member.id,
+                                            savedModel,
+                                            savedEffort || null,
+                                            tier.id === "default" ? null : tier.id,
+                                          )
+                                        }
+                                      >
+                                        {isAccel && <Icon name="bolt" size={12} />}
+                                        {tier.name}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="default-model-empty-hint">
+                            {isProbing
+                              ? "正在连接并拉取模型列表，请稍候…"
+                              : "点击右上角「检测模型」获取该 Agent 支持的模型与推理档位。"}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           ) : (
             <>
               <p className="dialog-intro settings-pane-intro">

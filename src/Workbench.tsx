@@ -8,6 +8,16 @@ import { addProject, getAppInfo, listProjects, type AppInfo, type Project } from
 import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getProjectSessions, getSnapshot, probeAgent, running, saveGroupSession, savePrivateSession, saveProjectSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
 import { applyStreamDeltas, mergeSnapshotWithLiveStream, subscribeRealtimeEvents, type CoalescedSync, type StreamDelta } from "./features/chats/events";
 import { discardSessionDraft } from "./features/chats/ChatStage";
+import {
+  clearSessionOverrides,
+  emptyModelDefaults,
+  getModelDefaults,
+  saveModelDefault,
+  setGroupFollowPrivate,
+  transferDraftOverrides,
+  type ModelDefaultScope,
+  type ModelDefaultsConfig,
+} from "./features/chats/modelDefaults";
 import GroupDialog from "./features/chats/GroupDialog";
 import { GroupSidebarList, GroupHub, SessionSidebar, SessionDialog, DeleteSessionDialog, type ChatSession } from "./features/chats/GroupSessions";
 import Icon from "./components/Icon";
@@ -146,6 +156,28 @@ export default function Workbench() {
   const [usageDays, setUsageDays] = useState(7);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageData, setUsageData] = useState<UsageDashboardData>(emptyUsageDashboard);
+  const [modelDefaults, setModelDefaults] = useState<ModelDefaultsConfig>(emptyModelDefaults);
+  useEffect(() => {
+    let active = true;
+    void getModelDefaults()
+      .then(cfg => { if (active) setModelDefaults(cfg); })
+      .catch(cause => { if (active) setError(`读取默认模型配置失败：${String(cause)}`); });
+    return () => { active = false; };
+  }, []);
+  async function handleSaveModelDefault(params: {
+    scope: ModelDefaultScope;
+    agentId: string;
+    model: string;
+    reasoningEffort?: string | null;
+    serviceTier?: string | null;
+  }) {
+    const next = await saveModelDefault(params);
+    setModelDefaults(next);
+  }
+  async function handleToggleGroupFollowPrivate(follow: boolean) {
+    const next = await setGroupFollowPrivate(follow);
+    setModelDefaults(next);
+  }
   const [sidebarLayout, setSidebarLayout] = useState<{ workspaceCollapsed: boolean; sessionsCollapsed: boolean }>(() => {
     try {
       const raw = localStorage.getItem("ai-gent.sidebar-layout.v1");
@@ -469,9 +501,16 @@ export default function Workbench() {
     }
   }
   function startNewSession() {
-    if (inGroup && group) setDraftTarget({ kind: "group", groupId: group.id });
-    else if (inProject && project) setDraftTarget({ kind: "project", projectId: project.id });
-    else if (inAgent && selectedAgent) setDraftTarget({ kind: "agent", agentId: selectedAgent });
+    if (inGroup && group) {
+      clearSessionOverrides(`group:${group.id}:draft`);
+      setDraftTarget({ kind: "group", groupId: group.id });
+    } else if (inProject && project) {
+      clearSessionOverrides(`project:${project.id}:draft`);
+      setDraftTarget({ kind: "project", projectId: project.id });
+    } else if (inAgent && selectedAgent) {
+      clearSessionOverrides(`private:${selectedAgent}:draft`);
+      setDraftTarget({ kind: "agent", agentId: selectedAgent });
+    }
   }
   async function createDraftSession(seedTitle: string): Promise<{ scope: Scope; session: ChatSession } | null> {
     if (isGroupDraft && group) {
@@ -505,15 +544,21 @@ export default function Workbench() {
   }
   function commitDraftSession(saved: ChatSession) {
     if ("group_id" in saved) {
+      const targetKey = saved.id === saved.group_id ? `group:${saved.group_id}` : `group:${saved.group_id}:${saved.id}`;
+      transferDraftOverrides(`group:${saved.group_id}:draft`, targetKey);
       sessionsRevision.current += 1;
       setSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]);
       selectSession(saved);
       setGroups(current => current.map(g => g.id === saved.group_id ? { ...g, session_count: (g.session_count ?? 1) + 1 } : g));
     } else if ("project_id" in saved) {
+      const targetKey = saved.is_default ? `project:${saved.project_id}` : `project:${saved.project_id}:${saved.id}`;
+      transferDraftOverrides(`project:${saved.project_id}:draft`, targetKey);
       projectSessionsRevision.current += 1;
       setProjectSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]);
       selectProjectSession(saved);
     } else {
+      const targetKey = saved.is_default ? `private:${saved.agent_id}` : `private:${saved.agent_id}:${saved.id}`;
+      transferDraftOverrides(`private:${saved.agent_id}:draft`, targetKey);
       privateSessionsRevision.current += 1;
       setPrivateSessions(current => [saved, ...current.filter(s => s.id !== saved.id)]);
       selectPrivateSession(saved);
@@ -988,7 +1033,7 @@ export default function Workbench() {
       {connectedAgents.filter(a => a.id !== "codex" && a.id !== "deepseek" && (rail === "all" || rail === a.id) && a.name.toLowerCase().includes(query.toLowerCase())).map(a => <button className={`conversation-item ${selection.kind === "agent" && selection.id === a.id ? "selected" : ""}`} key={a.id} onClick={() => setSelection({ kind: "agent", id: a.id })}><Avatar agent={a.id}/><span className="conversation-text"><span className="conversation-name"><strong>{a.name}</strong><span className="connected-dot" /></span><small>{a.error ?? a.provider_kind}</small></span></button>)}{rail === "all" && <><div className="list-heading group-list-heading"><span>协作群</span><span>{filteredGroups.length}</span></div>{filteredGroups.map(g => <button className={`conversation-item ${selection.kind === "group" && selection.id === g.id ? "selected" : ""}`} key={g.id} onClick={() => openGroup(g.id)}><Avatar agent="group" /><span className="conversation-text"><span className="conversation-name"><strong title={g.name}>{g.name}</strong><time>{clock(g.updated_at)}</time></span><small>{running(g.status ?? "") ? "Agent 正在处理任务…" : g.preview ?? `${g.members.length} 位 Agent · 你`}</small></span></button>)}{!filteredGroups.length && <p className="no-groups">{query ? "没有找到匹配的群聊" : "让不同的想法，在一个群里碰面。"}</p>}</>}</>}</div>
       <div className="sidebar-footer"><span className={`presence-dot ${desktop ? "connected" : ""}`} /><span>{desktop ? "记录保存在本机" : "浏览器预览"}</span><button className="icon-button" title="设置与用量" aria-label="打开设置与用量" onClick={() => openSettings("agents")}><Icon name="shield" size={15} /></button></div>
       <div className={`sidebar-resize-handle ${resizingSidebar === "workspace" ? "is-resizing" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整工作台侧栏宽度" title="拖动调整宽度，双击恢复默认" onMouseDown={event => startSidebarResize("workspace", event)} onDoubleClick={() => resetSidebarWidth("workspace")} />
-    </aside>)}{showSessionSidebar && (inGroup && group ? <SessionSidebar key={group.id} sessions={groupSessions} selected={isGroupDraft ? undefined : session} isDraft={isGroupDraft} loading={sessionsLoading} saving={sessionSaving} onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} /> : inProject && project ? <SessionSidebar key={`project:${project.id}`} sessions={currentProjectSessions} selected={isProjectDraft ? undefined : projectSession} isDraft={isProjectDraft} loading={projectSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${project.name} 会话`} bottomNote="会话独立 · 项目目录共享" onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectProjectSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} /> : inAgent && <SessionSidebar key={`agent:${selectedAgent}`} sessions={agentSessions} selected={isAgentDraft ? undefined : privateSession} isDraft={isAgentDraft} loading={privateSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${agentName(selectedAgent)} 会话`} bottomNote="会话独立 · 上下文隔离" onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectPrivateSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} />)}<main className="conversation-workspace">{!showingChat && sidebarControls && <div className="workspace-collapsed-bar">{sidebarControls}</div>}{!desktop && <div className="preview-notice">浏览器预览<span>Agent 执行与项目目录选择请使用桌面版。</span></div>}{error && <div className="global-error" role="alert"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError(null)}><Icon name="close" size={16} /></button></div>}{isWorkspaceWaiting ? <div className="loading-conversation"><span className="small-spinner" />{inGroup || inAgent || inProject ? (sessionsLoading || privateSessionsLoading || projectSessionsLoading) ? "正在读取会话…" : "请选择或新建会话" : checkingAgents || discovering ? "正在连接本机已安装的 Agent…" : "正在打开你的工作台…"}</div> : !selectedExists ? <div className="conversation-welcome"><div className="welcome-mark"><Icon name="spark" size={37}/></div><h2>还没有已连接的 Agent</h2><p>在设置中自动检测并连接本机已安装的 Agent，或手动添加一位 Agent 后开始对话。</p><div className="pairing-actions"><button className="primary" disabled={discovering} onClick={()=>void discoverLocalAgents(true)}>{discovering ? "正在检测本机 Agent…" : "自动检测并连接"}</button><button className="outline-button" onClick={()=>setPairing(true)}><Icon name="plus" size={16}/>手动添加 Agent</button></div></div> : <ConnectedChat sidebarControls={sidebarControls} onOpenGit={openGitPanel} session={activeSession} isDraft={isDraft} onCreateDraftSession={isDraft ? createDraftSession : undefined} onCommitDraftSession={isDraft ? commitDraftSession : undefined} onGroups={showGroups} onRenameSession={() => activeSession && setSessionDialog(activeSession)} onArchiveSession={() => archiveSession()} onDeleteSession={() => activeSession && setDeleteSession(activeSession)} onGroupUpdated={updated => setGroups(current => current.map(g => g.id === updated.id ? updated : g))} sessionSaving={sessionSaving} key={key} scope={scope} scopeKey={key} title={title} group={group} project={project} agent={selectedAgent} onAgent={selectExecutionAgent} snapshot={visibleSnapshot} probes={probesByAgent} connectingByAgent={probingByAgent} onConnectAgent={id => void probeById(id, false)} onInvite={() => group && openGroupDialog(group)} onSettings={() => setSettings(true)} onRefresh={refreshCurrent} notify={notify} />}</main></>}</div>
+    </aside>)}{showSessionSidebar && (inGroup && group ? <SessionSidebar key={group.id} sessions={groupSessions} selected={isGroupDraft ? undefined : session} isDraft={isGroupDraft} loading={sessionsLoading} saving={sessionSaving} onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} /> : inProject && project ? <SessionSidebar key={`project:${project.id}`} sessions={currentProjectSessions} selected={isProjectDraft ? undefined : projectSession} isDraft={isProjectDraft} loading={projectSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${project.name} 会话`} bottomNote="会话独立 · 项目目录共享" onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectProjectSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} /> : inAgent && <SessionSidebar key={`agent:${selectedAgent}`} sessions={agentSessions} selected={isAgentDraft ? undefined : privateSession} isDraft={isAgentDraft} loading={privateSessionsLoading} saving={sessionSaving} searchPlaceholder={`搜索 ${agentName(selectedAgent)} 会话`} bottomNote="会话独立 · 上下文隔离" onCollapse={() => toggleSessionsSidebar(true)} onRename={renameSessionInline} onArchive={archiveSession} onDelete={setDeleteSession} onSelect={selectPrivateSession} onCreate={startNewSession} resizing={resizingSidebar === "session"} onResizeStart={event => startSidebarResize("session", event)} onResizeReset={() => resetSidebarWidth("session")} />)}<main className="conversation-workspace">{!showingChat && sidebarControls && <div className="workspace-collapsed-bar">{sidebarControls}</div>}{!desktop && <div className="preview-notice">浏览器预览<span>Agent 执行与项目目录选择请使用桌面版。</span></div>}{error && <div className="global-error" role="alert"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError(null)}><Icon name="close" size={16} /></button></div>}{isWorkspaceWaiting ? <div className="loading-conversation"><span className="small-spinner" />{inGroup || inAgent || inProject ? (sessionsLoading || privateSessionsLoading || projectSessionsLoading) ? "正在读取会话…" : "请选择或新建会话" : checkingAgents || discovering ? "正在连接本机已安装的 Agent…" : "正在打开你的工作台…"}</div> : !selectedExists ? <div className="conversation-welcome"><div className="welcome-mark"><Icon name="spark" size={37}/></div><h2>还没有已连接的 Agent</h2><p>在设置中自动检测并连接本机已安装的 Agent，或手动添加一位 Agent 后开始对话。</p><div className="pairing-actions"><button className="primary" disabled={discovering} onClick={()=>void discoverLocalAgents(true)}>{discovering ? "正在检测本机 Agent…" : "自动检测并连接"}</button><button className="outline-button" onClick={()=>setPairing(true)}><Icon name="plus" size={16}/>手动添加 Agent</button></div></div> : <ConnectedChat sidebarControls={sidebarControls} onOpenGit={openGitPanel} session={activeSession} isDraft={isDraft} onCreateDraftSession={isDraft ? createDraftSession : undefined} onCommitDraftSession={isDraft ? commitDraftSession : undefined} onGroups={showGroups} onRenameSession={() => activeSession && setSessionDialog(activeSession)} onArchiveSession={() => archiveSession()} onDeleteSession={() => activeSession && setDeleteSession(activeSession)} onGroupUpdated={updated => setGroups(current => current.map(g => g.id === updated.id ? updated : g))} sessionSaving={sessionSaving} key={key} scope={scope} scopeKey={key} title={title} group={group} project={project} agent={selectedAgent} onAgent={selectExecutionAgent} snapshot={visibleSnapshot} probes={probesByAgent} connectingByAgent={probingByAgent} onConnectAgent={id => void probeById(id, false)} modelDefaults={modelDefaults} onSaveModelDefault={handleSaveModelDefault} onInvite={() => group && openGroupDialog(group)} onSettings={() => setSettings(true)} onRefresh={refreshCurrent} notify={notify} />}</main></>}</div>
     {groupDialog && <GroupDialog initialDelete={groupDialog !== "new" && groupDialogDelete} key={groupDialog === "new" ? "new" : groupDialog.id} existing={groupDialog === "new" ? undefined : groupDialog} projects={projects} onClose={() => setGroupDialog(null)} onDeleted={groupDeleted} onSaved={saved => { setGroups(current => [saved, ...current.filter(g => g.id !== saved.id)]); openGroup(saved.id); setGroupDialog(null); notify(groupDialog === "new" ? `已创建「${saved.name}」` : "群设置已保存"); }} />}
     {sessionDialog && (group || inAgent || (inProject && project)) && <SessionDialog key={sessionDialog.id} groupId={group?.id} projectId={inProject ? project?.id : undefined} agentId={group || inProject ? undefined : selectedAgent} existing={sessionDialog} onClose={() => setSessionDialog(null)} onSaved={saved => { if ("group_id" in saved) { sessionsRevision.current += 1; setSessions(current => current.map(s => s.id === saved.id ? saved : s)); } else if ("project_id" in saved) { projectSessionsRevision.current += 1; setProjectSessions(current => current.map(s => s.id === saved.id ? saved : s)); } else { privateSessionsRevision.current += 1; setPrivateSessions(current => current.map(s => s.id === saved.id ? saved : s)); } setSessionDialog(null); notify("会话名称已更新"); }} />}
     {pendingProjectPath && <Dialog title="添加本地项目" onClose={() => { if (!adding) { setPendingProjectPath(null); setPendingProjectName(""); setPendingProjectError(null); } }}>
@@ -1016,6 +1061,9 @@ export default function Workbench() {
         usageData={usageData}
         usageDays={usageDays}
         usageLoading={usageLoading}
+        modelDefaults={modelDefaults}
+        onSaveModelDefault={handleSaveModelDefault}
+        onToggleGroupFollowPrivate={handleToggleGroupFollowPrivate}
         onChangeUsageDays={d => setUsageDays(d)}
         onRefreshUsage={() => void refreshUsage()}
         onDiscover={() => void discoverLocalAgents(true)}

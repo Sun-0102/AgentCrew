@@ -20,6 +20,9 @@ interface Props {
   onReasoningEffort?: (value: string) => void;
   onServiceTier?: (value: string) => void;
   onConnect: () => void;
+  canSaveAsDefault?: boolean;
+  defaultScopeLabel?: string;
+  onSaveAsDefault?: () => void;
 }
 
 export default function ModelConfigPopover({
@@ -37,6 +40,9 @@ export default function ModelConfigPopover({
   onReasoningEffort,
   onServiceTier,
   onConnect,
+  canSaveAsDefault = false,
+  defaultScopeLabel = "默认",
+  onSaveAsDefault,
 }: Props) {
   const id = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -330,6 +336,28 @@ export default function ModelConfigPopover({
                   <p className="mcp-param-desc">{activeTier.description}</p>
                 )}
               </div>
+            )}
+          </div>
+        )}
+
+        {probe && onSaveAsDefault && (
+          <div className="mcp-default-bar">
+            {canSaveAsDefault ? (
+              <>
+                <span className="mcp-default-hint">仅当前会话生效</span>
+                <button
+                  type="button"
+                  className="mcp-save-default-btn"
+                  onClick={() => onSaveAsDefault()}
+                >
+                  设为{defaultScopeLabel}
+                </button>
+              </>
+            ) : (
+              <span className="mcp-default-synced">
+                <Icon name="check" size={12} />
+                已与{defaultScopeLabel}一致
+              </span>
             )}
           </div>
         )}

@@ -17,6 +17,7 @@ mod groups;
 mod images;
 mod lifecycle;
 mod local_files;
+mod model_defaults;
 mod pairing;
 mod private_sessions;
 mod process;
@@ -190,7 +191,10 @@ pub fn run() {
             schedules::schedule_run_now,
             schedules::schedule_runs,
             schedules::schedule_codex_scan,
-            schedules::schedule_codex_import
+            schedules::schedule_codex_import,
+            model_defaults::model_defaults_get,
+            model_defaults::model_defaults_save,
+            model_defaults::model_defaults_set_group_follow
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")

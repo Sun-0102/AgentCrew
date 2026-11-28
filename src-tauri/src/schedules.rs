@@ -999,12 +999,29 @@ fn dispatch_task(
                     .as_deref()
                     .ok_or("任务未指定执行 Agent。")?;
                 let kind = agents::ensure_enabled(store, agent_id)?;
+                let default_pref = crate::model_defaults::resolve_for(store, "private", agent_id)
+                    .ok()
+                    .flatten();
                 let model = if !task.model.trim().is_empty() {
                     task.model.trim().to_owned()
+                } else if let Some(m) = default_pref
+                    .as_ref()
+                    .map(|p| p.model.trim())
+                    .filter(|m| !m.is_empty())
+                {
+                    m.to_owned()
                 } else {
                     resolve_fallback_model(store, &kind)
                         .ok_or("未配置执行模型，请编辑任务并选择一个模型。")?
                 };
+                let effective_effort = task
+                    .reasoning_effort
+                    .as_deref()
+                    .or_else(|| default_pref.as_ref().and_then(|p| p.reasoning_effort.as_deref()));
+                let effective_tier = task
+                    .service_tier
+                    .as_deref()
+                    .or_else(|| default_pref.as_ref().and_then(|p| p.service_tier.as_deref()));
                 let gate = app.state::<crate::deepseek::ExecutionGate>();
                 let _guard = if kind == "deepseek" {
                     Some(gate.0.lock().map_err(|e| e.to_string())?)
@@ -1038,21 +1055,21 @@ fn dispatch_task(
                         agent_id,
                         &model,
                         &dispatched_prompt,
-                        task.reasoning_effort.as_deref(),
-                        task.service_tier.as_deref(),
+                        effective_effort,
+                        effective_tier,
                     )?;
                     return Ok("queued");
                 }
                 let runtime = agents::binding(store, agent_id, &conv_id)?;
-                crate::reasoning::save(
+                let _ = crate::reasoning::save(
                     store,
                     &runtime,
                     &kind,
                     &model,
-                    task.reasoning_effort.as_deref(),
-                )?;
+                    effective_effort,
+                );
                 if kind == "codex" {
-                    crate::speed::save(store, &runtime, &model, task.service_tier.as_deref())?;
+                    let _ = crate::speed::save(store, &runtime, &model, effective_tier);
                 }
                 agents::send(app, store, agent_id, &conv_id, &model, &dispatched_prompt, "user")?;
                 Ok("dispatched")
@@ -1072,13 +1089,31 @@ fn dispatch_task(
                 let mut models = BTreeMap::new();
                 for member in &group.members {
                     if let Ok(kind) = agents::ensure_enabled(store, member) {
+                        let default_pref =
+                            crate::model_defaults::resolve_for(store, "group", member)
+                                .ok()
+                                .flatten();
                         let resolved = if !task.model.trim().is_empty()
                             && task.agent_id.as_deref() == Some(member.as_str())
                         {
                             task.model.trim().to_owned()
+                        } else if let Some(m) = default_pref
+                            .as_ref()
+                            .map(|p| p.model.trim())
+                            .filter(|m| !m.is_empty())
+                        {
+                            m.to_owned()
                         } else {
                             resolve_fallback_model(store, &kind).unwrap_or_default()
                         };
+                        let effective_effort = task.reasoning_effort.as_deref().or_else(|| {
+                            default_pref
+                                .as_ref()
+                                .and_then(|p| p.reasoning_effort.as_deref())
+                        });
+                        let effective_tier = task.service_tier.as_deref().or_else(|| {
+                            default_pref.as_ref().and_then(|p| p.service_tier.as_deref())
+                        });
                         if !resolved.is_empty() {
                             if let Ok(runtime) = agents::binding(store, member, &conv_id) {
                                 let _ = crate::reasoning::save(
@@ -1086,14 +1121,14 @@ fn dispatch_task(
                                     &runtime,
                                     &kind,
                                     &resolved,
-                                    task.reasoning_effort.as_deref(),
+                                    effective_effort,
                                 );
                                 if kind == "codex" {
                                     let _ = crate::speed::save(
                                         store,
                                         &runtime,
                                         &resolved,
-                                        task.service_tier.as_deref(),
+                                        effective_tier,
                                     );
                                 }
                             }

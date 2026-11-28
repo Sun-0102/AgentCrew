@@ -635,3 +635,22 @@
 :root[data-theme="dark"] .usage-table td { border-bottom-color: #1f2937; }
 :root[data-theme="dark"] .usage-table tbody tr:hover,
 :root[data-theme="dark"] .usage-table tfoot td { background: #0f172a; }
+
+
+:root[data-theme="dark"] .mcp-default-bar { background: #0f172a; border-top-color: #1e293b; }
+:root[data-theme="dark"] .mcp-default-hint,
+:root[data-theme="dark"] .mcp-default-synced { color: #94a3b8; }
+:root[data-theme="dark"] .mcp-save-default-btn { background: #1e1b4b; border-color: #4338ca; color: #a5b4fc; }
+:root[data-theme="dark"] .mcp-save-default-btn:hover { background: #312e81; border-color: #6366f1; }
+:root[data-theme="dark"] .defaults-scope-bar { background: #0f172a; border-color: #334155; }
+:root[data-theme="dark"] .defaults-scope-btn { color: #94a3b8; }
+:root[data-theme="dark"] .defaults-scope-btn:hover { color: #f1f5f9; }
+:root[data-theme="dark"] .defaults-scope-btn.active { background: #1e293b; color: #f8fafc; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
+:root[data-theme="dark"] .defaults-follow-card { background: #0f172a; border-color: #334155; }
+:root[data-theme="dark"] .defaults-follow-text strong { color: #f1f5f9; }
+:root[data-theme="dark"] .defaults-switch { background: #334155; }
+:root[data-theme="dark"] .defaults-inherited-note { background: rgba(99, 102, 241, 0.14); border-color: rgba(99, 102, 241, 0.35); color: #c7d2fe; }
+:root[data-theme="dark"] .default-model-card { background: var(--surface); border-color: var(--line); }
+:root[data-theme="dark"] .default-model-controls,
+:root[data-theme="dark"] .default-model-empty-hint { border-top-color: #1e293b; }
+:root[data-theme="dark"] .default-model-label { color: #cbd5e1; }

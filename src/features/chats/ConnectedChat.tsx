@@ -1,6 +1,14 @@
 import { useState, type ComponentProps } from "react";
 import ChatStage from "./ChatStage";
-import { useAgents, type Probe } from "./api";
+import { agentName, useAgents, type Probe } from "./api";
+import {
+  readSessionOverrides,
+  resolveModelDefault,
+  writeSessionOverrides,
+  type ModelDefaultScope,
+  type ModelDefaultsConfig,
+  type SessionOverrides,
+} from "./modelDefaults";
 import { selectedEffort } from "./reasoning";
 import { selectedSpeed } from "./speed";
 
@@ -34,49 +42,35 @@ type Props = Pick<
   probes: Record<string, Probe>;
   connectingByAgent: Record<string, boolean>;
   onConnectAgent: (id: string) => void;
+  modelDefaults: ModelDefaultsConfig;
+  onSaveModelDefault: (params: {
+    scope: ModelDefaultScope;
+    agentId: string;
+    model: string;
+    reasoningEffort?: string | null;
+    serviceTier?: string | null;
+  }) => Promise<void>;
 };
-
-interface Preferences {
-  models: Record<string, string>;
-  efforts: Record<string, string>;
-  tiers: Record<string, string>;
-}
 
 export default function ConnectedChat(p: Props) {
   const registry = useAgents();
   const [error, setError] = useState("");
-  const preferencesKey = p.scope.projectId && !p.group
-    ? `ai-gent.instance-models.v1.${p.scopeKey}`
-    : "ai-gent.instance-models.v1";
-  const [preferences, setPreferences] = useState<Preferences>(() => {
-    try {
-      const oldEfforts = JSON.parse(localStorage.getItem("ai-gent.reasoning.v1") ?? "{}");
-      const oldTiers = Object.fromEntries(
-        Object.entries(
-          JSON.parse(localStorage.getItem("ai-gent.speed.v1") ?? "{}") as Record<string, string>,
-        ).map(([model, tier]) => [`codex:${model}`, tier]),
-      );
-      return {
-        models: {},
-        efforts: oldEfforts,
-        tiers: oldTiers,
-        ...JSON.parse(localStorage.getItem("ai-gent.instance-models.v1") ?? "{}"),
-        ...(preferencesKey !== "ai-gent.instance-models.v1"
-          ? JSON.parse(localStorage.getItem(preferencesKey) ?? "{}")
-          : {}),
-      };
-    } catch {
-      return { models: {}, efforts: {}, tiers: {} };
-    }
-  });
+  const [overrides, setOverrides] = useState<SessionOverrides>(() =>
+    readSessionOverrides(p.scopeKey),
+  );
 
   const agent = p.agent ?? "codex";
   const ids = p.group?.members ?? [agent];
+  const sceneScope: ModelDefaultScope = p.group ? "group" : "private";
+  const saveTargetScope: ModelDefaultScope =
+    p.group && !p.modelDefaults.group_follow_private ? "group" : "private";
+  const defaultScopeLabel =
+    saveTargetScope === "group" ? "群聊默认" : p.group ? "通用默认" : "私聊默认";
 
-  function save(next: Preferences) {
-    setPreferences(next);
+  function save(next: SessionOverrides) {
+    setOverrides(next);
     try {
-      localStorage.setItem(preferencesKey, JSON.stringify(next));
+      writeSessionOverrides(p.scopeKey, next);
     } catch {
       setError("模型设置未能保存，重启后需要重新选择。");
     }
@@ -88,22 +82,78 @@ export default function ConnectedChat(p: Props) {
 
   for (const id of ids) {
     const probe = p.probes[id];
-    const saved =
-      preferences.models[id] ??
+    const sceneDefault = resolveModelDefault(p.modelDefaults, sceneScope, id);
+    const snapshotModel =
       p.snapshot.sessions?.[id]?.model ??
       (id === agent ? p.snapshot.session?.model : undefined);
-    models[id] =
-      probe?.models.find(m => m.model === saved)?.model ??
-      probe?.models.find(m => m.isDefault)?.model ??
-      probe?.models[0]?.model ??
-      "";
-    const model = probe?.models.find(m => m.model === models[id]);
-    efforts[id] = selectedEffort(model, preferences.efforts[`${id}:${models[id]}`]);
-    tiers[id] = selectedSpeed(model, preferences.tiers[`${id}:${models[id]}`]);
+    const candidates = [
+      overrides.models[id],
+      snapshotModel,
+      sceneDefault?.model,
+    ].filter((value): value is string => !!value && value.trim().length > 0);
+
+    let resolvedModel = "";
+    if (probe && probe.models.length > 0) {
+      for (const candidate of candidates) {
+        const hit = probe.models.find(m => m.model === candidate);
+        if (hit) {
+          resolvedModel = hit.model;
+          break;
+        }
+      }
+      if (!resolvedModel) {
+        resolvedModel =
+          probe.models.find(m => m.isDefault)?.model ??
+          probe.models[0]?.model ??
+          "";
+      }
+    } else {
+      resolvedModel = candidates[0] ?? "";
+    }
+
+    models[id] = resolvedModel;
+    const modelObj = probe?.models.find(m => m.model === resolvedModel);
+    const savedEffort =
+      overrides.efforts[`${id}:${resolvedModel}`] ??
+      sceneDefault?.reasoning_effort ??
+      undefined;
+    const savedTier =
+      overrides.tiers[`${id}:${resolvedModel}`] ??
+      sceneDefault?.service_tier ??
+      undefined;
+    efforts[id] = selectedEffort(modelObj, savedEffort);
+    tiers[id] = selectedSpeed(modelObj, savedTier);
   }
 
   const probe = p.probes[agent] ?? null;
   const current = models[agent] ?? "";
+  const currentModelObj = probe?.models.find(m => m.model === current);
+  const currentDefault = resolveModelDefault(p.modelDefaults, sceneScope, agent);
+  const defaultResolvedModel =
+    (currentDefault?.model &&
+    probe?.models.some(m => m.model === currentDefault.model)
+      ? currentDefault.model
+      : probe?.models.find(m => m.isDefault)?.model ??
+        probe?.models[0]?.model ??
+        "");
+  const defaultModelObj = probe?.models.find(
+    m => m.model === defaultResolvedModel,
+  );
+  const defaultEffort = selectedEffort(
+    defaultModelObj,
+    currentDefault?.reasoning_effort ?? undefined,
+  );
+  const defaultTier = selectedSpeed(
+    defaultModelObj,
+    currentDefault?.service_tier ?? undefined,
+  );
+  const canSaveAsDefault =
+    !!probe &&
+    !!current &&
+    (current !== defaultResolvedModel ||
+      (efforts[agent] ?? "") !== defaultEffort ||
+      (tiers[agent] ?? "default") !== defaultTier);
+
   const dispatchModels = Object.fromEntries(
     Object.entries(models).map(([id, model]) => [
       id,
@@ -114,6 +164,23 @@ export default function ConnectedChat(p: Props) {
         : "",
     ]),
   );
+
+  async function saveCurrentAsDefault() {
+    if (!current) return;
+    try {
+      await p.onSaveModelDefault({
+        scope: saveTargetScope,
+        agentId: agent,
+        model: current,
+        reasoningEffort: efforts[agent] || null,
+        serviceTier: tiers[agent] && tiers[agent] !== "default" ? tiers[agent] : null,
+      });
+      const label = currentModelObj?.displayName ?? current;
+      p.notify(`已将 ${agentName(agent)} 的${defaultScopeLabel}设为 ${label}`);
+    } catch (cause) {
+      setError(`保存默认配置失败：${String(cause)}`);
+    }
+  }
 
   return (
     <>
@@ -131,18 +198,29 @@ export default function ConnectedChat(p: Props) {
         model={current}
         connecting={!!p.connectingByAgent[agent]}
         onConnect={() => p.onConnectAgent(agent)}
-        onModel={model => save({ ...preferences, models: { ...preferences.models, [agent]: model } })}
+        onModel={model =>
+          save({ ...overrides, models: { ...overrides.models, [agent]: model } })
+        }
         collaborationModels={dispatchModels}
         collaborationEfforts={efforts}
         collaborationTiers={tiers}
         reasoningEffort={efforts[agent]}
         onReasoningEffort={value =>
-          save({ ...preferences, efforts: { ...preferences.efforts, [`${agent}:${current}`]: value } })
+          save({
+            ...overrides,
+            efforts: { ...overrides.efforts, [`${agent}:${current}`]: value },
+          })
         }
         codexServiceTier={tiers[agent]}
         onServiceTier={value =>
-          save({ ...preferences, tiers: { ...preferences.tiers, [`${agent}:${current}`]: value } })
+          save({
+            ...overrides,
+            tiers: { ...overrides.tiers, [`${agent}:${current}`]: value },
+          })
         }
+        canSaveAsDefault={canSaveAsDefault}
+        defaultScopeLabel={defaultScopeLabel}
+        onSaveAsDefault={probe ? () => void saveCurrentAsDefault() : undefined}
       />
     </>
   );
