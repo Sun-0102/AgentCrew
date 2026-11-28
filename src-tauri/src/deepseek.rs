@@ -1253,6 +1253,7 @@ mod tests {
             .unwrap()
             .contains("MODEL_SWITCH_OK"));
         runtime.send(&store,model,"这是取消生成测试。不要使用工具、子代理或目标。请从1写到10000，每行一个数字，不要省略。").unwrap();
+        #[cfg_attr(not(windows), allow(unused_variables))]
         let pid = runtime
             .clients
             .lock()

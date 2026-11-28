@@ -154,7 +154,11 @@ fn handoff_waits_only_for_its_recipient_and_does_not_duplicate() {
     let data = task_results::result(&store,&group,"task").unwrap();
     assert_eq!(data["inputs"].as_array().unwrap().len(),2);
     assert_eq!(data["steps"][2]["source_agent"],"codex");
-    let current = member_task(&store,"task","deepseek").unwrap();
+    let mut current = member_task(&store,"task","deepseek").unwrap();
+    let resume_prompt = build_prompt(&store,&current,&task_results::capture(&store.conversation_root(&group).unwrap())).unwrap();
+    assert!(resume_prompt.contains("延续当前会话"));
+    assert!(resume_prompt.contains("please review"));
+    current.thread_id = None;
     let prompt = build_prompt(&store,&current,&task_results::capture(&store.conversation_root(&group).unwrap())).unwrap();
     let owner_section = prompt.split("本次用户亲自发送的新消息").nth(1).unwrap().split("本轮投递内容").next().unwrap();
     assert!(!owner_section.contains("please review"));
@@ -220,18 +224,49 @@ fn a_failed_cancel_still_attempts_the_other_member_and_recovery_clears_both() {
 
 #[test]
 fn version_eleven_upgrade_backs_up_history_and_creates_member_records() {
-    let (dir,store,group) = fixture();
-    store.connect().unwrap().execute_batch("DROP TABLE group_task_members; ALTER TABLE group_task_inputs DROP COLUMN source_agent; PRAGMA user_version=11;").unwrap();
-    let upgraded = Store::open(store.path.clone()).unwrap();
-    let current = latest(&upgraded,&group).unwrap().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("v11.sqlite");
+    let group_root = dir.path().join("groups").join("g1");
+    std::fs::create_dir_all(&group_root).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+        for migration in &crate::storage::MIGRATIONS[..11] {
+            connection.execute_batch(migration).unwrap();
+        }
+        assert_eq!(
+            connection.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(),
+            11
+        );
+        connection.execute(
+            "INSERT INTO conversations(id,workspace_path) VALUES('g1',?1)",
+            [group_root.to_str().unwrap()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO chat_groups(conversation_id,name,members) VALUES('g1','parallel','[\"codex\",\"deepseek\"]')",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO group_tasks(id,conversation_id,objective,status,current_agent,codex_model,deepseek_model,pending_prompt) VALUES('task','g1','parallel','running','codex','model','model','')",
+            [],
+        ).unwrap();
+        for agent in ["codex", "deepseek"] {
+            connection.execute(
+                "INSERT INTO group_task_inputs(task_id,message_id,target_agent,model,text) VALUES('task','first',?1,'model','user request')",
+                [agent],
+            ).unwrap();
+        }
+    }
+    let upgraded = Store::open(db_path).unwrap();
+    let current = latest(&upgraded,"g1").unwrap().unwrap();
     assert_eq!(current.members.len(),2);
     assert_eq!(current.queued_count,2);
     let backup = std::fs::read_dir(dir.path()).unwrap().map(|p|p.unwrap().path()).find(|p|p.file_name().unwrap().to_string_lossy().contains("v11-")).unwrap();
     let backup = rusqlite::Connection::open(backup).unwrap();
     assert_eq!(backup.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0)).unwrap(),11);
     recover(&upgraded).unwrap();
-    assert_eq!(task(&upgraded,"task").unwrap().status,"interrupted");
-    assert_eq!(latest(&upgraded,&group).unwrap().unwrap().queued_count,0);
+    assert_eq!(task(&upgraded,"task").unwrap().status,"running");
+    assert_eq!(latest(&upgraded,"g1").unwrap().unwrap().queued_count,2);
 }
 
 #[test]

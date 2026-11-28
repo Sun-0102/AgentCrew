@@ -1448,6 +1448,14 @@ mod tests {
         let store = Store::open(dir.path().join("test.sqlite")).unwrap();
         let project = store.add_project(dir.path().to_str().unwrap()).unwrap();
         store.connect().unwrap().execute("INSERT INTO codex_sessions(conversation_id,thread_id,model,runtime_version,provider,status) VALUES(?1,'thread','model','test','test','starting')", [&project.id]).unwrap();
+        #[cfg(unix)]
+        let mut child = command(Path::new("/bin/cat"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        #[cfg(not(unix))]
         let mut child = command(&std::env::current_exe().unwrap())
             .arg("--list")
             .stdin(Stdio::piped())
@@ -1956,6 +1964,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
         }
         let pid = std::fs::read_to_string(project_dir.join("sleeper.pid")).unwrap();
+        #[cfg_attr(not(windows), allow(unused_variables))]
         let pid: u32 = pid.trim_start_matches('\u{feff}').trim().parse().unwrap();
         println!("sleep started; sending turn/interrupt");
         runtime.cancel(&store, &project.id).unwrap();

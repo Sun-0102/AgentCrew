@@ -2,22 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import ConnectedChat from "./features/chats/ConnectedChat";
 import PairingDialog, { type Invitation } from "./features/chats/PairingDialog";
 import SettingsDialog, { type SettingsTab } from "./features/chats/SettingsDialog";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { addProject, getAppInfo, listProjects, type AppInfo, type Project } from "./features/projects/api";
 import { useAgents, loadAgents, refreshAgents, autoDiscoverAgents, agentName, clock, desktop, emptySnapshot, getGroups, getGroupSessions, getPrivateSessions, getProjectSessions, getSnapshot, probeAgent, running, saveGroupSession, savePrivateSession, saveProjectSession, type Agent, type DiscoveryItem, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Probe, type Scope, type Snapshot } from "./features/chats/api";
 import { applyStreamDeltas, mergeSnapshotWithLiveStream, subscribeRealtimeEvents, type CoalescedSync, type StreamDelta } from "./features/chats/events";
 import { discardSessionDraft } from "./features/chats/ChatStage";
-import {
-  clearSessionOverrides,
-  emptyModelDefaults,
-  getModelDefaults,
-  saveModelDefault,
-  setGroupFollowPrivate,
-  transferDraftOverrides,
-  type ModelDefaultScope,
-  type ModelDefaultsConfig,
-} from "./features/chats/modelDefaults";
+import { clearSessionOverrides, transferDraftOverrides } from "./features/chats/modelDefaults";
+import { useSidebarLayout } from "./hooks/useSidebarLayout";
+import { readStoredRecord, useWorkbenchPreferences } from "./hooks/useWorkbenchPreferences";
 import GroupDialog from "./features/chats/GroupDialog";
 import { GroupSidebarList, GroupHub, SessionSidebar, SessionDialog, DeleteSessionDialog, type ChatSession } from "./features/chats/GroupSessions";
 import Icon from "./components/Icon";
@@ -77,22 +70,11 @@ export default function Workbench() {
   const [pendingProjectError, setPendingProjectError] = useState<string | null>(null);
   const [deleteSession, setDeleteSession] = useState<ChatSession | null>(null);
   const [sessionSaving, setSessionSaving] = useState(false);
-  const [sessionSelection, setSessionSelection] = useState<Record<string, string>>(() => {
-    try { const value = JSON.parse(localStorage.getItem("ai-gent.selected-sessions.v1") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
-  });
-  const [privateSessionSelection, setPrivateSessionSelection] = useState<Record<string, string>>(() => {
-    try { const value = JSON.parse(localStorage.getItem("ai-gent.selected-private-sessions.v1") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
-  });
-  const [projectSessionSelection, setProjectSessionSelection] = useState<Record<string, string>>(() => {
-    try { const value = JSON.parse(localStorage.getItem("ai-gent.selected-project-sessions.v1") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
-  });
+  const [sessionSelection, setSessionSelection] = useState<Record<string, string>>(() => readStoredRecord<string>("ai-gent.selected-sessions.v1"));
+  const [privateSessionSelection, setPrivateSessionSelection] = useState<Record<string, string>>(() => readStoredRecord<string>("ai-gent.selected-private-sessions.v1"));
+  const [projectSessionSelection, setProjectSessionSelection] = useState<Record<string, string>>(() => readStoredRecord<string>("ai-gent.selected-project-sessions.v1"));
   const [groupTargets, setGroupTargets] = useState<Record<string, string>>({});
-  const [projectAgents, setProjectAgents] = useState<Record<string, string>>(() => {
-    try {
-      const value = JSON.parse(localStorage.getItem("ai-gent.project-agents.v1") ?? "{}");
-      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    } catch { return {}; }
-  });
+  const [projectAgents, setProjectAgents] = useState<Record<string, string>>(() => readStoredRecord<string>("ai-gent.project-agents.v1"));
   const [selection, setSelection] = useState<Selection>({ kind: "personal" });
   const lastProjectIdRef = useRef<string | null>((() => {
     try { return localStorage.getItem("ai-gent.last-project-id.v1"); } catch { return null; }
@@ -108,14 +90,7 @@ export default function Workbench() {
   const [tab, setTab] = useState("chats");
   const [query, setQuery] = useState("");
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [probesByAgent, setProbesByAgent] = useState<Record<string, Probe>>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem("ai-gent.probe-cache.v1") ?? "{}");
-      return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    } catch {
-      return {};
-    }
-  });
+  const [probesByAgent, setProbesByAgent] = useState<Record<string, Probe>>(() => readStoredRecord<Probe>("ai-gent.probe-cache.v1"));
   const [probingByAgent, setProbingByAgent] = useState<Record<string, boolean>>({});
   const autoProbedRef = useRef(new Set<string>());
   const connecting = !!probingByAgent.codex;
@@ -136,17 +111,7 @@ export default function Workbench() {
     setSettings(true);
     if (tab === "usage") void refreshUsage();
   }
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    try {
-      const saved = localStorage.getItem("ai-gent.theme.v1");
-      if (saved === "dark" || saved === "light") return saved;
-    } catch {}
-    return "light";
-  });
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try { localStorage.setItem("ai-gent.theme.v1", theme); } catch {}
-  }, [theme]);
+  const { theme, setTheme, modelDefaults, handleSaveModelDefault, handleToggleGroupFollowPrivate } = useWorkbenchPreferences(setError);
   const [gitOpen, setGitOpen] = useState(false);
   const [schedulesOpen, setSchedulesOpen] = useState(false);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
@@ -156,125 +121,6 @@ export default function Workbench() {
   const [usageDays, setUsageDays] = useState(7);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageData, setUsageData] = useState<UsageDashboardData>(emptyUsageDashboard);
-  const [modelDefaults, setModelDefaults] = useState<ModelDefaultsConfig>(emptyModelDefaults);
-  useEffect(() => {
-    let active = true;
-    void getModelDefaults()
-      .then(cfg => { if (active) setModelDefaults(cfg); })
-      .catch(cause => { if (active) setError(`读取默认模型配置失败：${String(cause)}`); });
-    return () => { active = false; };
-  }, []);
-  async function handleSaveModelDefault(params: {
-    scope: ModelDefaultScope;
-    agentId: string;
-    model: string;
-    reasoningEffort?: string | null;
-    serviceTier?: string | null;
-  }) {
-    const next = await saveModelDefault(params);
-    setModelDefaults(next);
-  }
-  async function handleToggleGroupFollowPrivate(follow: boolean) {
-    const next = await setGroupFollowPrivate(follow);
-    setModelDefaults(next);
-  }
-  const [sidebarLayout, setSidebarLayout] = useState<{ workspaceCollapsed: boolean; sessionsCollapsed: boolean }>(() => {
-    try {
-      const raw = localStorage.getItem("ai-gent.sidebar-layout.v1");
-      if (raw) {
-        const saved = JSON.parse(raw);
-        return {
-          workspaceCollapsed: Boolean(saved?.workspaceCollapsed),
-          sessionsCollapsed: Boolean(saved?.sessionsCollapsed),
-        };
-      }
-    } catch {}
-    return {
-      workspaceCollapsed: typeof window !== "undefined" && window.innerWidth < 980,
-      sessionsCollapsed: typeof window !== "undefined" && window.innerWidth < 720,
-    };
-  });
-  const savedBeforeCollapseRef = useRef<{ workspaceCollapsed: boolean; sessionsCollapsed: boolean } | null>(null);
-  function updateSidebarLayout(updater: (prev: { workspaceCollapsed: boolean; sessionsCollapsed: boolean }) => { workspaceCollapsed: boolean; sessionsCollapsed: boolean }, persist = true) {
-    setSidebarLayout(prev => {
-      const next = updater(prev);
-      if (persist) {
-        try { localStorage.setItem("ai-gent.sidebar-layout.v1", JSON.stringify(next)); } catch {}
-      }
-      return next;
-    });
-  }
-  const toggleWorkspaceSidebar = (collapsed?: boolean) =>
-    updateSidebarLayout(prev => ({ ...prev, workspaceCollapsed: collapsed ?? !prev.workspaceCollapsed }));
-  const toggleSessionsSidebar = (collapsed?: boolean) =>
-    updateSidebarLayout(prev => ({ ...prev, sessionsCollapsed: collapsed ?? !prev.sessionsCollapsed }));
-  const [sidebarWidths, setSidebarWidths] = useState<{ workspace: number | null; session: number | null }>(() => {
-    try {
-      const raw = localStorage.getItem("ai-gent.sidebar-widths.v1");
-      if (raw) {
-        const saved = JSON.parse(raw);
-        const w = typeof saved?.workspace === "number" && Number.isFinite(saved.workspace) ? Math.round(saved.workspace) : null;
-        const s = typeof saved?.session === "number" && Number.isFinite(saved.session) ? Math.round(saved.session) : null;
-        return {
-          workspace: w ? Math.max(176, Math.min(420, w)) : null,
-          session: s ? Math.max(196, Math.min(440, s)) : null,
-        };
-      }
-    } catch {}
-    return { workspace: null, session: null };
-  });
-  const [resizingSidebar, setResizingSidebar] = useState<"workspace" | "session" | null>(null);
-  const persistSidebarWidths = useCallback((next: { workspace: number | null; session: number | null }) => {
-    try { localStorage.setItem("ai-gent.sidebar-widths.v1", JSON.stringify(next)); } catch {}
-  }, []);
-  const startSidebarResize = useCallback((which: "workspace" | "session", event: ReactMouseEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const sidebarEl = event.currentTarget.parentElement;
-    if (!sidebarEl) return;
-    const startX = event.clientX;
-    const startWidth = sidebarEl.getBoundingClientRect().width;
-    const minWidth = which === "workspace" ? 176 : 196;
-    const baseMax = which === "workspace" ? 420 : 440;
-    const otherWidth = which === "workspace"
-      ? (document.querySelector(".group-session-sidebar")?.getBoundingClientRect().width ?? 0)
-      : (document.querySelector(".conversation-sidebar")?.getBoundingClientRect().width ?? 0);
-    const railWidth = document.querySelector(".agent-rail")?.getBoundingClientRect().width ?? 64;
-    const dynamicMax = Math.max(minWidth, Math.min(baseMax, window.innerWidth - railWidth - otherWidth - 340));
-
-    setResizingSidebar(which);
-    const prevCursor = document.body.style.cursor;
-    const prevSelect = document.body.style.userSelect;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-
-    let latestWidth = Math.round(startWidth);
-    const onMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(Math.max(minWidth, Math.min(dynamicMax, startWidth + (moveEvent.clientX - startX))));
-      latestWidth = nextWidth;
-      setSidebarWidths(prev => ({ ...prev, [which]: nextWidth }));
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = prevCursor;
-      document.body.style.userSelect = prevSelect;
-      setResizingSidebar(null);
-      setSidebarWidths(prev => {
-        const next = { ...prev, [which]: latestWidth };
-        persistSidebarWidths(next);
-        return next;
-      });
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [persistSidebarWidths]);
-  const resetSidebarWidth = useCallback((which: "workspace" | "session") => {
-    setSidebarWidths(prev => {
-      const next = { ...prev, [which]: null };
-      persistSidebarWidths(next);
-      return next;
-    });
-  }, [persistSidebarWidths]);
   async function refreshUsage(days = usageDays) {
     if (!desktop) return;
     setUsageLoading(true);
@@ -343,44 +189,18 @@ export default function Workbench() {
   const isAgentDraft = inAgent && !!selectedAgent && draftTarget?.kind === "agent" && draftTarget.agentId === selectedAgent;
   const isDraft = isGroupDraft || isProjectDraft || isAgentDraft;
   const hasSessions = !gitOpen && !schedulesOpen && !(groupHub && mode === "chats") && (inGroup || inAgent || inProject);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
-        if (gitOpen || schedulesOpen || (groupHub && mode === "chats")) return;
-        e.preventDefault();
-        updateSidebarLayout(prev => {
-          const allCollapsed = prev.workspaceCollapsed && (!hasSessions || prev.sessionsCollapsed);
-          if (allCollapsed) {
-            const restored = savedBeforeCollapseRef.current;
-            savedBeforeCollapseRef.current = null;
-            if (restored && (!restored.workspaceCollapsed || (hasSessions && !restored.sessionsCollapsed))) {
-              return restored;
-            }
-            return { workspaceCollapsed: false, sessionsCollapsed: false };
-          }
-          savedBeforeCollapseRef.current = prev;
-          return { workspaceCollapsed: true, sessionsCollapsed: hasSessions ? true : prev.sessionsCollapsed };
-        });
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [gitOpen, schedulesOpen, groupHub, mode, hasSessions]);
-  useEffect(() => {
-    let lastWidth = window.innerWidth;
-    const onResize = () => {
-      const width = window.innerWidth;
-      if (lastWidth >= 980 && width < 980) {
-        updateSidebarLayout(prev => (prev.workspaceCollapsed ? prev : { ...prev, workspaceCollapsed: true }), false);
-      }
-      if (lastWidth >= 720 && width < 720) {
-        updateSidebarLayout(prev => (prev.sessionsCollapsed ? prev : { ...prev, sessionsCollapsed: true }), false);
-      }
-      lastWidth = width;
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+  const {
+    sidebarLayout,
+    sidebarWidths,
+    resizingSidebar,
+    toggleWorkspaceSidebar,
+    toggleSessionsSidebar,
+    startSidebarResize,
+    resetSidebarWidth,
+  } = useSidebarLayout({
+    disabled: gitOpen || schedulesOpen || (groupHub && mode === "chats"),
+    hasSessions,
+  });
   const agentSessions = privateSessionsOwner === selectedAgent ? privateSessions : [];
   const privateSession = agentSessions.find(s => s.id === privateSessionSelection[selectedAgent]) ?? agentSessions.find(s => !s.archived && !s.is_scheduled) ?? agentSessions.find(s => !s.archived) ?? agentSessions[0];
   const activeSession: ChatSession | undefined = isDraft ? undefined : (inGroup ? session : inAgent ? privateSession : inProject ? projectSession : undefined);

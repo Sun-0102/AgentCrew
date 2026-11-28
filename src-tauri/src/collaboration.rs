@@ -1024,7 +1024,12 @@ fn mentions(text: &str) -> Vec<String> {
 #[cfg(test)]
 // Mentions in ordinary text wake members. Quoted material, code blocks and inline code do not.
 fn message_recipients(text: &str, members: &[String]) -> Vec<String> {
-    let named = mentions(text);
+    let targets: Vec<(String, String)> = [("@Codex", "codex"), ("@DeepSeek", "deepseek")]
+        .into_iter()
+        .filter(|(_, id)| members.iter().any(|member| member == id))
+        .map(|(label, id)| (label.to_owned(), id.to_owned()))
+        .collect();
+    let named = mentions_with(text, &targets);
     if named.is_empty() {
         members.to_vec()
     } else {
@@ -1117,7 +1122,7 @@ fn mentions_with(text: &str, targets: &[(String, String)]) -> Vec<String> {
                             && !rest[name.len()..]
                                 .chars()
                                 .next()
-                                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                             && !result.contains(target)
                         {
                             result.push(target.clone());

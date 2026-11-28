@@ -42,6 +42,7 @@ pub struct DiscoveryItem {
     pub auth_hint: Option<String>,
 }
 
+#[allow(dead_code)]
 pub fn default_display_name(kind: &str) -> &'static str {
     providers::driver(kind)
         .map(|d| d.display_name)

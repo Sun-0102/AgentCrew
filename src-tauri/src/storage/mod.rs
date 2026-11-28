@@ -14,6 +14,39 @@ pub struct Project {
     pub created_at: String,
 }
 
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/001_projects.sql"),
+    include_str!("../../migrations/002_codex.sql"),
+    include_str!("../../migrations/003_conversations.sql"),
+    include_str!("../../migrations/004_groups.sql"),
+    include_str!("../../migrations/005_deepseek.sql"),
+    include_str!("../../migrations/006_deepseek_groups.sql"),
+    include_str!("../../migrations/007_group_tasks.sql"),
+    include_str!("../../migrations/008_group_inputs.sql"),
+    include_str!("../../migrations/009_reasoning.sql"),
+    include_str!("../../migrations/010_speed.sql"),
+    include_str!("../../migrations/011_task_results.sql"),
+    include_str!("../../migrations/012_parallel_members.sql"),
+    include_str!("../../migrations/013_group_context.sql"),
+    include_str!("../../migrations/014_group_sessions.sql"),
+    include_str!("../../migrations/015_agent_registry.sql"),
+    include_str!("../../migrations/016_generic_pairing_gemini.sql"),
+    include_str!("../../migrations/017_private_sessions.sql"),
+    include_str!("../../migrations/018_usage_records.sql"),
+    include_str!("../../migrations/019_claude_code.sql"),
+    include_str!("../../migrations/020_project_removal.sql"),
+    include_str!("../../migrations/021_project_sessions.sql"),
+    include_str!("../../migrations/022_single_chat_queue.sql"),
+    include_str!("../../migrations/023_parallel_group_tasks.sql"),
+    include_str!("../../migrations/024_scheduled_tasks.sql"),
+    include_str!("../../migrations/025_scheduled_task_sessions.sql"),
+    include_str!("../../migrations/026_model_defaults.sql"),
+    include_str!("../../migrations/027_knowledge_wiki.sql"),
+    include_str!("../../migrations/028_wiki_private_default.sql"),
+];
+
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
+
 impl Store {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let store = Self { path };
@@ -24,7 +57,7 @@ impl Store {
         let previous: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if matches!(previous, 1..=27) {
+        if (1..CURRENT_SCHEMA_VERSION).contains(&previous) {
             let backup = store
                 .path
                 .with_extension(format!("v{previous}-{}.sqlite", uuid::Uuid::new_v4()));
@@ -36,42 +69,12 @@ impl Store {
         let version: u32 = transaction
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        let migrations = [
-            include_str!("../../migrations/001_projects.sql"),
-            include_str!("../../migrations/002_codex.sql"),
-            include_str!("../../migrations/003_conversations.sql"),
-            include_str!("../../migrations/004_groups.sql"),
-            include_str!("../../migrations/005_deepseek.sql"),
-            include_str!("../../migrations/006_deepseek_groups.sql"),
-            include_str!("../../migrations/007_group_tasks.sql"),
-            include_str!("../../migrations/008_group_inputs.sql"),
-            include_str!("../../migrations/009_reasoning.sql"),
-            include_str!("../../migrations/010_speed.sql"),
-            include_str!("../../migrations/011_task_results.sql"),
-            include_str!("../../migrations/012_parallel_members.sql"),
-            include_str!("../../migrations/013_group_context.sql"),
-            include_str!("../../migrations/014_group_sessions.sql"),
-            include_str!("../../migrations/015_agent_registry.sql"),
-            include_str!("../../migrations/016_generic_pairing_gemini.sql"),
-            include_str!("../../migrations/017_private_sessions.sql"),
-            include_str!("../../migrations/018_usage_records.sql"),
-            include_str!("../../migrations/019_claude_code.sql"),
-            include_str!("../../migrations/020_project_removal.sql"),
-            include_str!("../../migrations/021_project_sessions.sql"),
-            include_str!("../../migrations/022_single_chat_queue.sql"),
-            include_str!("../../migrations/023_parallel_group_tasks.sql"),
-            include_str!("../../migrations/024_scheduled_tasks.sql"),
-            include_str!("../../migrations/025_scheduled_task_sessions.sql"),
-            include_str!("../../migrations/026_model_defaults.sql"),
-            include_str!("../../migrations/027_knowledge_wiki.sql"),
-            include_str!("../../migrations/028_wiki_private_default.sql"),
-        ];
-        if version > migrations.len() as u32 {
+        if version > CURRENT_SCHEMA_VERSION {
             return Err(format!(
                 "数据库版本 {version} 高于当前软件支持的版本，请使用匹配版本。"
             ));
         }
-        for migration in migrations.iter().skip(version as usize) {
+        for migration in MIGRATIONS.iter().skip(version as usize) {
             transaction
                 .execute_batch(migration)
                 .map_err(|e| e.to_string())?;
@@ -410,7 +413,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            18
+            CURRENT_SCHEMA_VERSION
         );
     }
 

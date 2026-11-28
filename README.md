@@ -13,31 +13,35 @@ https://github.com/user-attachments/assets/dd72248f-e0bc-4754-b251-dff7e4a18444
 ## 核心特性
 
 ### 1. 开放的多 Agent 接入与统一管理
-- **可扩展的 Provider Adapter 架构**：所有 Agent 运行时通过统一的 `ProviderAdapter` 接口接入，不绑定单一厂商；接入新的 CLI / SDK / ACP Agent 只需实现对应适配器即可扩展。
+- **可扩展的 Provider Adapter 架构**：所有 Agent 运行时通过统一的 `ProviderAdapter` 接口接入，不绑定单一厂商；内置 **Codex、DeepSeek、Gemini、Claude Code** 适配，接入新的 CLI / SDK / ACP Agent 只需实现对应适配器即可扩展。
 - **通用自助配对（Self-Onboarding）**：点击左侧「接入」生成不绑定厂商的通用邀请提示词与 10 分钟有效配对码，发送给本机 Agent 即可通过回环 HTTP 自动识别身份、核验组件并完成接入；支持启动自动发现与并行探测、自动继承系统代理，并允许同一厂商创建多个独立实例。
-- **统一模型配置浮层**：在输入框直接切换目标 Agent、模型、思考强度（Reasoning Effort）与速度档位（Service Tier）。
+- **统一模型配置与默认偏好**：在输入框直接切换目标 Agent、模型、思考强度（Reasoning Effort）与速度档位（Service Tier），支持按私聊/群聊作用域保存默认配置。
 
 ### 2. 多 Agent 群聊协作与需求会话
-- **定向 `@` 与并行执行**：群内不加 `@` 时广播协商分工；`@Agent` 时定向投递；同时 `@` 多位成员时并行启动、互不阻塞。支持成员间相互 `@` 自动接力协作，以及执行中随时插话（持久排队优先处理）与一键停止。
-- **群内多需求会话（Group Sessions）**：单个群聊支持创建、搜索、重命名、归档/恢复与删除多个独立会话；消息、摘要、任务与草稿按会话隔离，群成员和关联项目目录共享。
+- **定向 `@` 与并行执行**：群内不加 `@` 时广播协商分工；`@Agent` 时定向投递；同时 `@` 多位成员时并行启动、互不阻塞。支持成员间通过 `agentcrew-dispatch` 结构化派发与自动接力验收，以及执行中随时插话（排队 / Steer 纠偏）与一键停止。
+- **多作用域独立会话**：私聊、本地项目工作区与群聊均支持创建、搜索、重命名、归档/恢复与删除多个独立会话；消息、摘要、任务与草稿按会话隔离。
 - **可控的上下文预算**：群内投递自动结合近期消息窗口、旧消息原文摘录与关键词历史检索，控制提示体积，避免长对话上下文无限膨胀。
-- **丰富的交互体验**：支持消息引用回复、文本附件、图片上传与预览、Markdown/GFM 渲染及 `@` 高亮；工作台与会话侧边栏支持独立折叠与 `⌘B` / `Ctrl+B` 专注模式，并自动记忆布局偏好。
+- **Tauri Event 实时推送与交互体验**：基于 Rust 后端主动推送的实时事件流同步流式输出与工具调用状态；支持消息引用回复、文本附件、图片上传与预览、Markdown/GFM 渲染、暗黑主题、侧边栏折叠与 `⌘B` / `Ctrl+B` 专注模式。
 
 ### 3. `/` 斜杠技能调用
 - 在私聊或群聊输入框输入 `/` 即可检索并调用本机技能（单条消息最多组合 8 个技能）。
 - 自动整合运行时原生技能（Codex `skills/list`、DeepSeek Harness SDK 技能目录）与本地技能目录（项目及用户目录下的 `.agents/skills`、`.codex/skills`、`.dsh/skills`，支持 `CODEX_HOME` / `DSH_HOME` 覆盖）。
 
-### 4. 任务结果、工作日志与跨厂商复核
-- 按任务自动记录执行轮次、来源消息、工具调用明细及 Git 工作区变更快照。
-- 在「任务结果」面板可查看历史任务详情、导出 **Markdown / JSON**，并支持按需指派另一家 Agent 基于实际文件进行独立复核。
+### 4. Git 工作区闭环与任务复核
+- **内置 Git 面板与单轮 Diff 审阅**：支持可视化查看文件 Diff、Stage / Unstage / Discard、AI 自动生成提交信息、一键 Commit / Push / 切换分支 / 创建 Pull Request，以及按会话创建隔离的 **Git Worktree** 与单轮变更回退。
+- **任务结果与跨厂商复核**：按任务自动记录执行轮次、来源消息、工具调用明细及 Git 变更快照，支持导出 **Markdown / JSON** 并指派另一家 Agent 基于实际文件进行独立复核。
 
-### 5. 配额与用量看板（Usage Dashboard）
-- 本地统计各 Agent、模型以及私聊/群聊维度的 Token 消耗（输入、输出、缓存）与预估费用。
+### 5. 本地知识库（LLM Wiki）与定时任务
+- **本地知识库与 FTS5 检索**：支持接入本地 Markdown 知识库并建立 SQLite FTS5 全文索引；支持私聊默认知识库、单会话快速切换与显式引用，以及将高质量回复一键归档进知识库。
+- **定时任务调度**：支持按固定间隔、每日、每周或 Cron 表达式定时触发 Agent 任务，可隔离会话运行、查看历史执行记录，并支持扫描导入本机 Codex 定时任务。
+
+### 6. 配额与用量看板（Usage Dashboard）
+- 本地统计各 Agent、模型以及私聊/群聊维度的 Token 消耗（输入、输出、缓存节省）与预估费用。
 - 直观展示配额使用进度与重置倒计时，方便掌控多模型成本。
 
-### 6. 本地优先与后台常驻
+### 7. 本地优先与后台常驻
 - **后台独立调度**：由 Rust 后台调度循环驱动队列与任务执行，窗口隐藏或前端刷新不中断协作；支持系统托盘常驻、托盘菜单一键暂停/继续/彻底退出，退出时自动清理管理的子进程组。
-- **本地 SQLite 持久化与升级兼容**：全部会话、消息、任务结果与用量记录保存在本地 SQLite 数据库（当前 schema v18，版本升级前自动备份），不依赖云端同步，不读取或复制原厂登录密钥；本机 Agent 组件升级后自动向后兼容恢复历史会话并迁移版本元数据。
+- **本地 SQLite 持久化与升级兼容**：全部会话、消息、任务结果、定时任务与知识库索引保存在本地 SQLite 数据库（当前 schema v28，开启 WAL，版本升级前自动 `VACUUM INTO` 备份），不依赖云端同步，不读取或复制原厂登录密钥。
 
 ---
 
@@ -49,9 +53,10 @@ AgentCrew 采用开放的适配器模式，不绑定特定厂商，也不托管�
 
 | Agent | 接入协议 / 运行组件 | 登录与配置方式 | 核心能力 |
 | --- | --- | --- | --- |
-| **Codex** | `Codex App Server`（自动发现客户端内置组件或 `PATH` 中的 `codex` CLI） | 本机执行 `codex login` 或使用 Codex 桌面端登录态 | 流式回复、工具调用、会话恢复、交互审批、思考深度/速度档位 |
+| **Codex** | `Codex App Server`（自动发现客户端内置组件或 `PATH` 中的 `codex` CLI） | 本机执行 `codex login` 或使用 Codex 桌面端登录态 | 流式回复、工具调用、会话恢复、交互审批、运行中纠偏、思考深度/速度档位 |
 | **DeepSeek** | `DeepSeek Harness SDK` | 在 DeepSeek Harness 中配置 API 凭证或环境变量 | 流式回复、默认工具集、私聊/群聊会话恢复、进程组取消 |
 | **Gemini** | `Gemini CLI` 或 `Antigravity (agy)` 的 **ACP v1** 协议 | 本机完成 Gemini CLI / `agy` 登录配置 | 流式回复、工具事件、模型目录、会话恢复、交互审批 |
+| **Claude Code** | 本机 `claude` CLI（stream-json 协议） | 本机完成 Claude Code 登录配置 | 流式回复、工具调用、会话恢复、进程取消 |
 
 ### 扩展更多 Agent
 
@@ -92,20 +97,24 @@ npm run desktop:build
 - **macOS**：使用 [`src-tauri/tauri.macos.conf.json`](src-tauri/tauri.macos.conf.json) 构建 `AgentCrew.app` 与 `.dmg`
 - **Windows**：构建 NSIS 安装包 `.exe`（构建前请先关闭正在运行的 AgentCrew 窗口）
 
-### 在 GitHub 手动构建 Windows 安装包
+### 在 GitHub Actions 构建跨平台安装包
 
-无需本地 Windows 电脑。打开 [Windows 构建页面](https://github.com/Sun-0102/AgentCrew/actions/workflows/build-windows.yml)，点击 **Run workflow**，选择 `main`，再点击 **Run workflow** 开始构建。
+工作流 [`.github/workflows/build-desktop.yml`](.github/workflows/build-desktop.yml) 已集成完整 CI 流程：
+- **质量门禁（`verify`）**：每次 Push、Pull Request、Tag 或手动触发时，自动执行 TypeScript 类型检查、前端单元测试与 Rust 单元测试。
+- **跨平台打包（`build`）**：验证通过后并行构建 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows（x64）安装包并生成 `SHA256SUMS`。
+- **自动发布（`release`）**：推送 `v*` 标签时自动汇总产物并发布至 GitHub Release。
 
-构建成功后，进入该次运行页面，在 **Artifacts** 下载 `AgentCrew-Windows-x64-运行编号`。解压后运行其中的 `.exe`；`SHA256SUMS.txt` 提供安装包校验值。下载文件保留 30 天，也可从运行页面的 Summary 下载链接进入。
-
-该流程只支持手动触发，不会在推送代码时自动运行，也不会自动发布 GitHub Release。安装包尚未配置 Windows 代码签名；分发前需在真实 Windows 环境验证安装、启动和 Agent 连接。
+> 说明：Windows / macOS 安装包尚未配置代码签名，对外分发前建议在目标平台实机验证安装、启动与 Agent 连接。
 
 ### 常用研发命令
 
 ```bash
+npm run check:ts      # TypeScript 类型检查
 npm run build         # TypeScript 类型检查 + 前端生产构建
 npm run check:rust    # Rust 后端编译检查
+npm run test:frontend # 运行前端单元测试
 npm run test:rust     # 运行 Rust 单元测试（不消耗模型额度）
+npm test              # 运行前后端全部单元测试
 ```
 
 如需运行依赖本机真实运行组件的集成探针测试（注意：带实际对话的探针会消耗账号模型额度）：
@@ -141,28 +150,35 @@ AgentCrew/
 │   ├── Workbench.tsx                  # 主工作台布局、侧边栏与视图切换
 │   ├── components/                    # 通用组件（Avatar、Dialog、Icon）
 │   └── features/
-│       ├── chats/                     # 聊天舞台、群会话、成员管理、@提及、模型配置、技能、任务日志与结果
-│       ├── projects/                  # 本地项目工作空间 API
-│       └── usage/                     # Token 用量与配额看板
+│       ├── chats/                     # 聊天舞台、群/私聊/项目会话、@提及、模型配置、技能、工作日志与 Diff 抽屉
+│       ├── git/                       # Git 变更面板、Worktree、Commit/Push/PR
+│       ├── projects/                  # 本地项目工作空间管理
+│       ├── schedules/                 # 定时任务管理与执行记录
+│       ├── usage/                     # Token 用量与配额看板
+│       └── wiki/                      # 本地知识库配置、检索选择与归档弹窗
 ├── src-tauri/                         # Tauri 2 + Rust 后端
 │   ├── src/
 │   │   ├── providers.rs               # 统一 ProviderAdapter 注册与能力抽象
-│   │   ├── codex.rs                   # Codex App Server 运行时与会话管理
-│   │   ├── deepseek.rs                # DeepSeek Harness SDK 运行时
-│   │   ├── gemini.rs                  # Gemini CLI / agy ACP v1 运行时
+│   │   ├── codex.rs / deepseek.rs / gemini.rs / claude.rs
+│   │   │                              # 各内置 Agent 运行时适配器
 │   │   ├── agents.rs / pairing.rs     # Agent 成员表与本机回环 HTTP 自助配对
-│   │   ├── groups.rs / group_sessions.rs / group_context.rs
-│   │   │                              # 群聊、需求会话与上下文预算管理
-│   │   ├── collaboration.rs           # 群内调度队列、自动接力与任务生命周期
-│   │   ├── skills.rs                  # 原生与本地目录技能发现与注入
-│   │   ├── task_results.rs            # 任务归档、Git 变更快照与导出
-│   │   ├── usage.rs                   # Token 用量记录与费用估算
+│   │   ├── groups.rs / group_sessions.rs / private_sessions.rs / project_sessions.rs
+│   │   │                              # 多作用域会话与群组管理
+│   │   ├── collaboration.rs / group_context.rs / chat_queue.rs
+│   │   │                              # 群内调度队列、结构化派发接力与上下文预算
+│   │   ├── events.rs                  # Tauri Event 实时增量事件推送
+│   │   ├── git.rs / task_results.rs   # Git Worktree/Diff/PR、单轮快照回退与任务归档
+│   │   ├── schedules.rs               # 定时任务调度与 Codex 定时任务导入
+│   │   ├── wiki.rs                    # 本地知识库与 SQLite FTS5 全文索引
+│   │   ├── skills.rs / usage.rs / model_defaults.rs
+│   │   │                              # 技能发现、Token 用量统计与默认模型偏好
 │   │   ├── process.rs / lifecycle.rs  # 跨平台进程组管理、代理继承与托盘生命周期
 │   │   ├── storage/                   # SQLite 存储层与自动迁移备份
 │   │   └── commands/                  # Tauri IPC 命令入口
-│   ├── migrations/                    # SQLite 增量迁移脚本（001 ~ 018）
+│   ├── migrations/                    # SQLite 增量迁移脚本（001 ~ 028）
 │   ├── tauri.conf.json                # 通用 / Windows Tauri 配置
 │   └── tauri.macos.conf.json          # macOS 打包配置
+├── tests/                             # 前端与路由单元测试
 ├── scripts/
 │   └── package-app.mjs                # 跨平台打包与产物归集脚本
 └── docs/                              # 产品需求、架构设计、协作协议与验收记录
@@ -172,18 +188,15 @@ AgentCrew/
 
 ## 路线图（Roadmap）
 
-下一阶段将重点围绕**代码交付闭环**与**实时响应性能**持续演进：
+下一阶段将重点围绕**稳定性、工程重构与多端扩展**持续演进：
 
-- **Git Worktree 隔离与可视化 Diff / Commit / PR 闭环**
-  - 支持按需求会话或任务自动创建独立的 Git Worktree，避免多会话、多 Agent 并行改动同一仓库时产生文件冲突或污染当前分支。
-  - 提供内置的可视化文件变更 Diff 审阅视图，直接查看、筛选和核对 Agent 产生的代码修改。
-  - 打通从变更审阅到代码落地的最后一公里，支持在工作台内一键 Commit、Push 以及创建 Pull Request。
-- **基于 Tauri Event 的实时事件推送架构**
-  - 将当前前端基于定时轮询的消息与状态同步，全面升级为由 Rust 后端主动驱动的 Tauri Event 实时事件流推送。
-  - 显著提升流式输出与工具调用状态的跟手度，同时在空闲状态下几乎实现零轮询、零额外 CPU 开销。
-- **更多 Agent 适配与体验增强**
-  - 扩展更多主流本地编程 Agent（如 Claude Code）的开箱即用内置适配与自动发现。
-  - 持续完善桌面端专注编码体验（如暗黑主题与更紧凑的高信息密度布局）。
+- **工程架构收口与性能加固**
+  - 持续拆分高复杂度前后端模块，引入 SQLite 连接复用以降低多 Agent 并发写入的锁竞争。
+  - 补齐端到端桌面集成测试与代码签名分发流程。
+- **更多 Agent 生态与协议适配**
+  - 扩展更多兼容 ACP / CLI 协议的本地编程 Agent 适配器与可视化诊断能力。
+- **可选多端同步与团队协作预研**
+  - 按需推进 PostgreSQL 可选后端迁移方案，支持个人多设备数据共享（详见 [多端数据共享迁移方案](docs/09-PostgreSQL多端数据共享迁移方案.md)）。
 
 ---
 

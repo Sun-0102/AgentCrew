@@ -64,6 +64,7 @@ pub trait ProviderAdapter: Sync {
         runtime_conversation: &str,
     ) -> Result<Value, String>;
 
+    #[allow(dead_code)]
     fn send(
         &self,
         app: &tauri::AppHandle,

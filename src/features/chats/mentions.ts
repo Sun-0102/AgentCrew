@@ -65,7 +65,7 @@ export function mentionSegments(text: string, members: string[]): { segments: Me
       if (inline !== null || raw[cursor] !== "@" || /[a-z0-9_@\\]/i.test(raw[cursor - 1] ?? "")) continue;
       const target = targets.find(t =>
         raw.slice(cursor + 1, cursor + 1 + t.label.length).toLowerCase() === t.label.toLowerCase() &&
-        !/[\p{L}\p{N}_-]/u.test(raw[cursor + 1 + t.label.length] ?? ""),
+        !/[a-z0-9_-]/i.test(raw[cursor + 1 + t.label.length] ?? ""),
       );
       if (!target) continue;
       if (cursor > plainStart) pushPlain(raw.slice(plainStart, cursor));
@@ -124,7 +124,7 @@ export function messageRecipients(text: string, members: string[]) {
         const uniqueName = agents.filter(a => members.includes(a.id) && a.name.toLowerCase() === agent.name.toLowerCase()).length === 1;
         for (const label of uniqueName ? [agent.id, agent.name] : [agent.id]) {
           const prefix = `@${label}`;
-          if (line.slice(cursor, cursor + prefix.length).toLowerCase() === prefix.toLowerCase() && !/[\p{L}\p{N}_-]/u.test(line[cursor + prefix.length] ?? "") && !named.includes(agent.id)) named.push(agent.id);
+          if (line.slice(cursor, cursor + prefix.length).toLowerCase() === prefix.toLowerCase() && !/[a-z0-9_-]/i.test(line[cursor + prefix.length] ?? "") && !named.includes(agent.id)) named.push(agent.id);
         }
       }
     }

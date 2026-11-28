@@ -950,6 +950,7 @@ impl Runtime {
         }
         Ok(result)
     }
+    #[allow(dead_code)]
     pub fn send_recorded(
         &self,
         store: &Store,
