@@ -31,7 +31,7 @@ fn resolve_path(file_path: &str, workspace_path: Option<&str>) -> Result<PathBuf
         }
         root.join(candidate)
     };
-    path.canonicalize()
+    crate::storage::canonicalize_path(&path)
         .map_err(|error| format!("无法访问文件 {}：{error}", path.display()))
 }
 
@@ -49,8 +49,7 @@ fn open_command(path: &Path, action: FileAction) -> Command {
     {
         // Pass the path as one argument, without a shell or command interpolation.
         let mut command = Command::new("explorer.exe");
-        let display = path.to_string_lossy();
-        let display = display.strip_prefix(r"\\?\").unwrap_or(&display);
+        let display = crate::storage::normalize_path_str(&path.to_string_lossy());
         if matches!(action, FileAction::Reveal) {
             command.arg(format!("/select,{display}"));
         } else {
@@ -184,7 +183,7 @@ mod tests {
         std::fs::create_dir(&app).unwrap();
         assert_eq!(
             resolve_path("Agent Crew.app", dir.path().to_str()).unwrap(),
-            app.canonicalize().unwrap()
+            crate::storage::canonicalize_path(&app).unwrap()
         );
     }
 
@@ -193,7 +192,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         assert_eq!(
             resolve_path(file.path().to_str().unwrap(), None).unwrap(),
-            file.path().canonicalize().unwrap()
+            crate::storage::canonicalize_path(file.path()).unwrap()
         );
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "ai-gent"
-version = "0.1.15"
+version = "0.1.16"
 description = "Local AI collaboration workspace"
 license = "MIT"
 edition = "2021"

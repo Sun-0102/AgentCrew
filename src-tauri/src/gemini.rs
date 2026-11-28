@@ -918,7 +918,7 @@ impl Runtime {
             .ok_or("数据目录无效")?
             .join("runtimes/gemini/inspection");
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let root = crate::storage::canonicalize_path(&root).map_err(|e| e.to_string())?;
         let client = Client::start(
             store,
             &install,
@@ -987,9 +987,10 @@ impl Runtime {
         if busy {
             return Err("当前 Gemini 会话正在执行，请等待或取消。".into());
         }
-        let root = PathBuf::from(store.conversation_root(conversation)?)
-            .canonicalize()
-            .map_err(|e| format!("Gemini 工作目录不可用：{e}"))?;
+        let root = crate::storage::canonicalize_path(&PathBuf::from(
+            store.conversation_root(conversation)?,
+        ))
+        .map_err(|e| format!("Gemini 工作目录不可用：{e}"))?;
         let root = root.to_str().ok_or("Gemini 工作目录无效")?;
         let install = Installation::find()?;
         let previous = session(store, conversation)?;

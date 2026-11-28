@@ -418,7 +418,7 @@ pub fn add_local_source(
     tier: Option<&str>,
     content_subdir: Option<&str>,
 ) -> Result<WikiSource, String> {
-    let canonical = fs::canonicalize(root_path.trim())
+    let canonical = crate::storage::canonicalize_path(Path::new(root_path.trim()))
         .map_err(|e| format!("目录不存在或无法访问（{root_path}）：{e}"))?;
     if !canonical.is_dir() {
         return Err("所选路径不是有效目录。".into());

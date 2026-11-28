@@ -698,9 +698,8 @@ impl Runtime {
         let models = install.models(store)?;
         let model = models.as_array().and_then(|items| items.first()).and_then(|item| item["model"].as_str()).ok_or("Harness 模型目录为空")?;
         std::fs::create_dir_all(workspace).map_err(|e| e.to_string())?;
-        let root = workspace.canonicalize().map_err(|e| e.to_string())?;
+        let root = crate::storage::canonicalize_path(workspace).map_err(|e| e.to_string())?;
         let root = root.to_str().ok_or("技能工作目录路径无效")?;
-        let root = if let Some(unc) = root.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") } else { root.strip_prefix(r"\\?\").unwrap_or(root).to_owned() };
         let thread = format!("ai-gent-skill-catalog-{}", uuid::Uuid::new_v4());
         // No prompt or Agent is created: the catalog only resolves the default preset scope.
         let client = Client::start(store, &install, &root, &thread, &thread, model, None)?;
@@ -797,18 +796,8 @@ impl Runtime {
             } else { store.validate_group_target(conversation, "deepseek")?; }
             PathBuf::from(store.conversation_root(conversation)?)
         };
-        let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+        let workspace = crate::storage::canonicalize_path(&workspace).map_err(|e| e.to_string())?;
         let workspace = workspace.to_str().ok_or("DeepSeek 工作目录路径无效")?;
-        // Node's realpath handling in this Harness version rejects Windows verbatim cwd paths.
-        let native_path = if let Some(unc) = workspace.strip_prefix(r"\\?\UNC\") {
-            format!(r"\\{unc}")
-        } else {
-            workspace
-                .strip_prefix(r"\\?\")
-                .unwrap_or(workspace)
-                .to_owned()
-        };
-        let workspace = native_path.as_str();
         if !existing.is_null() && existing["workspace_path"] != workspace {
             return Err("DeepSeek 工作目录与历史不匹配，已停止恢复。".into());
         }

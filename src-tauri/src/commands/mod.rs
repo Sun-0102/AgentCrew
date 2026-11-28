@@ -121,7 +121,7 @@ pub async fn project_open_directory(id: String, store: State<'_, Store>) -> Resu
             "SELECT primary_root FROM projects WHERE id=?1 AND removed_at IS NULL",
             [&id], |row| row.get(0),
         ).map_err(|e| format!("无法读取项目目录：{e}"))?;
-        let path = std::path::Path::new(&root).canonicalize()
+        let path = crate::storage::canonicalize_path(std::path::Path::new(&root))
             .map_err(|e| format!("无法访问项目目录：{e}"))?;
         if !path.is_dir() {
             return Err("项目目录不存在。".into());

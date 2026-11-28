@@ -346,12 +346,13 @@ impl Runtime {
         }
 
         let install = Installation::find()?;
-        let workspace = PathBuf::from(store.conversation_root(conversation)?)
-            .canonicalize()
-            .map_err(|e| format!("Claude Code 工作目录不可用：{e}"))?
-            .to_str()
-            .ok_or("Claude Code 工作目录无效")?
-            .to_owned();
+        let workspace = crate::storage::canonicalize_path(&PathBuf::from(
+            store.conversation_root(conversation)?,
+        ))
+        .map_err(|e| format!("Claude Code 工作目录不可用：{e}"))?
+        .to_str()
+        .ok_or("Claude Code 工作目录无效")?
+        .to_owned();
         let turn_id = uuid::Uuid::new_v4().to_string();
 
         let existing_thread: Option<String> = store

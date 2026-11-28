@@ -109,6 +109,92 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 
 pub(crate) const CURRENT_SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
+/// Strips Windows verbatim path prefixes (`\\?\C:\...` -> `C:\...`, `\\?\UNC\host\share` -> `\\host\share`)
+/// so paths persisted in SQLite, shown in the UI, and passed to external tools stay human-readable and compatible.
+pub(crate) fn normalize_path_str(raw: &str) -> String {
+    if let Some(unc) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix(r"\\?\unc\"))
+    {
+        return format!(r"\\{unc}");
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return rest.to_owned();
+        }
+    }
+    raw.to_owned()
+}
+
+pub(crate) fn normalize_path_buf(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(s) => PathBuf::from(normalize_path_str(s)),
+        None => path,
+    }
+}
+
+pub(crate) fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize().map(normalize_path_buf)
+}
+
+fn cleanup_windows_verbatim_paths(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    // `projects.primary_root` has a UNIQUE constraint; use UPDATE OR IGNORE in case a clean row already exists.
+    let project_rows: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(r"SELECT id, primary_root FROM projects WHERE substr(primary_root, 1, 4) = '\\?\'")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    for (id, raw) in project_rows {
+        let clean = normalize_path_str(&raw);
+        if clean != raw {
+            tx.execute(
+                "UPDATE OR IGNORE projects SET primary_root = ?1 WHERE id = ?2",
+                params![clean, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    const TABLE_COLUMNS: &[(&str, &str)] = &[
+        ("conversations", "workspace_path"),
+        ("deepseek_sessions", "workspace_path"),
+        ("gemini_sessions", "workspace_path"),
+        ("claude_sessions", "workspace_path"),
+        ("agent_sessions", "workspace_path"),
+        ("group_tasks", "workspace_path"),
+        ("wiki_sources", "root_path"),
+    ];
+    for (table, column) in TABLE_COLUMNS {
+        let rows: Vec<(i64, String)> = {
+            let sql = format!(
+                r"SELECT rowid, {column} FROM {table} WHERE {column} IS NOT NULL AND substr({column}, 1, 4) = '\\?\'"
+            );
+            let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+            let mapped = stmt
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let update_sql = format!("UPDATE {table} SET {column} = ?1 WHERE rowid = ?2");
+        for (rowid, raw) in rows {
+            let clean = normalize_path_str(&raw);
+            if clean != raw {
+                tx.execute(&update_sql, params![clean, rowid])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         clear_pool_for_path(&path);
@@ -142,6 +228,7 @@ impl Store {
                 .execute_batch(migration)
                 .map_err(|e| e.to_string())?;
         }
+        cleanup_windows_verbatim_paths(&transaction)?;
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(store)
     }
@@ -195,8 +282,7 @@ impl Store {
     }
 
     pub fn add_project_with_name(&self, input: &str, custom_name: Option<&str>) -> Result<Project, String> {
-        let canonical = Path::new(input)
-            .canonicalize()
+        let canonical = canonicalize_path(Path::new(input))
             .map_err(|e| format!("无法访问项目目录：{e}"))?;
         if !canonical.is_dir() {
             return Err("项目路径必须是目录。".into());
@@ -314,7 +400,7 @@ impl Store {
         use rusqlite::OptionalExtension;
         let id = "codex-personal";
         std::fs::create_dir_all(parent).map_err(|e| format!("无法建立私聊目录：{e}"))?;
-        let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+        let parent = canonicalize_path(parent).map_err(|e| e.to_string())?;
         let directory = parent.join(id);
         let mut connection = self.connect()?;
         let tx = connection
@@ -369,7 +455,7 @@ impl Store {
                 })
                 .map_err(|e| e.to_string())?;
         }
-        let root = directory.canonicalize().map_err(|e| e.to_string())?;
+        let root = canonicalize_path(&directory).map_err(|e| e.to_string())?;
         let root = root.to_str().ok_or("私聊工作目录不是有效 Unicode 路径")?;
         tx.execute("INSERT INTO conversations(id,project_id,workspace_path) VALUES(?1,NULL,?2) ON CONFLICT(id) DO UPDATE SET workspace_path=excluded.workspace_path",params![id,root]).map_err(|e|e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -552,7 +638,7 @@ mod tests {
             .unwrap();
         store.personal_conversation_id(&official).unwrap();
         let new = PathBuf::from(store.conversation_root(&id).unwrap());
-        assert!(new.starts_with(official.canonicalize().unwrap()));
+        assert!(new.starts_with(canonicalize_path(&official).unwrap()));
         assert_eq!(
             std::fs::read_to_string(new.join("nested/artifact.txt")).unwrap(),
             "keep me"
@@ -748,5 +834,77 @@ mod tests {
             assert_eq!(slot.lock().unwrap().len(), 0);
         }
         assert_eq!(slot.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn normalize_path_str_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            normalize_path_str(r"\\?\C:\Users\alice\repo"),
+            r"C:\Users\alice\repo"
+        );
+        assert_eq!(
+            normalize_path_str(r"\\?\d:\work\proj"),
+            r"d:\work\proj"
+        );
+        assert_eq!(
+            normalize_path_str(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(
+            normalize_path_str(r"\\?\unc\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        // Non-drive / device verbatim paths and normal paths must stay intact.
+        assert_eq!(
+            normalize_path_str(r"\\?\Volume{1234}\foo"),
+            r"\\?\Volume{1234}\foo"
+        );
+        assert_eq!(normalize_path_str("/Users/alice/repo"), "/Users/alice/repo");
+        assert_eq!(
+            normalize_path_str(r"C:\Users\alice\repo"),
+            r"C:\Users\alice\repo"
+        );
+    }
+
+    #[test]
+    fn store_open_cleans_existing_windows_verbatim_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("win-paths.sqlite");
+        {
+            let store = Store::open(db_path.clone()).unwrap();
+            let conn = store.connect().unwrap();
+            conn.execute(
+                r"INSERT INTO projects(id, name, primary_root) VALUES('p1', 'Proj', '\\?\C:\Users\alice\proj')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                r"INSERT INTO conversations(id, project_id, workspace_path) VALUES('c1', 'p1', '\\?\C:\Users\alice\proj')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                r"INSERT INTO wiki_sources(id, name, source_kind, tier, root_path, content_subdir, inbox_subdir, index_state) VALUES('w1', 'Wiki', 'local_folder', 'core_wiki', '\\?\UNC\nas\docs\wiki', '', '00-inbox', 'idle')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let reopened = Store::open(db_path).unwrap();
+        let projects = reopened.list_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].primary_root, r"C:\Users\alice\proj");
+        assert_eq!(
+            reopened.conversation_root("c1").unwrap(),
+            r"C:\Users\alice\proj"
+        );
+        let wiki_root: String = reopened
+            .connect()
+            .unwrap()
+            .query_row("SELECT root_path FROM wiki_sources WHERE id = 'w1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(wiki_root, r"\\nas\docs\wiki");
     }
 }

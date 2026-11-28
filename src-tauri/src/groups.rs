@@ -106,7 +106,7 @@ impl Store {
         } else {
             let path = parent.join(&id);
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-            path.canonicalize()
+            crate::storage::canonicalize_path(&path)
                 .map_err(|e| e.to_string())?
                 .to_str()
                 .ok_or("群工作目录不是有效 Unicode 路径")?
@@ -180,8 +180,7 @@ impl Store {
                 std::fs::create_dir_all(&path).map_err(|e| format!("无法建立群专用目录：{e}"))?;
                 (path, "未关联，使用群专用目录".to_owned())
             };
-            let root = root
-                .canonicalize()
+            let root = crate::storage::canonicalize_path(&root)
                 .map_err(|e| format!("关联目录不可访问：{e}"))?;
             std::fs::read_dir(&root).map_err(|e| format!("关联目录不可读：{e}"))?;
             let root = root.to_str().ok_or("关联目录不是有效 Unicode 路径")?;
