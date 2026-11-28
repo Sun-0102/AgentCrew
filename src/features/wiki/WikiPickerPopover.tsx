@@ -1,18 +1,57 @@
 import { useEffect, useState } from "react";
 import Icon from "../../components/Icon";
-import { searchWiki, type ExplicitWikiRef, type WikiSearchHit } from "./api";
+import {
+  listWikiSources,
+  searchWiki,
+  setWikiBinding,
+  WIKI_BINDING_NONE,
+  type ExplicitWikiRef,
+  type WikiSearchHit,
+  type WikiSource,
+} from "./api";
 
 interface Props {
-  boundSourceId?: string | null;
+  conversationId: string;
+  isGroup: boolean;
+  isProject: boolean;
+  explicitBindingSourceId: string | null;
+  defaultPrivateSourceId: string | null;
+  effectiveSourceId: string | null;
   selectedRefs: ExplicitWikiRef[];
+  onBindingChanged: (explicitSourceId: string | null) => void;
   onToggleRef: (hit: WikiSearchHit) => void;
   onClose: () => void;
 }
 
-export default function WikiPickerPopover({ boundSourceId, selectedRefs, onToggleRef, onClose }: Props) {
+export default function WikiPickerPopover({
+  conversationId,
+  isGroup,
+  isProject,
+  explicitBindingSourceId,
+  defaultPrivateSourceId,
+  effectiveSourceId,
+  selectedRefs,
+  onBindingChanged,
+  onToggleRef,
+  onClose,
+}: Props) {
+  const [sources, setSources] = useState<WikiSource[]>([]);
+  const [savingBinding, setSavingBinding] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<WikiSearchHit[]>([]);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listWikiSources()
+      .then(list => {
+        if (!cancelled) setSources(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -20,7 +59,7 @@ export default function WikiPickerPopover({ boundSourceId, selectedRefs, onToggl
     const timer = window.setTimeout(() => {
       void searchWiki({
         query,
-        sourceId: boundSourceId || null,
+        sourceId: effectiveSourceId || null,
         limit: 20,
         offset: 0,
       })
@@ -38,9 +77,28 @@ export default function WikiPickerPopover({ boundSourceId, selectedRefs, onToggl
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, boundSourceId]);
+  }, [query, effectiveSourceId]);
 
   const selectedSet = new Set(selectedRefs.map(r => `${r.source_id}:${r.rel_path}`));
+  const defaultSourceName = sources.find(s => s.id === defaultPrivateSourceId)?.name;
+
+  // Select value: "" = follow default (or none in project), "__none__" = explicitly disabled, "<id>" = bound source
+  const selectValue = explicitBindingSourceId ?? "";
+
+  async function handleChangeBinding(nextValue: string) {
+    if (!conversationId || savingBinding) return;
+    setSavingBinding(true);
+    try {
+      const targetSource = nextValue === "" ? null : nextValue;
+      await setWikiBinding({
+        conversationId,
+        sourceId: targetSource,
+      });
+      onBindingChanged(targetSource);
+    } finally {
+      setSavingBinding(false);
+    }
+  }
 
   return (
     <div
@@ -48,8 +106,8 @@ export default function WikiPickerPopover({ boundSourceId, selectedRefs, onToggl
         position: "absolute",
         bottom: "calc(100% + 8px)",
         left: 0,
-        width: 380,
-        maxWidth: "min(380px, 85vw)",
+        width: 390,
+        maxWidth: "min(390px, 86vw)",
         background: "var(--surface, #fff)",
         border: "1px solid var(--border)",
         borderRadius: 10,
@@ -58,27 +116,74 @@ export default function WikiPickerPopover({ boundSourceId, selectedRefs, onToggl
         zIndex: 40,
       }}
       role="dialog"
-      aria-label="点名引用知识库文档"
+      aria-label="知识库与文档引用"
     >
+      {/* 顶部 1 秒切换当前会话知识库（非群聊） */}
+      {!isGroup && sources.length > 0 && conversationId && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            paddingBottom: 8,
+            marginBottom: 8,
+            borderBottom: "1px solid var(--border)",
+          }}
+        >
+          <span style={{ fontSize: 12, opacity: 0.75, flexShrink: 0 }}>本会话知识库</span>
+          <select
+            className="text-input"
+            style={{ flex: 1, fontSize: 12, padding: "4px 8px" }}
+            disabled={savingBinding}
+            value={selectValue}
+            onChange={e => void handleChangeBinding(e.target.value)}
+          >
+            {isProject ? (
+              <option value="">不关联（默认，防代码污染）</option>
+            ) : (
+              <>
+                <option value="">
+                  {defaultSourceName ? `跟随默认（${defaultSourceName}）` : "跟随默认（不关联）"}
+                </option>
+                {defaultPrivateSourceId && (
+                  <option value={WIKI_BINDING_NONE}>本会话不关联</option>
+                )}
+              </>
+            )}
+            {sources.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.name}（{s.doc_count} 篇）
+              </option>
+            ))}
+          </select>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
         <input
           className="text-input"
           style={{ flex: 1, fontSize: 13, padding: "6px 10px" }}
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="搜索业务知识库文档（仅本轮精准直传）…"
+          placeholder="临时点名某篇文档（可选，仅本轮直传）…"
           autoFocus
         />
-        <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-          <Icon name="close" size={16} />
-        </button>
+        {(isGroup || !sources.length || !conversationId) && (
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+            <Icon name="close" size={16} />
+          </button>
+        )}
       </div>
-      <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+
+      <div style={{ maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
         {loading ? (
           <p className="field-help" style={{ padding: "8px 4px" }}>检索中…</p>
         ) : !hits.length ? (
           <p className="field-help" style={{ padding: "8px 4px" }}>
-            未找到匹配文档。可在「工作台设置 ➔ 知识库」接入 LLM Wiki 或本地目录。
+            未找到匹配文档。可在「工作台设置 ➔ 知识库」添加本地文件夹或同步 LLM Wiki。
           </p>
         ) : (
           hits.map(hit => {

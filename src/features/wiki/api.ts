@@ -1,5 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+export const WIKI_BINDING_NONE = "__none__";
+
 export interface WikiSettings {
   enabled: boolean;
   base_url: string;
@@ -7,6 +9,7 @@ export interface WikiSettings {
   habits_budget_bytes: number;
   l0_map_budget_bytes: number;
   read_budget_bytes: number;
+  default_private_source_id?: string | null;
   updated_at: string;
 }
 
@@ -124,6 +127,7 @@ const defaultSettings: WikiSettings = {
   habits_budget_bytes: 1800,
   l0_map_budget_bytes: 800,
   read_budget_bytes: 6000,
+  default_private_source_id: null,
   updated_at: "",
 };
 

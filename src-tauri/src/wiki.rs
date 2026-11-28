@@ -16,6 +16,9 @@ use tauri::Manager;
 
 static LOCAL_HTTP_ENDPOINT: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 static PENDING_GROUP_REFS: OnceLock<Mutex<HashMap<String, Vec<ExplicitWikiRef>>>> = OnceLock::new();
+static SESSION_INJECTED_HASHES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+pub const BINDING_NONE_SENTINEL: &str = "__none__";
 
 pub fn set_local_http_endpoint(base_url: String, token: String) {
     let slot = LOCAL_HTTP_ENDPOINT.get_or_init(|| Mutex::new(None));
@@ -54,6 +57,8 @@ pub struct WikiSettings {
     pub habits_budget_bytes: usize,
     pub l0_map_budget_bytes: usize,
     pub read_budget_bytes: usize,
+    #[serde(default)]
+    pub default_private_source_id: Option<String>,
     pub updated_at: String,
 }
 
@@ -319,7 +324,7 @@ fn build_fts_query(raw: &str) -> Option<String> {
 pub fn load_settings(store: &Store) -> Result<WikiSettings, String> {
     let conn = store.connect()?;
     conn.query_row(
-        "SELECT enabled, base_url, api_token, habits_budget_bytes, l0_map_budget_bytes, read_budget_bytes, updated_at
+        "SELECT enabled, base_url, api_token, habits_budget_bytes, l0_map_budget_bytes, read_budget_bytes, default_private_source_id, updated_at
          FROM wiki_settings WHERE id = 1",
         [],
         |row| {
@@ -330,7 +335,8 @@ pub fn load_settings(store: &Store) -> Result<WikiSettings, String> {
                 habits_budget_bytes: row.get::<_, i64>(3)?.max(200) as usize,
                 l0_map_budget_bytes: row.get::<_, i64>(4)?.max(200) as usize,
                 read_budget_bytes: row.get::<_, i64>(5)?.max(1000) as usize,
-                updated_at: row.get(6)?,
+                default_private_source_id: row.get::<_, Option<String>>(6)?.filter(|s| !s.trim().is_empty()),
+                updated_at: row.get(7)?,
             })
         },
     )
@@ -347,10 +353,16 @@ pub fn save_settings(store: &Store, input: &WikiSettings) -> Result<WikiSettings
     let habits_budget = input.habits_budget_bytes.clamp(200, 12_000) as i64;
     let l0_budget = input.l0_map_budget_bytes.clamp(200, 4_000) as i64;
     let read_budget = input.read_budget_bytes.clamp(1000, 24_000) as i64;
+    let default_private = input
+        .default_private_source_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     store.connect()?.execute(
         "UPDATE wiki_settings
          SET enabled = ?1, base_url = ?2, api_token = ?3,
              habits_budget_bytes = ?4, l0_map_budget_bytes = ?5, read_budget_bytes = ?6,
+             default_private_source_id = ?7,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = 1",
         params![
@@ -359,7 +371,8 @@ pub fn save_settings(store: &Store, input: &WikiSettings) -> Result<WikiSettings
             input.api_token.trim(),
             habits_budget,
             l0_budget,
-            read_budget
+            read_budget,
+            default_private
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -796,6 +809,11 @@ pub fn remove_source(store: &Store, source_id: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "DELETE FROM conversation_wiki_bindings WHERE source_id = ?1",
+        [source_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE wiki_settings SET default_private_source_id = NULL WHERE default_private_source_id = ?1",
         [source_id],
     )
     .map_err(|e| e.to_string())?;
@@ -1612,6 +1630,9 @@ pub fn set_binding(
     include_archives: bool,
 ) -> Result<Option<WikiBinding>, String> {
     let conn = store.connect()?;
+    if let Ok(mut guard) = SESSION_INJECTED_HASHES.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        guard.remove(conversation_id);
+    }
     let sid = source_id.map(str::trim).filter(|s| !s.is_empty());
     let Some(sid) = sid else {
         conn.execute(
@@ -1715,7 +1736,28 @@ pub fn build_runtime_context(
         return Ok(None);
     }
 
-    let binding = get_binding(store, conversation_id)?;
+    let explicit_binding = get_binding(store, conversation_id)?;
+    let (binding, is_explicit_db_binding): (Option<WikiBinding>, bool) = match explicit_binding {
+        Some(ref b) if b.source_id == BINDING_NONE_SENTINEL => (None, true),
+        Some(b) => (Some(b), true),
+        None if !is_group && !is_project_session => {
+            if let Some(ref default_sid) = settings.default_private_source_id {
+                (
+                    Some(WikiBinding {
+                        conversation_id: conversation_id.to_owned(),
+                        source_id: default_sid.clone(),
+                        domain_filter: None,
+                        include_archives: false,
+                        last_injected_hash: None,
+                    }),
+                    false,
+                )
+            } else {
+                (None, false)
+            }
+        }
+        None => (None, false),
+    };
     // Code project sessions never receive business knowledge unless explicitly bound or explicitly @referenced.
     if is_project_session && binding.is_none() && explicit_refs.is_empty() {
         return Ok(None);
@@ -1754,17 +1796,35 @@ pub fn build_runtime_context(
             final_blocks.push(persistent_payload);
         } else {
             let hash = sha256_hex(&persistent_payload);
-            let already_injected = binding
-                .as_ref()
-                .and_then(|b| b.last_injected_hash.as_deref())
-                == Some(hash.as_str());
+            let mem_hash = SESSION_INJECTED_HASHES
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .ok()
+                .and_then(|g| g.get(conversation_id).cloned());
+            let already_injected = if is_explicit_db_binding {
+                binding
+                    .as_ref()
+                    .and_then(|b| b.last_injected_hash.as_deref())
+                    == Some(hash.as_str())
+                    || mem_hash.as_deref() == Some(hash.as_str())
+            } else {
+                mem_hash.as_deref() == Some(hash.as_str())
+            };
             if !already_injected {
                 final_blocks.push(persistent_payload);
-                if let Some(ref b) = binding {
-                    let _ = store.connect()?.execute(
-                        "UPDATE conversation_wiki_bindings SET last_injected_hash = ?1 WHERE conversation_id = ?2",
-                        params![hash, b.conversation_id],
-                    );
+                if let Ok(mut guard) = SESSION_INJECTED_HASHES
+                    .get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock()
+                {
+                    guard.insert(conversation_id.to_owned(), hash.clone());
+                }
+                if is_explicit_db_binding {
+                    if let Some(ref b) = binding {
+                        let _ = store.connect()?.execute(
+                            "UPDATE conversation_wiki_bindings SET last_injected_hash = ?1 WHERE conversation_id = ?2",
+                            params![hash, b.conversation_id],
+                        );
+                    }
                 }
             }
         }

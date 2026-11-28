@@ -114,6 +114,22 @@ export default function WikiSettingsPanel({ onError }: Props) {
     }
   }
 
+  async function handleDefaultPrivateChange(sourceId: string) {
+    if (!settings) return;
+    const next = { ...settings, default_private_source_id: sourceId || null };
+    setSettings(next);
+    try {
+      const saved = await saveWikiSettings(next);
+      setSettings(saved);
+      setNotice({
+        text: sourceId ? "已设为私聊默认知识库（项目空间仍保持独立不关联）。" : "已取消私聊默认知识库。",
+        tone: "ok",
+      });
+    } catch (cause) {
+      onError(`保存私聊默认知识库失败：${String(cause)}`);
+    }
+  }
+
   async function handleConnectAndSync() {
     if (!settings) return;
     setSyncing(true);
@@ -351,6 +367,41 @@ export default function WikiSettingsPanel({ onError }: Props) {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {sources.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              marginTop: 12,
+              paddingTop: 12,
+              borderTop: "1px solid var(--border)",
+              flexWrap: "wrap",
+            }}
+          >
+            <div>
+              <strong style={{ fontSize: 13 }}>私聊默认知识库</strong>
+              <p className="field-help" style={{ margin: "2px 0 0" }}>
+                普通私聊自动按需查阅；项目空间默认不关联，写代码互不干扰。
+              </p>
+            </div>
+            <select
+              className="text-input"
+              style={{ width: "auto", minWidth: 200 }}
+              value={settings.default_private_source_id ?? ""}
+              onChange={e => void handleDefaultPrivateChange(e.target.value)}
+            >
+              <option value="">不关联（需要时再选）</option>
+              {sources.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name}（{s.doc_count} 篇）
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>

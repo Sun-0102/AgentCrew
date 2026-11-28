@@ -22,7 +22,7 @@ import { deriveSessionTitle } from "./sessionTitle";
 import { clearSessionOverrides } from "./modelDefaults";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
-import { getWikiBinding, type ExplicitWikiRef, type WikiSearchHit } from "../wiki/api";
+import { getWikiBinding, getWikiSettings, WIKI_BINDING_NONE, type ExplicitWikiRef, type WikiSearchHit } from "../wiki/api";
 import WikiPickerPopover from "../wiki/WikiPickerPopover";
 import WikiArchiveDialog from "../wiki/WikiArchiveDialog";
 
@@ -98,25 +98,41 @@ export default function ChatStage(p: Props) {
   const [diffFile, setDiffFile] = useState<string | null>(null);
   const [wikiPickerOpen, setWikiPickerOpen] = useState(false);
   const [wikiRefs, setWikiRefs] = useState<ExplicitWikiRef[]>([]);
-  const [boundWikiSourceId, setBoundWikiSourceId] = useState<string | null>(null);
+  const [explicitWikiSourceId, setExplicitWikiSourceId] = useState<string | null>(null);
+  const [defaultPrivateWikiSourceId, setDefaultPrivateWikiSourceId] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ title: string; content: string } | null>(null);
 
+  const wikiConversationId = group?.id ?? snapshot.conversation_id ?? "";
+
   useEffect(() => {
-    const cid = group?.id ?? snapshot.conversation_id ?? "";
-    if (!cid || !desktop) {
-      setBoundWikiSourceId(null);
-      return;
-    }
+    if (!desktop) return;
     let cancelled = false;
-    void getWikiBinding(cid)
+    void getWikiSettings()
+      .then(s => {
+        if (!cancelled) setDefaultPrivateWikiSourceId(s.enabled ? (s.default_private_source_id ?? null) : null);
+      })
+      .catch(() => {});
+    if (!wikiConversationId) {
+      setExplicitWikiSourceId(null);
+      return () => { cancelled = true; };
+    }
+    void getWikiBinding(wikiConversationId)
       .then(b => {
-        if (!cancelled) setBoundWikiSourceId(b?.source_id ?? null);
+        if (!cancelled) setExplicitWikiSourceId(b?.source_id ?? null);
       })
       .catch(() => {
-        if (!cancelled) setBoundWikiSourceId(null);
+        if (!cancelled) setExplicitWikiSourceId(null);
       });
     return () => { cancelled = true; };
-  }, [group?.id, snapshot.conversation_id]);
+  }, [wikiConversationId, wikiPickerOpen]);
+
+  const boundWikiSourceId = group
+    ? (explicitWikiSourceId && explicitWikiSourceId !== WIKI_BINDING_NONE ? explicitWikiSourceId : null)
+    : scope.projectId
+      ? (explicitWikiSourceId && explicitWikiSourceId !== WIKI_BINDING_NONE ? explicitWikiSourceId : null)
+      : explicitWikiSourceId === WIKI_BINDING_NONE
+        ? null
+        : (explicitWikiSourceId || defaultPrivateWikiSourceId);
 
   function toggleWikiRef(hit: WikiSearchHit) {
     setWikiRefs(prev => {
@@ -828,7 +844,7 @@ export default function ChatStage(p: Props) {
             }
           }} />
           </div>
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div>{desktop && <div style={{ position: "relative" }}><button className={`icon-button ${wikiPickerOpen || wikiRefs.length > 0 ? "selected" : ""}`} type="button" title="点名引用知识库文档（仅本轮精准直传）" aria-label="引用知识库文档" disabled={composingBlocked || !!editingQueueId} onClick={() => setWikiPickerOpen(v => !v)}><Icon name="file" size={18} /></button>{wikiPickerOpen && <WikiPickerPopover boundSourceId={boundWikiSourceId} selectedRefs={wikiRefs} onToggleRef={toggleWikiRef} onClose={() => setWikiPickerOpen(false)} />}</div>}<span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div>{desktop && <div style={{ position: "relative" }}><button className={`icon-button ${wikiPickerOpen || wikiRefs.length > 0 || boundWikiSourceId ? "selected" : ""}`} type="button" title={boundWikiSourceId ? "已关联知识库（点击切换或点名文档）" : "关联知识库或点名文档"} aria-label="知识库与文档引用" disabled={composingBlocked || !!editingQueueId} onClick={() => setWikiPickerOpen(v => !v)}><Icon name="file" size={18} /></button>{wikiPickerOpen && <WikiPickerPopover conversationId={wikiConversationId} isGroup={!!group} isProject={!!scope.projectId} explicitBindingSourceId={explicitWikiSourceId} defaultPrivateSourceId={defaultPrivateWikiSourceId} effectiveSourceId={boundWikiSourceId} selectedRefs={wikiRefs} onBindingChanged={next => { setExplicitWikiSourceId(next); notify(next === WIKI_BINDING_NONE ? "本会话已取消关联知识库" : next ? "已切换本会话知识库" : "已恢复跟随默认知识库"); }} onToggleRef={toggleWikiRef} onClose={() => setWikiPickerOpen(false)} />}</div>}<span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>{!group && busy ? (<>Enter {activeFollowUpMode === "steer" ? "纠偏" : "排队"}{canSteer && <><span className="keyboard-separator">·</span>⌘Enter {activeFollowUpMode === "steer" ? "排队" : "纠偏"}</>} {queuedMessages.length > 0 && <><span className="keyboard-separator">·</span>⌥↑ 编辑排队</>}</>) : (<>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</>)}</span></div>
       </div>
     </div>{archiveTarget && <WikiArchiveDialog initialTitle={archiveTarget.title} initialContent={archiveTarget.content} defaultSourceId={boundWikiSourceId} sourceConversation={title} onArchived={res => { setArchiveTarget(null); notify(`已沉淀到知识库：${res.rel_path}${res.rescan_triggered ? "（已通知 LLM Wiki 重扫）" : ""}`); }} onClose={() => setArchiveTarget(null)} />}{panel === "diff" ? (
