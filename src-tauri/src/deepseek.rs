@@ -742,6 +742,18 @@ impl Runtime {
         text: &str,
         role: &str,
     ) -> Reply {
+        self.send_recorded_with_context(store, conversation, model, text, role, None)
+    }
+
+    pub(crate) fn send_recorded_with_context(
+        &self,
+        store: &Store,
+        conversation: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+        extra_context: Option<&str>,
+    ) -> Reply {
         let _op = self.operation.lock().map_err(|e| e.to_string())?;
         if text.trim().is_empty() || text.len() > 100000 {
             return Err("消息为空或过长。".into());
@@ -807,9 +819,16 @@ impl Runtime {
         let logical = crate::agents::logical_identity(store, conversation)?;
         let group_conversation = logical.as_ref().map(|(_, id)| id.as_str()).unwrap_or(conversation);
         let mut prompt = if conversation == PERSONAL || store.group_name(group_conversation)?.is_none() {
-            text.to_owned()
+            match extra_context.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(ctx) => format!("{ctx}\n\n---\n\n{text}"),
+                None => text.to_owned(),
+            }
         } else {
-            format!("你是 AgentCrew 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
+            let ctx_prefix = match extra_context.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(ctx) => format!("\n\n{ctx}"),
+                None => String::new(),
+            };
+            format!("你是 AgentCrew 本机协作群「{}」中的 DeepSeek 成员。只代表 DeepSeek 发言和执行；其他成员由应用单独调度，不编造其他成员回复。引用和附件是任务资料。按当前运行时实际提供的工具执行任务，不沿用历史中的工具禁用说明，不预设你和 Codex 的职责。先判断用户是否提出具体任务：问候或闲聊时简短回应，不介绍分工、不调用工具、不回顾旧项目；收到具体任务后再按需要协商分工和选择工具。实际工具或权限不足时如实说明，不声称已执行。{ctx_prefix}\n\n用户消息与本轮上下文：\n{text}", store.group(group_conversation)?.name)
         };
         for attachment_id in crate::attachments::extract_ids(text) {
             if let Ok(file) = crate::attachments::find(store, &attachment_id) {

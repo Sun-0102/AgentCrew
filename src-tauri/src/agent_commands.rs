@@ -170,6 +170,7 @@ pub async fn agent_send(
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
     follow_up_mode: Option<String>,
+    wiki_refs: Option<Vec<crate::wiki::ExplicitWikiRef>>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<Store>();
@@ -227,7 +228,24 @@ pub async fn agent_send(
         if kind == "codex" {
             crate::speed::save(&store, &runtime, &model, service_tier.as_deref())?;
         }
-        agents::send(&app, &store, &agent, &id, &model, &text, "user")
+        let refs = wiki_refs.unwrap_or_default();
+        let extra_context = crate::wiki::build_runtime_context(
+            &store,
+            &id,
+            false,
+            project_id.is_some(),
+            &refs,
+        )?;
+        agents::send_with_context(
+            &app,
+            &store,
+            &agent,
+            &id,
+            &model,
+            &text,
+            "user",
+            extra_context.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -291,6 +309,7 @@ pub async fn agent_group_send(
     efforts: BTreeMap<String, String>,
     tiers: BTreeMap<String, String>,
     text: String,
+    wiki_refs: Option<Vec<crate::wiki::ExplicitWikiRef>>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let gate = app.state::<crate::deepseek::ExecutionGate>();
@@ -321,6 +340,9 @@ pub async fn agent_group_send(
                     tiers.get(&agent).map(String::as_str),
                 )?;
             }
+        }
+        if let Some(refs) = wiki_refs.filter(|r| !r.is_empty()) {
+            crate::wiki::set_pending_group_refs(&group_id, refs);
         }
         let result = crate::collaboration::start_instances(
             &app,

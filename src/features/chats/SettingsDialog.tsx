@@ -14,8 +14,9 @@ import {
 } from "./modelDefaults";
 import { effortLabels } from "./reasoning";
 import { speedChoices } from "./speed";
+import WikiSettingsPanel from "../wiki/WikiSettingsPanel";
 
-export type SettingsTab = "agents" | "defaults" | "usage";
+export type SettingsTab = "agents" | "defaults" | "usage" | "wiki";
 
 interface Props {
   initialTab?: SettingsTab;
@@ -235,10 +236,22 @@ export default function SettingsDialog({
             {hasUsageWarning && <span className="settings-tab-dot" aria-label="额度提醒" />}
             <span className="settings-tab-kbd">⌘U</span>
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "wiki"}
+            className={`settings-nav-item ${tab === "wiki" ? "active" : ""}`}
+            onClick={() => setTab("wiki")}
+          >
+            <Icon name="file" size={15} />
+            <span className="settings-nav-label">知识库</span>
+          </button>
         </nav>
 
         <div className="settings-content" role="tabpanel">
-          {tab === "usage" ? (
+          {tab === "wiki" ? (
+            <WikiSettingsPanel onError={onError} />
+          ) : tab === "usage" ? (
             <UsageDashboard
               data={usageData}
               days={usageDays}

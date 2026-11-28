@@ -1295,6 +1295,16 @@ fn build_prompt(
             ),
             format!("本轮投递内容：\n{}", limited(&current.pending_prompt, 18_000)),
         ];
+        let explicit_refs = crate::wiki::take_pending_group_refs(&current.conversation_id);
+        if let Ok(Some(wiki_ctx)) = crate::wiki::build_runtime_context(
+            store,
+            &current.conversation_id,
+            true,
+            false,
+            &explicit_refs,
+        ) {
+            sections.push(wiki_ctx);
+        }
         let workspace_summary = task_results::render(evidence);
         if !workspace_summary.trim().is_empty() {
             sections.push(format!(
@@ -1344,6 +1354,16 @@ fn build_prompt(
             "上一轮归档记录（需核对）：\n{}",
             limited(&previous, 6_000)
         ));
+    }
+    let explicit_refs = crate::wiki::take_pending_group_refs(&current.conversation_id);
+    if let Ok(Some(wiki_ctx)) = crate::wiki::build_runtime_context(
+        store,
+        &current.conversation_id,
+        true,
+        false,
+        &explicit_refs,
+    ) {
+        sections.push(wiki_ctx);
     }
     let workspace_summary = task_results::render(evidence);
     if !workspace_summary.trim().is_empty() {

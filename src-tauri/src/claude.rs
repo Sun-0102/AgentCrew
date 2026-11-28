@@ -316,6 +316,18 @@ impl Runtime {
         text: &str,
         role: &str,
     ) -> Reply {
+        self.send_recorded_with_context(store, conversation, model, text, role, None)
+    }
+
+    pub fn send_recorded_with_context(
+        &self,
+        store: &Store,
+        conversation: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+        extra_context: Option<&str>,
+    ) -> Reply {
         let _operation = self.operation.lock().map_err(|e| e.to_string())?;
         if text.trim().is_empty() || text.len() > 100_000 || model.is_empty() {
             return Err("请选择 Claude 模型，并填写有效消息。".into());
@@ -396,7 +408,10 @@ impl Runtime {
         let store_path = store.path.clone();
         let conv_owned = conversation.to_owned();
         let model_owned = model.to_owned();
-        let text_owned = text.to_owned();
+        let text_owned = match extra_context.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(ctx) => format!("{ctx}\n\n---\n\n{text}"),
+            None => text.to_owned(),
+        };
         let turn_owned = turn_id.clone();
         let pids = self.running_pids.clone();
 

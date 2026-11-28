@@ -956,6 +956,18 @@ impl Runtime {
         text: &str,
         role: &str,
     ) -> Reply {
+        self.send_recorded_with_context(store, conversation_id, model, text, role, None)
+    }
+
+    pub(crate) fn send_recorded_with_context(
+        &self,
+        store: &Store,
+        conversation_id: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+        extra_context: Option<&str>,
+    ) -> Reply {
         if text.trim().is_empty() || text.len() > 100_000 {
             return Err("消息必须为 1–100000 字节。".into());
         }
@@ -1025,7 +1037,10 @@ impl Runtime {
         let db_path = store.path.clone();
         let conversation_owned = conversation_id.to_owned();
         let model_owned = model.to_owned();
-        let text_owned = text.to_owned();
+        let text_owned = match extra_context.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(ctx) => format!("{ctx}\n\n---\n\n{text}"),
+            None => text.to_owned(),
+        };
         let root_owned = root;
         std::thread::spawn(move || {
             let store = Store { path: db_path };

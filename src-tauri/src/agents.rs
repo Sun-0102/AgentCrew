@@ -285,6 +285,19 @@ pub fn send(
     text: &str,
     role: &str,
 ) -> Result<Value, String> {
+    send_with_context(app, store, id, conversation, model, text, role, None)
+}
+
+pub fn send_with_context(
+    app: &tauri::AppHandle,
+    store: &Store,
+    id: &str,
+    conversation: &str,
+    model: &str,
+    text: &str,
+    role: &str,
+    extra_context: Option<&str>,
+) -> Result<Value, String> {
     use tauri::Manager;
     if app
         .state::<crate::lifecycle::Lifecycle>()
@@ -296,7 +309,7 @@ pub fn send(
     let kind = ensure_enabled(store, id)?;
     let runtime = binding(store, id, conversation)?;
     let adapter = providers::resolve(&kind)?;
-    let result = adapter.send(app, store, &runtime, model, text, role);
+    let result = adapter.send_with_context(app, store, &runtime, model, text, role, extra_context);
     // Diagnostics must not turn an external launch into an automatic retry.
     if result.is_ok() {
         if let Ok(connection) = store.connect() {

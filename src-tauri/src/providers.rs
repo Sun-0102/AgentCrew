@@ -72,6 +72,19 @@ pub trait ProviderAdapter: Sync {
         model: &str,
         text: &str,
         role: &str,
+    ) -> Result<Value, String> {
+        self.send_with_context(app, store, runtime_conversation, model, text, role, None)
+    }
+
+    fn send_with_context(
+        &self,
+        app: &tauri::AppHandle,
+        store: &Store,
+        runtime_conversation: &str,
+        model: &str,
+        text: &str,
+        role: &str,
+        extra_context: Option<&str>,
     ) -> Result<Value, String>;
 
     fn cancel(
@@ -163,7 +176,7 @@ impl ProviderAdapter for CodexAdapter {
             .clone())
     }
 
-    fn send(
+    fn send_with_context(
         &self,
         app: &tauri::AppHandle,
         store: &Store,
@@ -171,9 +184,10 @@ impl ProviderAdapter for CodexAdapter {
         model: &str,
         text: &str,
         role: &str,
+        extra_context: Option<&str>,
     ) -> Result<Value, String> {
         app.state::<codex::Runtime>()
-            .send_recorded(store, runtime_conversation, model, text, role)
+            .send_recorded_with_context(store, runtime_conversation, model, text, role, extra_context)
     }
 
     fn cancel(
@@ -263,7 +277,7 @@ impl ProviderAdapter for DeepSeekAdapter {
         deepseek::session(store, runtime_conversation)
     }
 
-    fn send(
+    fn send_with_context(
         &self,
         app: &tauri::AppHandle,
         store: &Store,
@@ -271,9 +285,10 @@ impl ProviderAdapter for DeepSeekAdapter {
         model: &str,
         text: &str,
         role: &str,
+        extra_context: Option<&str>,
     ) -> Result<Value, String> {
         app.state::<deepseek::Runtime>()
-            .send_recorded(store, runtime_conversation, model, text, role)
+            .send_recorded_with_context(store, runtime_conversation, model, text, role, extra_context)
     }
 
     fn cancel(
@@ -328,7 +343,7 @@ impl ProviderAdapter for GeminiAdapter {
         gemini::session(store, runtime_conversation)
     }
 
-    fn send(
+    fn send_with_context(
         &self,
         app: &tauri::AppHandle,
         store: &Store,
@@ -336,9 +351,10 @@ impl ProviderAdapter for GeminiAdapter {
         model: &str,
         text: &str,
         role: &str,
+        extra_context: Option<&str>,
     ) -> Result<Value, String> {
         app.state::<gemini::Runtime>()
-            .send_recorded(store, runtime_conversation, model, text, role)
+            .send_recorded_with_context(store, runtime_conversation, model, text, role, extra_context)
     }
 
     fn cancel(
@@ -405,7 +421,7 @@ impl ProviderAdapter for ClaudeAdapter {
         claude::session(store, runtime_conversation)
     }
 
-    fn send(
+    fn send_with_context(
         &self,
         app: &tauri::AppHandle,
         store: &Store,
@@ -413,9 +429,10 @@ impl ProviderAdapter for ClaudeAdapter {
         model: &str,
         text: &str,
         role: &str,
+        extra_context: Option<&str>,
     ) -> Result<Value, String> {
         app.state::<claude::Runtime>()
-            .send_recorded(store, runtime_conversation, model, text, role)
+            .send_recorded_with_context(store, runtime_conversation, model, text, role, extra_context)
     }
 
     fn cancel(

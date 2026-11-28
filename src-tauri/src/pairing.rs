@@ -1,7 +1,7 @@
 use crate::{agents, storage::Store};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -18,6 +18,7 @@ use tauri::Manager;
 
 pub struct Service {
     pub instance: String,
+    pub wiki_token: String,
     pub address: Mutex<Result<String, String>>,
     failures: Mutex<Vec<i64>>,
 }
@@ -25,6 +26,7 @@ impl Default for Service {
     fn default() -> Self {
         Self {
             instance: uuid::Uuid::new_v4().to_string(),
+            wiki_token: secret(),
             address: Mutex::new(Err("配对服务尚未启动。".into())),
             failures: Mutex::new(Vec::new()),
         }
@@ -94,7 +96,9 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .to_string();
     let service = app.state::<Arc<Service>>().inner().clone();
-    *service.address.lock().map_err(|e| e.to_string())? = Ok(format!("http://{host}"));
+    let base_url = format!("http://{host}");
+    *service.address.lock().map_err(|e| e.to_string())? = Ok(base_url.clone());
+    crate::wiki::set_local_http_endpoint(base_url, service.wiki_token.clone());
     let state = Server {
         app: app.clone(),
         service,
@@ -109,6 +113,8 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         .route("/local/v2/pairing-guide", get(guide_v2))
         .route("/local/v2/pairings/claim", post(claim_v2))
         .route("/local/v2/pairings/{id}", get(status))
+        .route("/local-wiki/search", get(local_wiki_search))
+        .route("/local-wiki/read", get(local_wiki_read))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "接口不存在。") })
         .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(axum::middleware::from_fn(
@@ -135,6 +141,117 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_query_map(uri: &Uri) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(q) = uri.query() {
+        for pair in q.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            map.insert(percent_decode(k), percent_decode(v));
+        }
+    }
+    map
+}
+
+fn wiki_token_ok(state: &Server, headers: &HeaderMap, query_token: Option<&str>) -> bool {
+    let header_token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .map(str::trim);
+    let candidate = header_token.or_else(|| query_token.map(str::trim));
+    candidate == Some(state.service.wiki_token.as_str())
+}
+
+async fn local_wiki_search(
+    State(state): State<Server>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !headers_ok(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "request_rejected", "只允许本机直接请求。");
+    }
+    let query = parse_query_map(&uri);
+    if !wiki_token_ok(&state, &headers, query.get("token").map(String::as_str)) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized", "缺少或无效的知识库只读令牌。");
+    }
+    let store = state.app.state::<Store>();
+    let include_archives = query
+        .get("include_archives")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let limit = query
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10);
+    match crate::wiki::http_search_json(
+        &store,
+        query.get("source_id").map(String::as_str).filter(|s| !s.is_empty()),
+        query.get("q").map(String::as_str).unwrap_or(""),
+        query.get("domain").map(String::as_str).filter(|s| !s.is_empty()),
+        include_archives,
+        limit,
+    ) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(err) => error(StatusCode::BAD_REQUEST, "wiki_search_failed", &err),
+    }
+}
+
+async fn local_wiki_read(
+    State(state): State<Server>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !headers_ok(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "request_rejected", "只允许本机直接请求。");
+    }
+    let query = parse_query_map(&uri);
+    if !wiki_token_ok(&state, &headers, query.get("token").map(String::as_str)) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized", "缺少或无效的知识库只读令牌。");
+    }
+    let Some(path) = query.get("path").map(String::as_str).filter(|s| !s.is_empty()) else {
+        return error(StatusCode::BAD_REQUEST, "missing_path", "缺少 path 参数。");
+    };
+    let store = state.app.state::<Store>();
+    match crate::wiki::http_read_json(
+        &store,
+        query.get("source_id").map(String::as_str).filter(|s| !s.is_empty()),
+        path,
+        query.get("section").map(String::as_str).filter(|s| !s.is_empty()),
+    ) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(err) => error(StatusCode::NOT_FOUND, "wiki_read_failed", &err),
+    }
 }
 
 async fn health(State(state): State<Server>, headers: HeaderMap) -> Response {

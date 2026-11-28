@@ -30,6 +30,7 @@ mod speed;
 mod storage;
 mod task_results;
 mod usage;
+mod wiki;
 
 use tauri::Manager;
 
@@ -194,7 +195,22 @@ pub fn run() {
             schedules::schedule_codex_import,
             model_defaults::model_defaults_get,
             model_defaults::model_defaults_save,
-            model_defaults::model_defaults_set_group_follow
+            model_defaults::model_defaults_set_group_follow,
+            wiki::wiki_settings_get,
+            wiki::wiki_settings_save,
+            wiki::wiki_test_connection,
+            wiki::wiki_sync_projects,
+            wiki::wiki_source_list,
+            wiki::wiki_source_add_local,
+            wiki::wiki_source_remove,
+            wiki::wiki_source_reindex,
+            wiki::wiki_habit_list,
+            wiki::wiki_habit_set,
+            wiki::wiki_binding_get,
+            wiki::wiki_binding_set,
+            wiki::wiki_search,
+            wiki::wiki_read_doc,
+            wiki::wiki_archive_note
         ])
         .build(tauri::generate_context!())
         .expect("AgentCrew 启动失败，请检查本地数据目录和桌面运行环境")

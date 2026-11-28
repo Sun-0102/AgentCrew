@@ -22,6 +22,9 @@ import { deriveSessionTitle } from "./sessionTitle";
 import { clearSessionOverrides } from "./modelDefaults";
 import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import type { Project } from "../projects/api";
+import { getWikiBinding, type ExplicitWikiRef, type WikiSearchHit } from "../wiki/api";
+import WikiPickerPopover from "../wiki/WikiPickerPopover";
+import WikiArchiveDialog from "../wiki/WikiArchiveDialog";
 
 interface Props {
   scope: Scope; scopeKey: string; title: string; group?: Group; project?: Project; agent?: string;
@@ -93,6 +96,37 @@ export default function ChatStage(p: Props) {
   const [panel, setPanel] = useState<"members" | "evidence" | "diff" | null>(null);
   const [diffTurnId, setDiffTurnId] = useState<string>("");
   const [diffFile, setDiffFile] = useState<string | null>(null);
+  const [wikiPickerOpen, setWikiPickerOpen] = useState(false);
+  const [wikiRefs, setWikiRefs] = useState<ExplicitWikiRef[]>([]);
+  const [boundWikiSourceId, setBoundWikiSourceId] = useState<string | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<{ title: string; content: string } | null>(null);
+
+  useEffect(() => {
+    const cid = group?.id ?? snapshot.conversation_id ?? "";
+    if (!cid || !desktop) {
+      setBoundWikiSourceId(null);
+      return;
+    }
+    let cancelled = false;
+    void getWikiBinding(cid)
+      .then(b => {
+        if (!cancelled) setBoundWikiSourceId(b?.source_id ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setBoundWikiSourceId(null);
+      });
+    return () => { cancelled = true; };
+  }, [group?.id, snapshot.conversation_id]);
+
+  function toggleWikiRef(hit: WikiSearchHit) {
+    setWikiRefs(prev => {
+      const exists = prev.some(r => r.source_id === hit.source_id && r.rel_path === hit.rel_path);
+      if (exists) {
+        return prev.filter(r => !(r.source_id === hit.source_id && r.rel_path === hit.rel_path));
+      }
+      return [...prev, { source_id: hit.source_id, rel_path: hit.rel_path, title: hit.title }];
+    });
+  }
   const [previewFile, setPreviewFile] = useState<FilePreviewTarget | null>(null);
   const [diffRefresh, setDiffRefresh] = useState(0);
   const [resultsOpen, setResultsOpen] = useState(false);
@@ -515,8 +549,16 @@ export default function ChatStage(p: Props) {
       }
       const names = requestedSkills(draftText);
       if (names.length) content += await invoke<string>("skills_prepare", { ...effectiveScope, agents: recipients, names });
+      const draftWikiRefs = wikiRefs;
+      if (draftWikiRefs.length) {
+        setWikiRefs([]);
+        setWikiPickerOpen(false);
+      }
+      const wikiRefsPayload = draftWikiRefs.length
+        ? draftWikiRefs.map(({ source_id, rel_path, section }) => ({ source_id, rel_path, section: section ?? null }))
+        : null;
       if (group) {
-        await invoke("agent_group_send", { groupId: effectiveScope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content });
+        await invoke("agent_group_send", { groupId: effectiveScope.groupId, targetAgent, models: p.collaborationModels, efforts: p.collaborationEfforts ?? {}, tiers: p.collaborationTiers ?? {}, text: content, wikiRefs: wikiRefsPayload });
       } else {
         await invoke("agent_send", {
           ...effectiveScope,
@@ -526,6 +568,7 @@ export default function ChatStage(p: Props) {
           reasoningEffort: p.reasoningEffort || null,
           followUpMode: singleFollowUpMode,
           text: content,
+          wikiRefs: wikiRefsPayload,
         });
       }
       if (createdDraftSession) {
@@ -625,7 +668,7 @@ export default function ChatStage(p: Props) {
         aria-label="聊天消息"
       >
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.isDraft || p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.isDraft ? "直接输入你的需求，发送首条消息后将自动创建并命名会话。" : p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button><MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
+        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button>{message.role === "assistant" && message.text && desktop && <button type="button" onClick={() => setArchiveTarget({ title: `${title} 结论沉淀`, content: message.text.trim() })} aria-label="沉淀到知识库" title="沉淀到知识库（写入 00-inbox/）"><Icon name="download" size={14} /></button>}<MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
       </div>
       {!following && hasMessages && (
         <button type="button" className="scroll-bottom-btn" onClick={scrollToBottom} aria-label="滚动到最新消息">
@@ -672,6 +715,29 @@ export default function ChatStage(p: Props) {
             {skillsLoading ? <p role="status">正在读取本地和运行时技能…</p> : skillsError ? <p role="alert">{skillsError}</p> : !skillItems.length ? <p role="status">{desktop ? "没有匹配的技能。请检查搜索词或当前 Agent 的技能配置。" : "请在桌面版中读取本地技能。"}</p> : skillItems.map((skill, index) => <button type="button" role="option" id={`skill-option-${index}`} aria-selected={index === Math.min(skillIndex, skillItems.length - 1)} key={skill.name} disabled={composingBlocked} onMouseDown={event => event.preventDefault()} onClick={() => chooseSkill(skill)}><strong>/{skill.name}<small className="skill-source">{skill.source}</small></strong><span>{skill.description || "本地技能"}</span></button>)}
           </div>}
           {mentionsOpen && <div className="mention-menu" id="mention-menu" role="listbox" aria-label="选择要 @ 的成员" ref={mentionMenuRef}><div className="menu-caption">选择要 @ 的成员</div>{mentionItems.map((id, index) => <button type="button" role="option" id={`mention-option-${index}`} aria-selected={index === activeMentionIndex} key={id} disabled={composingBlocked} onMouseEnter={() => setMentionIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => chooseMention(id)}><Avatar agent={id} small /><span>{agentName(id)}<small>{providerKind(id)} · {id.slice(0, 8)}</small></span>{target === id && <Icon name="check" size={16} />}</button>)}</div>}
+          {wikiRefs.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "6px 10px 2px" }}>
+              {wikiRefs.map(refItem => (
+                <span
+                  key={`${refItem.source_id}:${refItem.rel_path}`}
+                  className="label-chip"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, padding: "3px 8px" }}
+                  title={refItem.rel_path}
+                >
+                  <Icon name="file" size={12} />
+                  <span>{refItem.title || refItem.rel_path}</span>
+                  <button
+                    type="button"
+                    style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, color: "inherit" }}
+                    onClick={() => setWikiRefs(prev => prev.filter(x => !(x.source_id === refItem.source_id && x.rel_path === refItem.rel_path)))}
+                    aria-label="移除引用"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <label className="sr-only" htmlFor="chat-input">输入消息</label>
           <div className={`composer-editor ${hasComposerHighlight ? "has-highlight" : ""}`}>
             {hasComposerHighlight && (
@@ -762,10 +828,10 @@ export default function ChatStage(p: Props) {
             }
           }} />
           </div>
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div><span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div>{desktop && <div style={{ position: "relative" }}><button className={`icon-button ${wikiPickerOpen || wikiRefs.length > 0 ? "selected" : ""}`} type="button" title="点名引用知识库文档（仅本轮精准直传）" aria-label="引用知识库文档" disabled={composingBlocked || !!editingQueueId} onClick={() => setWikiPickerOpen(v => !v)}><Icon name="file" size={18} /></button>{wikiPickerOpen && <WikiPickerPopover boundSourceId={boundWikiSourceId} selectedRefs={wikiRefs} onToggleRef={toggleWikiRef} onClose={() => setWikiPickerOpen(false)} />}</div>}<span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>{!group && busy ? (<>Enter {activeFollowUpMode === "steer" ? "纠偏" : "排队"}{canSteer && <><span className="keyboard-separator">·</span>⌘Enter {activeFollowUpMode === "steer" ? "排队" : "纠偏"}</>} {queuedMessages.length > 0 && <><span className="keyboard-separator">·</span>⌥↑ 编辑排队</>}</>) : (<>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</>)}</span></div>
       </div>
-    </div>{panel === "diff" ? (
+    </div>{archiveTarget && <WikiArchiveDialog initialTitle={archiveTarget.title} initialContent={archiveTarget.content} defaultSourceId={boundWikiSourceId} sourceConversation={title} onArchived={res => { setArchiveTarget(null); notify(`已沉淀到知识库：${res.rel_path}${res.rescan_triggered ? "（已通知 LLM Wiki 重扫）" : ""}`); }} onClose={() => setArchiveTarget(null)} />}{panel === "diff" ? (
       <TurnDiffDrawer
         turns={turnDiffOptions}
         selectedTurnId={diffTurnId}
