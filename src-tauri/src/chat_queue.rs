@@ -401,7 +401,9 @@ pub fn tick(app: &tauri::AppHandle) {
             Err(_) => continue,
         };
 
-        if status.as_deref().is_some_and(crate::codex::active) {
+        if status.as_deref().is_some_and(crate::codex::active)
+            || crate::delegation::has_active(&store, &conversation_id).unwrap_or(false)
+        {
             continue;
         }
 

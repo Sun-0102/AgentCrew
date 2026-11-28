@@ -11,6 +11,7 @@ import { replyBlocks } from "./activity";
 import ProjectAgentPicker from "./ProjectAgentPicker";
 import ModelConfigPopover from "./ModelConfigPopover";
 import ContextMeter from "./ContextMeter";
+import DelegatedTaskCard from "./DelegatedTaskCard";
 import { activeMention, insertMention, mentionSegments, messageRecipients } from "./mentions";
 import { formatReplyPreview } from "./replyPreview";
 import GroupMemberStatus from "./GroupMemberStatus";
@@ -21,7 +22,7 @@ import { createTextPasteAttachment, formatAttachmentSize, isLargeTextPaste, MAX_
 import { useCopyToClipboard } from "./clipboard";
 import { deriveSessionTitle } from "./sessionTitle";
 import { clearSessionOverrides } from "./modelDefaults";
-import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
+import { agents, agentName, providerKind, mentionName, useAgents, clock, desktop, running, statusLabels, taskLabels, compactContext, forkConversation, type Group, type GroupSession, type PrivateSession, type ProjectSession, type Message, type Probe, type QueuedMessage, type Scope, type Snapshot } from "./api";
 import { gitOverview } from "../git/api";
 import type { Project } from "../projects/api";
 import {
@@ -115,6 +116,43 @@ export default function ChatStage(p: Props) {
   const [explicitWikiBinding, setExplicitWikiBinding] = useState<WikiBinding | null>(null);
   const [defaultPrivateWikiSourceId, setDefaultPrivateWikiSourceId] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ title: string; content: string } | null>(null);
+  const [compactingContext, setCompactingContext] = useState(false);
+
+  async function handleCompactContext() {
+    if (compactingContext || !desktop) return;
+    setCompactingContext(true);
+    try {
+      const res = await compactContext({
+        agent,
+        projectId: scope.projectId,
+        groupId: scope.groupId,
+        sessionId: scope.sessionId,
+      });
+      notify(res.message);
+      onRefresh?.();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCompactingContext(false);
+    }
+  }
+
+  async function handleForkMessage(messageId: string) {
+    if (!desktop) return;
+    try {
+      const res = await forkConversation({
+        agent,
+        projectId: scope.projectId,
+        groupId: scope.groupId,
+        sessionId: scope.sessionId,
+        upToMessageId: messageId,
+      });
+      window.dispatchEvent(new CustomEvent("agentcrew:forked", { detail: res }));
+      notify("已从该消息分叉创建新会话，并带入前置摘要");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   const wikiConversationId = group?.id ?? snapshot.conversation_id ?? "";
 
@@ -299,11 +337,24 @@ export default function ChatStage(p: Props) {
     lastScrollTopRef.current = 0;
     lastScrollHeightRef.current = 0;
   }, [scopeKey]);
-  const membersKey = group ? group.members.join("\0") : agent;
-  const members = useMemo(() => group?.members ?? [agent], [membersKey]);
+  const availableAgents = useAgents();
+  const membersKey = group ? group.members.join("\0") : `${agent}\0${availableAgents.map(a => a.id).join("\0")}`;
+  const mentionSourceMembers = useMemo(
+    () =>
+      group
+        ? group.members
+        : availableAgents
+            .filter(a => a.id !== agent && a.enabled && a.registration_state === "active")
+            .map(a => a.id),
+    [group, availableAgents, agent],
+  );
+  const members = useMemo(
+    () => (group ? group.members : [agent, ...mentionSourceMembers]),
+    [membersKey],
+  );
   const mentionItems = (() => {
     const q = mentionQuery.trim().toLowerCase();
-    if (!q) return members;
+    if (!q) return mentionSourceMembers;
     const score = (id: string) => {
       const name = agentName(id).toLowerCase();
       const kind = providerKind(id).toLowerCase();
@@ -312,7 +363,7 @@ export default function ChatStage(p: Props) {
       if (name.includes(q) || lid.includes(q) || kind.includes(q)) return 1;
       return 2;
     };
-    return members
+    return mentionSourceMembers
       .map(id => ({ id, rank: score(id) }))
       .filter(item => item.rank < 2)
       .sort((a, b) => a.rank - b.rank)
@@ -320,7 +371,7 @@ export default function ChatStage(p: Props) {
   })();
   const mentionsOpen = mentions && mentionItems.length > 0;
   const activeMentionIndex = Math.min(mentionIndex, Math.max(0, mentionItems.length - 1));
-  const busy = sending || running(snapshot.session?.status) || Object.values(snapshot.sessions ?? {}).some(session => running(session?.status)) || taskActive;
+  const busy = sending || running(snapshot.session?.status) || Object.values(snapshot.sessions ?? {}).some(session => running(session?.status)) || taskActive || (!group && !!snapshot.delegation_active);
   const composingBlocked = !!p.session?.archived || sending || (group ? task?.status === "cancelling" : false);
   const queuedMessages = useMemo(() => (group ? [] : (snapshot.queued_messages ?? [])), [group, snapshot.queued_messages]);
   const pausedQueueCount = queuedMessages.filter(item => item.status === "paused").length;
@@ -430,7 +481,7 @@ export default function ChatStage(p: Props) {
   const hasMessages = visibleMessages.length > 0;
   const providerWorking = running(snapshot.session?.status);
   const attention = !!task?.members?.some(member => member.error) || !!error || !!snapshot.session?.error || !!probe?.sidebar_warning || !!task && ["blocked", "interrupted"].includes(task.status);
-  const stateText = error ? "操作未完成" : task?.status === "cancelling" ? "正在停止" : snapshot.approvals.length ? `${agentName(snapshot.approvals[0]?.agent_id ?? agent)} 等待你批准` : providerWorking ? `${agentName(executingAgent)} ${statusLabels[snapshot.session?.status ?? "running"] ?? "正在处理"}${task?.status === "paused" ? " · 结束后暂停" : ""}` : sending ? "正在发送" : task ? task.status === "running" ? `${agentName(task.current_agent)} 正在处理` : taskLabels[task.status] ?? task.status : snapshot.session ? statusLabels[snapshot.session.status] ?? "就绪" : connecting ? "正在连接" : ready ? "就绪" : "尚未连接";
+  const stateText = error ? "操作未完成" : snapshot.compacting_agent || compactingContext ? `正在整理 ${agentName(snapshot.compacting_agent ?? agent)} 的上下文…` : task?.status === "cancelling" ? "正在停止" : snapshot.approvals.length ? `${agentName(snapshot.approvals[0]?.agent_id ?? agent)} 等待你批准` : providerWorking ? `${agentName(executingAgent)} ${statusLabels[snapshot.session?.status ?? "running"] ?? "正在处理"}${task?.status === "paused" ? " · 结束后暂停" : ""}` : !group && snapshot.delegation_active ? "正在执行委派子任务" : sending ? "正在发送" : task ? task.status === "running" ? `${agentName(task.current_agent)} 正在处理` : taskLabels[task.status] ?? task.status : snapshot.session ? statusLabels[snapshot.session.status] ?? "就绪" : connecting ? "正在连接" : ready ? "就绪" : "尚未连接";
   useEffect(() => {
     drafts.set(scopeKey, { text, files, reply });
     const timer = window.setTimeout(() => {
@@ -759,7 +810,11 @@ export default function ChatStage(p: Props) {
         aria-label="聊天消息"
       >
         {!hasMessages && <div className="conversation-welcome"><div className={`welcome-mark ${group ? "group-mark" : ""}`}>{group ? <Icon name="group" size={37} /> : <Icon name="spark" size={37} />}</div><h2>{p.isDraft || p.session ? "一个需求，一段新对话" : group ? "围绕一个目标，一起讨论。" : "今天，想一起完成什么？"}</h2><p>{p.isDraft ? "直接输入你的需求，发送首条消息后将自动创建并命名会话。" : p.session ? p.session.archived ? "这个会话已归档，恢复后可继续讨论。" : "告诉成员这次要完成什么。这个会话从空上下文开始。" : group ? "直接发消息，成员会一起协调分工；@ 谁就只交给谁。" : `讨论一个想法，写一段代码，或把手头的事情交给 ${agentName(agent)}。`}</p><div className="prompt-suggestions">{(group ? ["一起梳理这个需求", "帮我检查一下方案"] : ["帮我理清一个想法", "一起开始一个新任务", "帮我检查一段代码"]).map(prompt => <button disabled={!!p.session?.archived} key={prompt} onClick={() => { setText(prompt); input.current?.focus(); }}>{prompt}<Icon name="right" size={14} /></button>)}</div></div>}
-        {visibleMessages.map(message => <article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`} key={message.id}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button>{message.role === "assistant" && message.text && desktop && <button type="button" onClick={() => setArchiveTarget({ title: `${title} 结论沉淀`, content: message.text.trim() })} aria-label="沉淀到知识库" title="沉淀到知识库（写入 00-inbox/）"><Icon name="download" size={14} /></button>}<MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>)}
+        {visibleMessages.map(message => {
+          const attachedTasks = !group ? (snapshot.delegated_tasks ?? []).filter(dt => dt.parent_message_id === message.id) : [];
+          return <div key={message.id} className="message-group-block"><article className={`message-row ${message.role === "user" ? "outgoing" : "incoming"}`}><Avatar agent={message.role === "user" ? "me" : message.agent ?? agent} /><div className="message-content"><div className="message-meta"><strong>{author(message)}</strong><time>{clock(message.created_at)}</time><div className="message-actions"><button type="button" disabled={!message.text} onClick={() => quote(message)} aria-label={`回复${message.role === "user" ? "我的" : `${author(message)} 的`}消息`} title="回复"><Icon name="reply" size={14} /></button>{message.role === "assistant" && message.text && desktop && <button type="button" onClick={() => setArchiveTarget({ title: `${title} 结论沉淀`, content: message.text.trim() })} aria-label="沉淀到知识库" title="沉淀到知识库（写入 00-inbox/）"><Icon name="download" size={14} /></button>}{message.role === "assistant" && desktop && <button type="button" onClick={() => void handleForkMessage(message.id)} aria-label="从这里分叉" title="从这里分叉新会话（带入截至本条消息的摘要）"><Icon name="gitBranch" size={14} /></button>}<MessageCopyButton text={message.text} onNotify={notify} /></div></div>{message.role === "assistant" && <TaskActivity block={message} />}{message.text && <div className="message-bubble"><MessageBody text={message.text.trimEnd()} members={members} onOpenFile={openFilePreview} workspacePath={project?.primary_root ?? snapshot.session?.workspace_path} onNotify={notify} /></div>}{message.role === "assistant" && message.turnDiff && <TurnDiffCard summary={message.turnDiff} active={panel === "diff" && diffTurnId === message.id} activeFile={panel === "diff" && diffTurnId === message.id ? diffFile : null} onViewDiff={filePath => openTurnDiff(message.id, filePath)} onNotify={notify} onReverted={() => setDiffRefresh(v => v + 1)} />}</div></article>{attachedTasks.length > 0 && <div className="delegated-task-list">{attachedTasks.map(dt => <DelegatedTaskCard key={dt.id} task={dt} />)}</div>}</div>;
+        })}
+        {!group && (snapshot.delegated_tasks ?? []).filter(dt => !visibleMessages.some(m => m.id === dt.parent_message_id)).map(dt => <div key={dt.id} className="delegated-task-list"><DelegatedTaskCard task={dt} /></div>)}
       </div>
       {!following && hasMessages && (
         <button type="button" className="scroll-bottom-btn" onClick={scrollToBottom} aria-label="滚动到最新消息">
@@ -940,7 +995,7 @@ export default function ChatStage(p: Props) {
             }
           }} />
           </div>
-          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div>{desktop && <WikiPickerPopover conversationId={wikiConversationId} isGroup={!!group} isProject={!!scope.projectId} disabled={composingBlocked || !!editingQueueId} sources={wikiSources} explicitBinding={explicitWikiBinding} defaultPrivateSourceId={defaultPrivateWikiSourceId} effectiveSourceIds={boundWikiSourceIds} selectedRefs={wikiRefs} onOpen={() => setWikiRefreshTick(t => t + 1)} onSaveBinding={saveWikiBinding} onToggleRef={toggleWikiRef} onClearRefs={() => setWikiRefs([])} />}<span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
+          <div className="composer-toolbar"><div className="composer-tools"><input className="sr-only" type="file" ref={fileInput} multiple onChange={attach} tabIndex={-1} aria-label="添加图片或文件" /><button className="icon-button" type="button" title="添加图片或文件（单文件不超过 10 MB，支持粘贴和拖拽）" aria-label="添加图片或文件" disabled={composingBlocked || !!editingQueueId} onClick={() => fileInput.current?.click()}><Icon name="attach" size={20} /></button><div className="mention-control" ref={mentionControlRef}><button className={`icon-button ${mentionsOpen ? "selected" : ""}`} type="button" aria-label="指定 Agent" disabled={composingBlocked || !!editingQueueId} onClick={() => { dismissedMentionRef.current = null; setMentionQuery(""); setMentionIndex(0); setMentions(!mentions); }}><Icon name="at" size={19} /></button></div>{desktop && <WikiPickerPopover conversationId={wikiConversationId} isGroup={!!group} isProject={!!scope.projectId} disabled={composingBlocked || !!editingQueueId} sources={wikiSources} explicitBinding={explicitWikiBinding} defaultPrivateSourceId={defaultPrivateWikiSourceId} effectiveSourceIds={boundWikiSourceIds} selectedRefs={wikiRefs} onOpen={() => setWikiRefreshTick(t => t + 1)} onSaveBinding={saveWikiBinding} onToggleRef={toggleWikiRef} onClearRefs={() => setWikiRefs([])} />}<span className="toolbar-divider" /><span className="composer-execution-controls">{scope.projectId && !group && <ProjectAgentPicker agent={agent} disabled={busy || taskControllable || !!p.session?.archived} onAgent={onAgent} onSettings={onSettings} />}<ModelConfigPopover agent={agent} members={members} isGroup={!!group} probe={probe} connecting={connecting} model={model} reasoningEffort={p.reasoningEffort} serviceTier={p.codexServiceTier} disabled={busy || taskControllable} onAgent={p.onAgent} onModel={onModel} onReasoningEffort={p.onReasoningEffort} onServiceTier={p.onServiceTier} onConnect={onConnect} canSaveAsDefault={p.canSaveAsDefault} defaultScopeLabel={p.defaultScopeLabel} onSaveAsDefault={p.onSaveAsDefault} /></span><ContextMeter agent={agent} members={members} isGroup={!!group} model={model} contextUsage={snapshot.context_usage} compactingAgent={snapshot.compacting_agent} compacting={compactingContext} onCompact={() => void handleCompactContext()} /></div><div className="composer-submit">{!probe && <button type="button" className="connect-link" onClick={onConnect} disabled={connecting}>{connecting ? "连接中…" : `连接 ${agentName(agent)}`}</button>}{!group && busy && canSteer && !editingQueueId && <div className="follow-up-toggle" role="group" aria-label="执行中发送方式"><button type="button" className={activeFollowUpMode === "queue" ? "active" : ""} onClick={() => updateFollowUpMode("queue")} title="默认加入队列，等当前轮结束后自动发送">排队</button><button type="button" className={activeFollowUpMode === "steer" ? "active is-steer" : ""} onClick={() => updateFollowUpMode("steer")} title="默认直接纠偏当前运行中的 Codex 任务 (Steer)">纠偏</button></div>}{(busy || taskControllable) && <button className="send-button stop-button" type="button" aria-label="停止任务" title="停止当前任务" disabled={acting || sending || (taskControllable ? task?.status === "cancelling" : ["starting", "cancel_requested", "stopping"].includes(snapshot.session?.status ?? "starting"))} onClick={() => taskControllable && task ? action("group_task_control", { taskId: task.id, action: "cancel" }) : action("agent_cancel", { agent: executingAgent })}><Icon name="stop" size={18} /></button>}<button className={`send-button ${!group && editingQueueId ? "queue-button" : !group && busy ? (activeFollowUpMode === "steer" ? "steer-button" : "queue-button") : ""}`} type="submit" aria-label={!group && editingQueueId ? "保存排队消息" : !group && busy ? (activeFollowUpMode === "steer" ? "纠偏当前轮" : "加入排队") : "发送消息"} title={!desktop ? "请在桌面版中发送" : !group && editingQueueId ? "保存排队消息 (Enter)" : group && busy ? "发送插话，各成员在自己的当前轮结束后处理" : !group && busy ? (canSteer ? (activeFollowUpMode === "steer" ? "纠偏当前轮 (Enter 纠偏 · ⌘Enter 加入排队)" : "加入排队等待 (Enter 排队 · ⌘Enter 立即纠偏)") : "加入排队等待，当前轮完成后自动发送") : "发送消息"} disabled={composingBlocked || !ready || (!text.trim() && !files.length) || !desktop}><Icon name={!group && editingQueueId ? "check" : !group && busy ? (activeFollowUpMode === "steer" ? "steer" : "queue") : "send"} size={19} /></button></div></div>
         </form><div className="composer-footer"><span>{p.session ? "本会话独立上下文" : group ? `发送给 ${recipients.map(id => agentName(id)).join("、")}${recipients.length > 1 ? " · 协调分工" : " · 单独处理"}` : "私聊记录独立保存"}</span><span>{!group && busy ? (<>Enter {activeFollowUpMode === "steer" ? "纠偏" : "排队"}{canSteer && <><span className="keyboard-separator">·</span>⌘Enter {activeFollowUpMode === "steer" ? "排队" : "纠偏"}</>} {queuedMessages.length > 0 && <><span className="keyboard-separator">·</span>⌥↑ 编辑排队</>}</>) : (<>Enter 发送<span className="keyboard-separator">·</span>Shift + Enter 换行</>)}</span></div>
       </div>
     </div>{archiveTarget && <WikiArchiveDialog initialTitle={archiveTarget.title} initialContent={archiveTarget.content} defaultSourceId={boundWikiSourceIds[0] ?? null} sourceConversation={title} onArchived={res => { setArchiveTarget(null); notify(`已沉淀到知识库：${res.rel_path}${res.rescan_triggered ? "（已通知 LLM Wiki 重扫）" : ""}`); }} onClose={() => setArchiveTarget(null)} />}{panel === "diff" ? (
@@ -984,7 +1039,7 @@ export default function ChatStage(p: Props) {
             {["idle", "awaiting_review"].includes(task.status) && <button type="button" className="primary" disabled={acting} onClick={() => action("group_task_control", { taskId: task.id, action: "accept" })}>确认完成</button>}
           </div>
         </div>}
-        {snapshot.approvals.map(approval => <div className="approval-card" key={approval.id}><div><Icon name="shield" size={18} /><strong>{agentName(approval.agent_id ?? agent)} 需要你批准{approval.method.includes("fileChange") ? "文件修改" : "命令执行"}</strong></div><pre>{approval.command ?? "请检查对话中的文件变更。"}</pre>{approval.cwd && <small>{approval.cwd}</small>}<p>{approval.reason}</p><div className="approval-actions"><button className="outline-button" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: false })}>拒绝</button><button className="primary" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: true })}>批准本次</button></div></div>)}
+        {snapshot.approvals.map(approval => <div className="approval-card" key={approval.id}><div><Icon name="shield" size={18} /><strong>{approval.is_delegated ? `委派子任务 (${agentName(approval.agent_id ?? agent)})` : agentName(approval.agent_id ?? agent)} 需要你批准{approval.method.includes("fileChange") ? "文件修改" : "命令执行"}</strong></div><pre>{approval.command ?? "请检查对话中的文件变更。"}</pre>{approval.cwd && <small>{approval.cwd}</small>}<p>{approval.reason}</p><div className="approval-actions"><button className="outline-button" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: false, delegatedTaskId: approval.delegated_task_id })}>拒绝</button><button className="primary" disabled={acting} onClick={() => action("agent_approve", { agent: approval.agent_id ?? agent, id: approval.id, allow: true, delegatedTaskId: approval.delegated_task_id })}>批准本次</button></div></div>)}
         {(error || snapshot.session?.error) && <div className="inline-error" role="alert">{error ?? snapshot.session?.error}</div>}
         {probe?.sidebar_warning && <div className="sync-notice">最近列表同步未完成，私聊仍可使用。{probe.sidebar_warning}</div>}
         {provider === "gemini" && <p className="panel-caption">Gemini 使用自己的 CLI 和原厂登录，当前已开启自动批准模式（无独立沙箱隔离）。</p>}

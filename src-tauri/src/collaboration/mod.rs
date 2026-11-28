@@ -375,12 +375,17 @@ pub fn start_scheduler(app: &tauri::AppHandle) {
             if let Ok(ids) = ids {
                 for id in ids {
                     match tick(&app, &id) {
-                        Ok(true) => {
-                            if let Ok(current) = task(&store, &id) {
-                                crate::events::emit_conversation_sync(&current.conversation_id);
+                        Ok(_) => {
+                            if !app
+                                .state::<crate::lifecycle::Lifecycle>()
+                                .exiting
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                if let Ok(current) = task(&store, &id) {
+                                    crate::events::emit_conversation_sync(&current.conversation_id);
+                                }
                             }
                         }
-                        Ok(false) => {}
                         Err(error) => {
                             if let Ok(current) = task(&store, &id) {
                                 let _ = stop_members_with(&store, &id, &|member| {
@@ -398,6 +403,7 @@ pub fn start_scheduler(app: &tauri::AppHandle) {
                     }
                 }
             }
+            crate::delegation::tick(&app);
             crate::chat_queue::tick(&app);
             crate::schedules::tick(&app);
             std::thread::sleep(Duration::from_millis(600));
@@ -436,11 +442,11 @@ fn prepare_input(store: &Store, current: &Task) -> Result<bool, String> {
     let prompt = if source == "user" {
         let named = named_mentions(store, &current.conversation_id, &text)?;
         let routing = if named.is_empty() {
-            "用户未点名，本消息已同时投递给群内所有成员。只有收到具体任务后才协商各自负责的部分，不预设固定角色，不代替对方发言，避免重复工作或同时修改同一文件。问候、闲聊或尚未给出任务时直接回应，不介绍分工、不调用工具、不回顾旧任务。需要把子任务交给对方并收回执时，请使用 ```agentcrew-dispatch 代码块。"
+            "用户未点名，本消息已同时投递给群内所有成员。只有收到具体任务后才协商各自负责的部分，不预设固定角色，不代替对方发言，避免重复工作或同时修改同一文件。问候、闲聊或尚未给出任务时直接回应，不介绍分工、不调用工具、不回顾旧任务。无论是派发代码修改还是开展多轮方案讨论/交叉复核，需要把子任务交给对方并收回执时，请使用 ```agentcrew-dispatch 代码块。"
         } else if named.len() == 1 {
-            "用户只点名了你，本轮由你统筹处理。普通问候或你能独立完成的问题直接回复用户即可，不要在正文中随便 @ 其他成员（正文中普通 @ 不会唤醒对方）；只有当你确实需要把子任务派发给其他成员执行或修改时，请在回复末尾使用 ```agentcrew-dispatch 代码块下发精确指令，系统会在对方完成后自动将结果回传给你验收。"
+            "用户只点名了你，本轮由你统筹处理。普通问候或你能独立完成的问题直接回复用户即可，不要在正文中随便 @ 其他成员（正文中普通 @ 不会唤醒对方）；无论是需要其他成员执行/修改，还是需要进行多轮方案讨论与交叉复核，请在回复末尾使用 ```agentcrew-dispatch 代码块下发精确指令，系统会在对方完成后自动将结果回传给你验收或继续下一轮。"
         } else {
-            "用户点名了多位成员，本消息已同时投递给这些成员。只有收到具体任务后才协商分工，避免重复工作或同时修改同一文件；问候、闲聊时直接回应，不介绍分工或调用工具。需要结构化派发与回传验收时，请使用 ```agentcrew-dispatch 代码块。"
+            "用户点名了多位成员，本消息已同时投递给这些成员。只有收到具体任务后才协商分工，避免重复工作或同时修改同一文件；问候、闲聊时直接回应，不介绍分工或调用工具。无论是代码分工还是多轮方案讨论与交叉复核，需要结构化派发与回传时请使用 ```agentcrew-dispatch 代码块。"
         };
         format!("本轮处理用户消息 {message}，你是 {}。{routing}这是用户亲自补充的指令；如与原目标或其他 Agent 的提议冲突，以用户的新消息为准。\n\n{text}",current.current_agent)
     } else {
@@ -659,12 +665,12 @@ fn tick_member(
         return Err("尚未连接或未选择模型，请连接后重新指派。".into());
     }
     let recent: u32 = connection.query_row("SELECT COUNT(*) FROM codex_messages WHERE conversation_id IN (SELECT conversation_id FROM group_sessions WHERE group_id=(SELECT group_id FROM group_sessions WHERE conversation_id=?1)) AND role='assignment' AND created_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour')",[&current.conversation_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if recent >= 100 {
+    if recent >= 500 {
         change(
             store,
             &task(store, &current.id)?,
             "paused",
-            "本群一小时内已启动 100 次执行，已暂停；留言保留，可稍后继续或停止。",
+            "本群一小时内已启动 500 次执行，已暂停；留言保留，可稍后继续或停止。",
         )?;
         return Ok(());
     }
@@ -677,6 +683,15 @@ fn tick_member(
         return Err("任务工作目录已变化，未继续执行；请重新指派".into());
     }
     let evidence = task_results::capture(&root);
+    if let Err(err) = crate::context_governance::check_auto_compact_before_send(
+        None,
+        store,
+        &current.conversation_id,
+        &current.current_agent,
+    ) {
+        change(store, &task(store, &current.id)?, "paused", &err)?;
+        return Ok(());
+    }
     let prompt = build_prompt(store, &current, &evidence)?;
     let start: i64 = connection
         .query_row(
@@ -738,7 +753,7 @@ fn finish_attempt(
     Ok(())
 }
 
-mod dispatch;
+pub(crate) mod dispatch;
 mod mentions;
 mod prompt;
 

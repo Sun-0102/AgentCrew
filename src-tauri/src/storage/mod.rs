@@ -105,6 +105,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/026_model_defaults.sql"),
     include_str!("../../migrations/027_knowledge_wiki.sql"),
     include_str!("../../migrations/028_wiki_private_default.sql"),
+    include_str!("../../migrations/029_delegation_and_context.sql"),
 ];
 
 pub(crate) const CURRENT_SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;

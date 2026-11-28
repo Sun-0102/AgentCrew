@@ -149,11 +149,24 @@ pub async fn agent_snapshot(
         snapshot["sessions"]=json!(sessions);
         snapshot["approvals"]=json!(approvals);
         snapshot["context_usage"]=context_usage;
+        snapshot["compacting_agent"]=json!(crate::context_governance::current_compacting_agent(&id));
+        snapshot["auto_compact_context"]=json!(crate::context_governance::get_auto_compact(&store).unwrap_or(true));
         if snapshot["session"].is_object() {snapshot["session"]["workspace_path"]=json!(store.conversation_root(&id)?);}
         if group_id.is_some() {
             snapshot["task"]=serde_json::to_value(crate::collaboration::latest(&store,&id)?).map_err(|e|e.to_string())?;
         } else {
             snapshot["queued_messages"] = json!(crate::chat_queue::list(&store, &id)?);
+            let delegated_tasks = crate::delegation::list_for_conversation(&store, &id)?;
+            let delegation_active = delegated_tasks
+                .iter()
+                .any(|t| matches!(t.status.as_str(), "queued" | "launching" | "running"));
+            let worker_approvals = crate::delegation::active_worker_approvals(&app, &store, &id)?;
+            if !worker_approvals.is_empty() {
+                approvals.extend(worker_approvals);
+                snapshot["approvals"] = json!(approvals);
+            }
+            snapshot["delegated_tasks"] = json!(delegated_tasks);
+            snapshot["delegation_active"] = json!(delegation_active);
         }
         Ok(snapshot)
     }).await.map_err(|e|e.to_string())?
@@ -200,7 +213,8 @@ pub async fn agent_send(
             }
         }
         let status = crate::chat_queue::session_status(&app, &store, &agent, &id)?;
-        let is_active = status.as_deref().is_some_and(crate::codex::active);
+        let delegation_active = crate::delegation::has_active(&store, &id)?;
+        let is_active = status.as_deref().is_some_and(crate::codex::active) || delegation_active;
         if is_active {
             let adapter = providers::resolve(&kind)?;
             if follow_up_mode.as_deref() == Some("steer")
@@ -228,15 +242,27 @@ pub async fn agent_send(
         if kind == "codex" {
             crate::speed::save(&store, &runtime, &model, service_tier.as_deref())?;
         }
+        let _ = crate::context_governance::check_auto_compact_before_send(Some(&app), &store, &id, &agent)?;
+        let rollover_ctx = crate::context_governance::take_pending_rollover_context(&id, &agent);
         let refs = wiki_refs.unwrap_or_default();
-        let extra_context = crate::wiki::build_runtime_context(
+        let wiki_ctx = crate::wiki::build_runtime_context(
             &store,
             &id,
             false,
             project_id.is_some(),
             &refs,
         )?;
-        agents::send_with_context(
+        let delegation_ctx = crate::delegation::prompt_context(&store, &id, &agent)?;
+        let extra_parts: Vec<String> = [rollover_ctx, wiki_ctx, delegation_ctx]
+            .into_iter()
+            .flatten()
+            .collect();
+        let extra_context = if extra_parts.is_empty() {
+            None
+        } else {
+            Some(extra_parts.join("\n\n"))
+        };
+        let res = agents::send_with_context(
             &app,
             &store,
             &agent,
@@ -245,7 +271,11 @@ pub async fn agent_send(
             &text,
             "user",
             extra_context.as_deref(),
-        )
+        );
+        if res.is_ok() {
+            crate::delegation::watch(&store, &id, &agent, &model);
+        }
+        res
     })
     .await
     .map_err(|e| e.to_string())?
@@ -266,6 +296,7 @@ pub async fn agent_cancel(
         let id = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
         if group_id.is_none() {
             let _ = crate::chat_queue::pause_all(&store, &id);
+            let _ = crate::delegation::cancel_all(&app, &store, &id);
         }
         agents::cancel(&app, &store, &agent, &id)
     })
@@ -282,6 +313,7 @@ pub async fn agent_approve(
     session_id: Option<String>,
     id: String,
     allow: bool,
+    delegated_task_id: Option<String>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let gate = app.state::<crate::deepseek::ExecutionGate>();
@@ -292,9 +324,93 @@ pub async fn agent_approve(
         if !adapter.supports_approval() {
             return Err("此运行组件不提供交互审批。".into());
         }
+        if let Some(task_id) = delegated_task_id {
+            let worker_cid: String = store
+                .connect()?
+                .query_row(
+                    "SELECT worker_conversation_id FROM delegated_tasks WHERE id=?1",
+                    [&task_id],
+                    |r| r.get(0),
+                )
+                .map_err(|_| "未找到指定的委派子任务。".to_string())?;
+            return adapter.approve(&app, &store, &worker_cid, &id, allow);
+        }
         let logical = conversation(&store, &agent, group_id.as_deref(), project_id.as_deref(), session_id.as_deref())?;
         let runtime = agents::binding(&store, &agent, &logical)?;
         adapter.approve(&app, &store, &runtime, &id, allow)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn agent_delegated_task_detail(
+    app: tauri::AppHandle,
+    task_id: String,
+) -> Result<crate::delegation::DelegatedTaskDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        crate::delegation::task_detail(&store, &task_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn context_compact(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    group_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<crate::context_governance::CompactResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        let conv = conversation(
+            &store,
+            &agent,
+            group_id.as_deref(),
+            project_id.as_deref(),
+            session_id.as_deref(),
+        )?;
+        crate::context_governance::compact_or_rollover(Some(&app), &store, &conv, &agent, true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn context_auto_compact_get(store: tauri::State<'_, Store>) -> Result<bool, String> {
+    crate::context_governance::get_auto_compact(&store)
+}
+
+#[tauri::command]
+pub fn context_auto_compact_set(
+    store: tauri::State<'_, Store>,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::context_governance::set_auto_compact(&store, enabled)
+}
+
+#[tauri::command]
+pub async fn conversation_fork(
+    app: tauri::AppHandle,
+    agent: String,
+    project_id: Option<String>,
+    group_id: Option<String>,
+    session_id: Option<String>,
+    up_to_message_id: Option<String>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<Store>();
+        crate::context_governance::fork_conversation(
+            &store,
+            &agent,
+            project_id.as_deref(),
+            group_id.as_deref(),
+            session_id.as_deref(),
+            up_to_message_id.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?

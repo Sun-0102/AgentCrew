@@ -357,7 +357,7 @@ fn structured_dispatch_routes_to_worker_and_returns_to_lead() {
     assert!(providers.tick(&store));
     assert_eq!(*providers.starts.borrow(), ["deepseek", "codex", "deepseek"]);
     let lead_review = member_task(&store, "task", "deepseek").unwrap();
-    assert!(lead_review.pending_prompt.contains("【执行回执】codex 已完成你派发的任务"));
+    assert!(lead_review.pending_prompt.contains("【执行/讨论回执】codex 已完成你派发的任务"));
 
     // Lead accepts without dispatching again -> task naturally finishes to idle.
     providers.finish(&store, &group, "deepseek", "已验收通过，折线图修改正确。");
@@ -376,20 +376,30 @@ fn structured_dispatch_pauses_at_hop_limit() {
     let providers = Providers::default();
     assert!(providers.tick(&store));
 
-    // 3 round trips = 6 hops (deepseek -> codex -> deepseek ...).
-    for _ in 0..3 {
-        providers.finish(
-            &store,
-            &group,
-            "deepseek",
-            "```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"继续修改\",\"return_to_sender\":true}\n```",
-        );
-        assert!(providers.tick(&store));
-        assert!(providers.tick(&store));
-        providers.finish(&store, &group, "codex", "改好了。");
-        assert!(providers.tick(&store));
+    assert_eq!(dispatch::MAX_DISPATCH_HOPS, 200);
+    // Run 2 real hops (1 round trip), then seed remaining hops up to MAX_DISPATCH_HOPS to verify limit enforcement fast.
+    providers.finish(
+        &store,
+        &group,
+        "deepseek",
+        "```agentcrew-dispatch\n{\"to\":\"codex\",\"instruction\":\"继续修改\",\"return_to_sender\":true}\n```",
+    );
+    assert!(providers.tick(&store));
+    assert!(providers.tick(&store));
+    providers.finish(&store, &group, "codex", "改好了。");
+    assert!(providers.tick(&store));
+    {
+        let conn = store.connect().unwrap();
+        for i in 3..=dispatch::MAX_DISPATCH_HOPS {
+            conn.execute(
+                "INSERT INTO group_task_inputs(task_id,message_id,target_agent,model,text,source_agent,status,generation)
+                 VALUES('task',?1,'codex','model','seed','deepseek','completed',(SELECT generation FROM group_tasks WHERE id='task'))",
+                [format!("seed-hop-{i}")],
+            )
+            .unwrap();
+        }
     }
-    // 7th hop attempt should pause the task instead of dispatching forever.
+    // Exceeding MAX_DISPATCH_HOPS should pause the task instead of dispatching forever.
     providers.finish(
         &store,
         &group,

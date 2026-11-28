@@ -53,16 +53,64 @@ export interface QueuedMessage {
   status: "queued" | "paused";
   created_at: string;
 }
+export interface DelegatedTask {
+  id: string;
+  parent_conversation_id: string;
+  parent_message_id: string | null;
+  lead_agent: string;
+  lead_model: string;
+  worker_agent: string;
+  worker_model: string;
+  worker_conversation_id: string;
+  instruction: string;
+  return_to_sender: boolean;
+  status: string;
+  hop_count: number;
+  summary: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  changed_files_count: number;
+}
+export interface DelegatedTaskMessage {
+  id: string;
+  role: string;
+  text: string;
+  created_at: string | null;
+}
+export interface DelegatedTaskDetail {
+  task: DelegatedTask;
+  messages: DelegatedTaskMessage[];
+  turn_diffs: { turn_id?: string; files?: { path: string; status?: string }[] }[];
+}
+export interface CompactResult {
+  compacted: boolean;
+  pre_tokens: number;
+  post_tokens: number;
+  mode: string;
+  message: string;
+}
+export interface ForkResult {
+  kind: "group" | "project" | "private";
+  group_id?: string;
+  project_id?: string;
+  session_id: string;
+  agent?: string;
+}
 export interface Snapshot {
   conversation_id?: string;
   sessions?: Partial<Record<string, Snapshot["session"]>>;
   context_usage?: Record<string, ContextUsage>;
+  compacting_agent?: string | null;
+  auto_compact_context?: boolean;
   agent?: string;
   task?: GroupTask | null;
   queued_messages?: QueuedMessage[];
+  delegated_tasks?: DelegatedTask[];
+  delegation_active?: boolean;
   session: { workspace_path?: string; thread_id: string; status: string; model: string; error: string | null } | null;
   messages: Message[];
-  approvals: { agent_id?: string; id: string; method: string; command: string | null; reason: string | null; cwd: string | null }[];
+  approvals: { agent_id?: string; id: string; method: string; command: string | null; reason: string | null; cwd: string | null; delegated_task_id?: string; is_delegated?: boolean }[];
 }
 // In runtime commands groupId identifies the selected execution conversation, including the default session.
 export interface Scope { projectId: string | null; groupId: string | null; sessionId?: string | null; agent?: string }
@@ -271,6 +319,13 @@ export async function updateGroupMembers(groupId: string, add: string[], remove:
   return saveGroup(group.name, members, group.project_id, groupId);
 }
 export const getSnapshot = async (scope: Scope): Promise<Snapshot> => desktop ? invoke<Snapshot>("agent_snapshot", { ...scope, agent: scope.agent ?? "codex" }) : { ...emptySnapshot, messages: readPreview<Record<string, Message[]>>(previewMessagesKey, {})[scope.groupId ?? scope.sessionId ?? (scope.agent === "deepseek" ? "deepseek" : "personal")] ?? [] };
+export const delegatedTaskDetail = (taskId: string) => invoke<DelegatedTaskDetail>("agent_delegated_task_detail", { taskId });
+export const compactContext = (params: { agent: string; projectId?: string | null; groupId?: string | null; sessionId?: string | null }) =>
+  invoke<CompactResult>("context_compact", params);
+export const getAutoCompactContext = () => invoke<boolean>("context_auto_compact_get");
+export const setAutoCompactContext = (enabled: boolean) => invoke<void>("context_auto_compact_set", { enabled });
+export const forkConversation = (params: { agent: string; projectId?: string | null; groupId?: string | null; sessionId?: string | null; upToMessageId?: string | null }) =>
+  invoke<ForkResult>("conversation_fork", params);
 export const probeAgent = (agent: string) => invoke<Probe>("agent_probe", { agent });
 export const probeCodex = () => probeAgent("codex");
 export const probeDeepSeek = () => probeAgent("deepseek");

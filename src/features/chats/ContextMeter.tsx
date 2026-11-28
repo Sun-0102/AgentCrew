@@ -63,12 +63,18 @@ export default function ContextMeter({
   isGroup,
   model,
   contextUsage,
+  compactingAgent,
+  compacting,
+  onCompact,
 }: {
   agent: string;
   members: string[];
   isGroup: boolean;
   model: string;
   contextUsage?: Record<string, ContextUsage>;
+  compactingAgent?: string | null;
+  compacting?: boolean;
+  onCompact?: () => void;
 }) {
   if (!agent) return null;
 
@@ -91,7 +97,11 @@ export default function ContextMeter({
   const memberList = isGroup && members.length > 0 ? members : [agent];
   const memberItems = memberList.map(id => contextUsage?.[id] ?? fallback(id, id === agent ? model : ""));
 
+  const isCompacting = !!compacting || !!compactingAgent;
+  const showCompactAction = onCompact && (current.percent >= 70 || isCompacting);
+
   return (
+    <div className="context-meter-wrap">
     <div
       className={`context-meter level-${level}${current.usedTokens === 0 ? " empty" : ""}`}
       tabIndex={0}
@@ -164,6 +174,18 @@ export default function ContextMeter({
           )}
         </div>
       </div>
+    </div>
+    {showCompactAction && (
+      <button
+        type="button"
+        className={`context-compact-btn${isCompacting ? " is-compacting" : ""}`}
+        disabled={isCompacting}
+        onClick={onCompact}
+        title="生成阶段检查点摘要并轮转底层会话（前端聊天记录完整保留）"
+      >
+        {isCompacting ? "正在整理上下文…" : "整理上下文"}
+      </button>
+    )}
     </div>
   );
 }

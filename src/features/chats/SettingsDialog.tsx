@@ -6,7 +6,7 @@ import Icon from "../../components/Icon";
 import type { AppInfo } from "../projects/api";
 import UsageDashboard from "../usage/UsageDashboard";
 import type { UsageDashboardData } from "../usage/api";
-import { desktop, refreshAgents, type Agent, type DiscoveryItem, type Model, type Probe, type ProviderCapabilities } from "./api";
+import { desktop, getAutoCompactContext, refreshAgents, setAutoCompactContext, type Agent, type DiscoveryItem, type Model, type Probe, type ProviderCapabilities } from "./api";
 import {
   findDirectModelDefault,
   type ModelDefaultScope,
@@ -107,6 +107,28 @@ export default function SettingsDialog({
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [defaultScope, setDefaultScope] = useState<ModelDefaultScope>("private");
   const [savingDefaultKey, setSavingDefaultKey] = useState<string | null>(null);
+  const [autoCompact, setAutoCompact] = useState(true);
+  const [savingAutoCompact, setSavingAutoCompact] = useState(false);
+
+  useEffect(() => {
+    if (!desktop) return;
+    void getAutoCompactContext()
+      .then(v => setAutoCompact(v))
+      .catch(() => {});
+  }, []);
+
+  async function toggleAutoCompact(next: boolean) {
+    setSavingAutoCompact(true);
+    setAutoCompact(next);
+    try {
+      await setAutoCompactContext(next);
+    } catch (err) {
+      setAutoCompact(!next);
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingAutoCompact(false);
+    }
+  }
 
   useEffect(() => {
     setTab(initialTab);
@@ -265,6 +287,20 @@ export default function SettingsDialog({
               <p className="dialog-intro settings-pane-intro">
                 为私聊（含项目空间）与群聊预设各 Agent 的默认模型、思考程度与响应速度。新建会话将自动套用；在聊天页面内临时调整则仅保留于当前会话，不会覆盖全局默认。
               </p>
+
+              <label className="defaults-follow-card" style={{ marginBottom: 12 }}>
+                <div className="defaults-follow-text">
+                  <strong>接近上下文上限时自动整理</strong>
+                  <small>开启后，当会话上下文占用达到 80% 时自动生成阶段检查点并无感轮转底层会话（聊天历史完整保留）；关闭后仅在 70% 时提示手动整理。</small>
+                </div>
+                <input
+                  type="checkbox"
+                  className="defaults-switch"
+                  checked={autoCompact}
+                  disabled={savingAutoCompact}
+                  onChange={e => void toggleAutoCompact(e.target.checked)}
+                />
+              </label>
 
               <div className="defaults-scope-bar" role="tablist" aria-label="默认配置场景">
                 <button

@@ -7,7 +7,9 @@ mod codex;
 mod codex_sidebar;
 mod collaboration;
 mod commands;
+mod context_governance;
 mod deepseek;
+mod delegation;
 mod events;
 mod gemini;
 mod git;
@@ -49,6 +51,7 @@ pub fn run() {
             gemini::recover(&store)?;
             claude::recover(&store)?;
             collaboration::recover(&store)?;
+            delegation::recover(&store)?;
             chat_queue::recover(&store)?;
             schedules::recover(&store)?;
             pairing::recover(&store)?;
@@ -114,6 +117,11 @@ pub fn run() {
             agent_commands::agent_queue_clear,
             agent_commands::agent_queue_resume,
             agent_commands::agent_queue_send_now,
+            agent_commands::agent_delegated_task_detail,
+            agent_commands::context_compact,
+            agent_commands::context_auto_compact_get,
+            agent_commands::context_auto_compact_set,
+            agent_commands::conversation_fork,
             agent_commands::agent_group_send,
             agent_commands::agent_update,
             agent_commands::pairing_create,

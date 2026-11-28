@@ -57,6 +57,9 @@ fn snippet(text: &str, keywords: &[String]) -> String {
 }
 
 pub fn build(store: &Store, conversation: &str, query: &str) -> Result<String, String> {
+    let checkpoint = crate::context_governance::ensure_checkpoint(store, conversation)
+        .ok()
+        .flatten();
     let mut connection = store.connect()?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
     let mut statement = tx.prepare("SELECT sequence,role,agent,item_id,text FROM codex_messages WHERE conversation_id=?1 AND role IN ('user','assistant') ORDER BY sequence DESC LIMIT 20").map_err(|e| e.to_string())?;
@@ -74,17 +77,21 @@ pub fn build(store: &Store, conversation: &str, query: &str) -> Result<String, S
         append(&mut recent_text, &format!("{role} / {agent} / 消息 {id}：\n{}", clip(text, 3_000)), RECENT_BYTES);
     }
 
-    // Extract source text only; an agent's statement must not become a verified conclusion.
-    tx.execute("INSERT INTO group_message_summaries(sequence,conversation_id,excerpt) SELECT sequence,conversation_id,CASE WHEN length(text)>400 THEN substr(text,1,240)||char(10)||'[中间省略]'||char(10)||substr(text,-160) ELSE text END FROM codex_messages WHERE conversation_id=?1 AND sequence<?2 AND role IN ('user','assistant') AND sequence>COALESCE((SELECT MAX(sequence) FROM group_message_summaries WHERE conversation_id=?1),0)", params![conversation, oldest]).map_err(|e| e.to_string())?;
-    let mut statement = tx.prepare("SELECT m.role,m.agent,m.item_id,s.excerpt FROM group_message_summaries s JOIN codex_messages m ON m.sequence=s.sequence WHERE s.conversation_id=?1 AND s.sequence<?2 ORDER BY s.sequence DESC LIMIT 16").map_err(|e| e.to_string())?;
-    let rows = statement.query_map(params![conversation, oldest], |r| {
-        Ok(format!("{} / {} / 消息 {}：\n{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
-    }).map_err(|e| e.to_string())?;
-    let mut summaries = String::new();
-    for row in rows {
-        append(&mut summaries, &row.map_err(|e| e.to_string())?, SUMMARY_BYTES);
-    }
-    drop(statement);
+    let summaries = if let Some(cp) = checkpoint {
+        clip(&cp, SUMMARY_BYTES)
+    } else {
+        // Fallback excerpt before first 10-turn checkpoint
+        tx.execute("INSERT INTO group_message_summaries(sequence,conversation_id,excerpt) SELECT sequence,conversation_id,CASE WHEN length(text)>400 THEN substr(text,1,240)||char(10)||'[中间省略]'||char(10)||substr(text,-160) ELSE text END FROM codex_messages WHERE conversation_id=?1 AND sequence<?2 AND role IN ('user','assistant') AND sequence>COALESCE((SELECT MAX(sequence) FROM group_message_summaries WHERE conversation_id=?1),0)", params![conversation, oldest]).map_err(|e| e.to_string())?;
+        let mut statement = tx.prepare("SELECT m.role,m.agent,m.item_id,s.excerpt FROM group_message_summaries s JOIN codex_messages m ON m.sequence=s.sequence WHERE s.conversation_id=?1 AND s.sequence<?2 ORDER BY s.sequence DESC LIMIT 16").map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![conversation, oldest], |r| {
+            Ok(format!("{} / {} / 消息 {}：\n{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        }).map_err(|e| e.to_string())?;
+        let mut s = String::new();
+        for row in rows {
+            append(&mut s, &row.map_err(|e| e.to_string())?, SUMMARY_BYTES);
+        }
+        s
+    };
 
     let keywords = terms(query);
     let mut related = String::new();
