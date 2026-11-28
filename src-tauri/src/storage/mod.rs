@@ -1,6 +1,68 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+const MAX_IDLE_CONNECTIONS_PER_DB: usize = 8;
+
+type PoolSlot = Arc<Mutex<Vec<Connection>>>;
+
+fn global_pools() -> &'static Mutex<HashMap<PathBuf, PoolSlot>> {
+    static POOLS: OnceLock<Mutex<HashMap<PathBuf, PoolSlot>>> = OnceLock::new();
+    POOLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pool_for_path(path: &Path) -> PoolSlot {
+    let mut map = global_pools().lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
+}
+
+fn clear_pool_for_path(path: &Path) {
+    let slot = {
+        let map = global_pools().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(path).cloned()
+    };
+    if let Some(slot) = slot {
+        slot.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+pub(crate) struct PooledConnection {
+    conn: Option<Connection>,
+    pool: PoolSlot,
+}
+
+impl Deref for PooledConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("pooled connection already taken")
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("pooled connection already taken")
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            if !conn.is_autocommit() {
+                return;
+            }
+            let mut idle = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            if idle.len() < MAX_IDLE_CONNECTIONS_PER_DB {
+                idle.push(conn);
+            }
+        }
+    }
+}
 
 pub struct Store {
     pub path: PathBuf,
@@ -49,6 +111,7 @@ pub(crate) const CURRENT_SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
 impl Store {
     pub fn open(path: PathBuf) -> Result<Self, String> {
+        clear_pool_for_path(&path);
         let store = Self { path };
         let mut connection = store.connect()?;
         connection
@@ -83,7 +146,15 @@ impl Store {
         Ok(store)
     }
 
-    pub(crate) fn connect(&self) -> Result<Connection, String> {
+    pub(crate) fn connect(&self) -> Result<PooledConnection, String> {
+        let pool = pool_for_path(&self.path);
+        let cached = pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        if let Some(conn) = cached {
+            return Ok(PooledConnection {
+                conn: Some(conn),
+                pool,
+            });
+        }
         let connection = Connection::open(&self.path).map_err(|e| e.to_string())?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -92,7 +163,10 @@ impl Store {
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|e| e.to_string())?;
         let _ = connection.pragma_update(None, "synchronous", "NORMAL");
-        Ok(connection)
+        Ok(PooledConnection {
+            conn: Some(connection),
+            pool,
+        })
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>, String> {
@@ -652,5 +726,27 @@ mod tests {
                 .unwrap(),
             99
         );
+    }
+
+    #[test]
+    fn connection_pool_reuses_idle_connections_across_store_handles() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pooled.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        let slot = pool_for_path(&path);
+        assert_eq!(slot.lock().unwrap().len(), 1);
+        {
+            let conn = store.connect().unwrap();
+            assert_eq!(slot.lock().unwrap().len(), 0);
+            let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+            assert_eq!(fk, 1);
+        }
+        assert_eq!(slot.lock().unwrap().len(), 1);
+        let other_handle = Store { path: path.clone() };
+        {
+            let _conn = other_handle.connect().unwrap();
+            assert_eq!(slot.lock().unwrap().len(), 0);
+        }
+        assert_eq!(slot.lock().unwrap().len(), 1);
     }
 }

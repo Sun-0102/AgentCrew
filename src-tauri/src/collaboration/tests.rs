@@ -51,7 +51,7 @@ fn enqueue(store: &Store, agent: &str, message: &str) {
 
 #[test]
 fn recipient_selection_broadcasts_by_default_and_respects_explicit_mentions() {
-    let cases: Value = serde_json::from_str(include_str!("../../tests/fixtures/group-routing.json")).unwrap();
+    let cases: Value = serde_json::from_str(include_str!("../../../tests/fixtures/group-routing.json")).unwrap();
     for case in cases.as_array().unwrap() {
         let members: Vec<String> = serde_json::from_value(case["members"].clone()).unwrap();
         assert_eq!(json!(message_recipients(case["text"].as_str().unwrap(),&members)),case["expected"],"{}",case["text"]);
