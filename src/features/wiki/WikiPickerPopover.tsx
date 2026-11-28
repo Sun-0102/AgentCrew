@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Icon from "../../components/Icon";
 import {
-  listWikiSources,
   searchWiki,
-  setWikiBinding,
   WIKI_BINDING_NONE,
   type ExplicitWikiRef,
+  type WikiBinding,
   type WikiSearchHit,
   type WikiSource,
 } from "./api";
@@ -14,52 +13,97 @@ interface Props {
   conversationId: string;
   isGroup: boolean;
   isProject: boolean;
-  explicitBindingSourceId: string | null;
+  disabled?: boolean;
+  sources: WikiSource[];
+  explicitBinding: WikiBinding | null;
   defaultPrivateSourceId: string | null;
-  effectiveSourceId: string | null;
+  effectiveSourceIds: string[];
   selectedRefs: ExplicitWikiRef[];
-  onBindingChanged: (explicitSourceId: string | null) => void;
+  onOpen?: () => void;
+  onSaveBinding: (nextSourceIds: string[] | null, explicitlyDisabled?: boolean) => Promise<void>;
   onToggleRef: (hit: WikiSearchHit) => void;
-  onClose: () => void;
+  onClearRefs: () => void;
+}
+
+function cleanSnippetText(raw: string): string {
+  return raw
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => alias || target)
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(?:^|\s)#{1,6}\s+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export default function WikiPickerPopover({
   conversationId,
   isGroup,
   isProject,
-  explicitBindingSourceId,
+  disabled = false,
+  sources,
+  explicitBinding,
   defaultPrivateSourceId,
-  effectiveSourceId,
+  effectiveSourceIds,
   selectedRefs,
-  onBindingChanged,
+  onOpen,
+  onSaveBinding,
   onToggleRef,
-  onClose,
+  onClearRefs,
 }: Props) {
-  const [sources, setSources] = useState<WikiSource[]>([]);
+  const id = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
   const [savingBinding, setSavingBinding] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<WikiSearchHit[]>([]);
   const [loading, setLoading] = useState(false);
+  const [position, setPosition] = useState({ left: 12, bottom: 72, width: 410 });
+
+  const effectiveSet = useMemo(() => new Set(effectiveSourceIds), [effectiveSourceIds]);
+  const selectedRefSet = useMemo(
+    () => new Set(selectedRefs.map(r => `${r.source_id}:${r.rel_path}`)),
+    [selectedRefs],
+  );
+  const effectiveKey = effectiveSourceIds.join(",");
+
+  const isExplicitlyDisabled = explicitBinding?.source_id === WIKI_BINDING_NONE;
+  const isFollowingDefault = !isGroup && !isProject && explicitBinding === null && !!defaultPrivateSourceId;
+  const canRestoreDefault = !isGroup && !isProject && !!defaultPrivateSourceId && explicitBinding !== null;
+  const showSourceSelector = !isGroup && !!conversationId;
+
+  function updatePosition() {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(410, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    const bottom = Math.max(12, window.innerHeight - rect.top + 10);
+    setPosition({ left, bottom, width });
+  }
 
   useEffect(() => {
-    let cancelled = false;
-    void listWikiSources()
-      .then(list => {
-        if (!cancelled) setSources(list);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+    const close = () => panelRef.current?.hidePopover();
+    window.addEventListener("resize", close);
+    return () => window.removeEventListener("resize", close);
   }, []);
 
   useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => searchRef.current?.focus(), 40);
+    return () => window.clearTimeout(timer);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     let cancelled = false;
     setLoading(true);
     const timer = window.setTimeout(() => {
       void searchWiki({
         query,
-        sourceId: effectiveSourceId || null,
+        sourceIds: effectiveSourceIds.length > 0 ? effectiveSourceIds : null,
         limit: 20,
         offset: 0,
       })
@@ -77,156 +121,253 @@ export default function WikiPickerPopover({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, effectiveSourceId]);
+  }, [open, query, effectiveKey]);
 
-  const selectedSet = new Set(selectedRefs.map(r => `${r.source_id}:${r.rel_path}`));
-  const defaultSourceName = sources.find(s => s.id === defaultPrivateSourceId)?.name;
-
-  // Select value: "" = follow default (or none in project), "__none__" = explicitly disabled, "<id>" = bound source
-  const selectValue = explicitBindingSourceId ?? "";
-
-  async function handleChangeBinding(nextValue: string) {
+  async function handleToggleSource(sourceId: string) {
     if (!conversationId || savingBinding) return;
     setSavingBinding(true);
     try {
-      const targetSource = nextValue === "" ? null : nextValue;
-      await setWikiBinding({
-        conversationId,
-        sourceId: targetSource,
-      });
-      onBindingChanged(targetSource);
+      const next = effectiveSet.has(sourceId)
+        ? effectiveSourceIds.filter(id => id !== sourceId)
+        : [...effectiveSourceIds, sourceId];
+      if (next.length === 0) {
+        const needExplicitNone = !isProject && !!defaultPrivateSourceId;
+        await onSaveBinding(null, needExplicitNone);
+      } else {
+        await onSaveBinding(next, false);
+      }
     } finally {
       setSavingBinding(false);
     }
   }
 
+  async function handleClearSources() {
+    if (!conversationId || savingBinding) return;
+    setSavingBinding(true);
+    try {
+      const needExplicitNone = !isProject && !!defaultPrivateSourceId;
+      await onSaveBinding(null, needExplicitNone);
+    } finally {
+      setSavingBinding(false);
+    }
+  }
+
+  async function handleRestoreDefault() {
+    if (!conversationId || savingBinding) return;
+    setSavingBinding(true);
+    try {
+      await onSaveBinding(null, false);
+    } finally {
+      setSavingBinding(false);
+    }
+  }
+
+  const boundNames = useMemo(() => {
+    const map = new Map(sources.map(s => [s.id, s.name]));
+    return effectiveSourceIds.map(sid => map.get(sid) ?? sid);
+  }, [sources, effectiveSourceIds]);
+
+  const activeCount = effectiveSourceIds.length + selectedRefs.length;
+  const triggerTitle = boundNames.length
+    ? `已关联知识库：${boundNames.join("、")}${selectedRefs.length ? ` · 已点名 ${selectedRefs.length} 篇文档` : ""}`
+    : selectedRefs.length
+      ? `已点名 ${selectedRefs.length} 篇文档（点击管理知识库）`
+      : "关联知识库或点名文档";
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        bottom: "calc(100% + 8px)",
-        left: 0,
-        width: 390,
-        maxWidth: "min(390px, 86vw)",
-        background: "var(--surface, #fff)",
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        boxShadow: "0 12px 32px rgba(0,0,0,0.16)",
-        padding: 10,
-        zIndex: 40,
-      }}
-      role="dialog"
-      aria-label="知识库与文档引用"
-    >
-      {/* 顶部 1 秒切换当前会话知识库（非群聊） */}
-      {!isGroup && sources.length > 0 && conversationId && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            paddingBottom: 8,
-            marginBottom: 8,
-            borderBottom: "1px solid var(--border)",
-          }}
-        >
-          <span style={{ fontSize: 12, opacity: 0.75, flexShrink: 0 }}>本会话知识库</span>
-          <select
-            className="text-input"
-            style={{ flex: 1, fontSize: 12, padding: "4px 8px" }}
-            disabled={savingBinding}
-            value={selectValue}
-            onChange={e => void handleChangeBinding(e.target.value)}
-          >
-            {isProject ? (
-              <option value="">不关联（默认，防代码污染）</option>
-            ) : (
-              <>
-                <option value="">
-                  {defaultSourceName ? `跟随默认（${defaultSourceName}）` : "跟随默认（不关联）"}
-                </option>
-                {defaultPrivateSourceId && (
-                  <option value={WIKI_BINDING_NONE}>本会话不关联</option>
-                )}
-              </>
-            )}
-            {sources.map(s => (
-              <option key={s.id} value={s.id}>
-                {s.name}（{s.doc_count} 篇）
-              </option>
-            ))}
-          </select>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-            <Icon name="close" size={16} />
-          </button>
-        </div>
-      )}
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`icon-button wiki-picker-trigger ${open || activeCount > 0 ? "selected" : ""}`}
+        title={triggerTitle}
+        aria-label="知识库与文档引用"
+        aria-expanded={open}
+        aria-controls={id}
+        aria-haspopup="dialog"
+        popoverTarget={id}
+        disabled={disabled}
+        onClick={updatePosition}
+      >
+        <Icon name="file" size={18} />
+        {activeCount > 0 && <span className="wiki-trigger-badge">{activeCount}</span>}
+      </button>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-        <input
-          className="text-input"
-          style={{ flex: 1, fontSize: 13, padding: "6px 10px" }}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="临时点名某篇文档（可选，仅本轮直传）…"
-          autoFocus
-        />
-        {(isGroup || !sources.length || !conversationId) && (
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-            <Icon name="close" size={16} />
-          </button>
-        )}
-      </div>
-
-      <div style={{ maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-        {loading ? (
-          <p className="field-help" style={{ padding: "8px 4px" }}>检索中…</p>
-        ) : !hits.length ? (
-          <p className="field-help" style={{ padding: "8px 4px" }}>
-            未找到匹配文档。可在「工作台设置 ➔ 知识库」添加本地文件夹或同步 LLM Wiki。
-          </p>
-        ) : (
-          hits.map(hit => {
-            const key = `${hit.source_id}:${hit.rel_path}`;
-            const active = selectedSet.has(key);
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onToggleRef(hit)}
-                style={{
-                  textAlign: "left",
-                  padding: "7px 9px",
-                  borderRadius: 7,
-                  border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
-                  background: active ? "var(--accent-soft, rgba(59,130,246,0.1))" : "transparent",
-                  cursor: "pointer",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 2,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                  <strong style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {hit.title}
-                  </strong>
-                  <span style={{ fontSize: 11, opacity: 0.65, flexShrink: 0 }}>
-                    {active ? "已选 ✓" : hit.top_domain || hit.source_name}
-                  </span>
-                </div>
-                <span style={{ fontSize: 11, opacity: 0.65, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {hit.rel_path}
+      <div
+        ref={panelRef}
+        id={id}
+        popover="auto"
+        role="dialog"
+        aria-label="知识库与文档引用"
+        className="model-config-popover wiki-picker-popover"
+        style={{ left: position.left, bottom: position.bottom, width: position.width }}
+        onToggle={event => {
+          const isOpen = event.newState === "open";
+          setOpen(isOpen);
+          if (isOpen) {
+            updatePosition();
+            onOpen?.();
+          }
+        }}
+      >
+        {showSourceSelector && (
+          <div className="wiki-picker-section wiki-picker-sources-section">
+            <div className="wiki-picker-section-header">
+              <div className="wiki-picker-section-title">
+                <span>本会话知识库</span>
+                <span className={`wiki-picker-pill ${effectiveSourceIds.length > 0 ? "is-bound" : ""}`}>
+                  {effectiveSourceIds.length > 0
+                    ? isFollowingDefault
+                      ? "默认"
+                      : `已选 ${effectiveSourceIds.length}`
+                    : isExplicitlyDisabled
+                      ? "已取消"
+                      : "未关联"}
                 </span>
-                {hit.snippet && (
-                  <span style={{ fontSize: 11.5, opacity: 0.8, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                    {hit.snippet}
-                  </span>
+              </div>
+              <div className="wiki-picker-section-actions">
+                {canRestoreDefault && (
+                  <button
+                    type="button"
+                    className="wiki-picker-text-btn"
+                    disabled={savingBinding}
+                    onClick={() => void handleRestoreDefault()}
+                  >
+                    恢复默认
+                  </button>
                 )}
-              </button>
-            );
-          })
+                {effectiveSourceIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="wiki-picker-text-btn is-danger"
+                    disabled={savingBinding}
+                    onClick={() => void handleClearSources()}
+                  >
+                    取消关联
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {sources.length === 0 ? (
+              <p className="wiki-picker-empty">
+                尚未添加知识库，可在「工作台设置 ➔ 知识库」添加本地文件夹或同步 LLM Wiki。
+              </p>
+            ) : (
+              <div className="wiki-source-list" role="listbox" aria-multiselectable="true" aria-label="选择知识库">
+                {sources.map(source => {
+                  const checked = effectiveSet.has(source.id);
+                  const isDefault = !isProject && source.id === defaultPrivateSourceId;
+                  return (
+                    <button
+                      key={source.id}
+                      type="button"
+                      role="option"
+                      aria-selected={checked}
+                      disabled={savingBinding}
+                      className={`wiki-source-option ${checked ? "is-selected" : ""}`}
+                      onClick={() => void handleToggleSource(source.id)}
+                    >
+                      <span className={`wiki-source-check ${checked ? "is-checked" : ""}`} aria-hidden="true">
+                        {checked && <Icon name="check" size={12} />}
+                      </span>
+                      <span className="wiki-source-name">{source.name}</span>
+                      {isDefault && <span className="wiki-source-tag">默认</span>}
+                      <span className="wiki-source-count">{source.doc_count} 篇</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
+
+        <div className="wiki-picker-section wiki-picker-docs-section">
+          <div className="wiki-picker-section-header">
+            <div className="wiki-picker-section-title">
+              <span>临时点名文档</span>
+              <span className="wiki-picker-hint">仅本轮直传</span>
+            </div>
+            {selectedRefs.length > 0 && (
+              <div className="wiki-picker-section-actions">
+                <span className="wiki-picker-pill is-bound">已选 {selectedRefs.length}</span>
+                <button type="button" className="wiki-picker-text-btn" onClick={onClearRefs}>
+                  清空
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="wiki-picker-search">
+            <Icon name="search" size={14} />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={
+                effectiveSourceIds.length > 0
+                  ? "在已关联知识库中搜索文档…"
+                  : "在全部知识库中搜索文档…"
+              }
+            />
+            {query && (
+              <button
+                type="button"
+                className="wiki-picker-search-clear"
+                onClick={() => {
+                  setQuery("");
+                  searchRef.current?.focus();
+                }}
+                aria-label="清空搜索"
+              >
+                <Icon name="close" size={13} />
+              </button>
+            )}
+          </div>
+
+          <div className="wiki-picker-hits">
+            {loading ? (
+              <p className="wiki-picker-empty">检索中…</p>
+            ) : !hits.length ? (
+              <p className="wiki-picker-empty">
+                未找到匹配文档。可在「工作台设置 ➔ 知识库」添加本地文件夹或同步 LLM Wiki。
+              </p>
+            ) : (
+              hits.map(hit => {
+                const key = `${hit.source_id}:${hit.rel_path}`;
+                const active = selectedRefSet.has(key);
+                const snippet = hit.snippet ? cleanSnippetText(hit.snippet) : "";
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`wiki-hit-item ${active ? "is-active" : ""}`}
+                    onClick={() => onToggleRef(hit)}
+                  >
+                    <div className="wiki-hit-top">
+                      <strong className="wiki-hit-title">{hit.title}</strong>
+                      <span className={`wiki-hit-badge ${active ? "is-active" : ""}`}>
+                        {active ? (
+                          <>
+                            <Icon name="check" size={11} />
+                            已选
+                          </>
+                        ) : (
+                          effectiveSourceIds.length !== 1
+                            ? hit.source_name
+                            : hit.top_domain || hit.source_name
+                        )}
+                      </span>
+                    </div>
+                    <span className="wiki-hit-path">{hit.rel_path}</span>
+                    {snippet && <span className="wiki-hit-snippet">{snippet}</span>}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }

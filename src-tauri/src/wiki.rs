@@ -1,5 +1,5 @@
 use crate::storage::Store;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -19,6 +19,45 @@ static PENDING_GROUP_REFS: OnceLock<Mutex<HashMap<String, Vec<ExplicitWikiRef>>>
 static SESSION_INJECTED_HASHES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 pub const BINDING_NONE_SENTINEL: &str = "__none__";
+
+pub fn parse_binding_source_ids(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == BINDING_NONE_SENTINEL {
+        return Vec::new();
+    }
+    let items: Vec<String> = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(trimmed).unwrap_or_else(|_| vec![trimmed.to_owned()])
+    } else if trimmed.contains(',') {
+        trimmed.split(',').map(|s| s.trim().to_owned()).collect()
+    } else {
+        vec![trimmed.to_owned()]
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let s = item.trim();
+        if !s.is_empty() && s != BINDING_NONE_SENTINEL && seen.insert(s.to_owned()) {
+            out.push(s.to_owned());
+        }
+    }
+    out
+}
+
+pub fn encode_binding_source_ids(ids: &[String]) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut cleaned = Vec::new();
+    for item in ids {
+        let s = item.trim();
+        if !s.is_empty() && s != BINDING_NONE_SENTINEL && seen.insert(s.to_owned()) {
+            cleaned.push(s.to_owned());
+        }
+    }
+    match cleaned.len() {
+        0 => None,
+        1 => Some(cleaned.remove(0)),
+        _ => serde_json::to_string(&cleaned).ok(),
+    }
+}
 
 pub fn set_local_http_endpoint(base_url: String, token: String) {
     let slot = LOCAL_HTTP_ENDPOINT.get_or_init(|| Mutex::new(None));
@@ -98,6 +137,8 @@ pub struct WikiHabitPage {
 pub struct WikiBinding {
     pub conversation_id: String,
     pub source_id: String,
+    #[serde(default)]
+    pub source_ids: Vec<String>,
     pub domain_filter: Option<String>,
     pub include_archives: bool,
     pub last_injected_hash: Option<String>,
@@ -807,11 +848,38 @@ pub fn remove_source(store: &Store, source_id: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM wiki_habit_pages WHERE source_id = ?1", [source_id])
         .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM conversation_wiki_bindings WHERE source_id = ?1",
-        [source_id],
-    )
-    .map_err(|e| e.to_string())?;
+    let existing_bindings: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT conversation_id, source_id FROM conversation_wiki_bindings")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok).collect()
+    };
+    for (cid, raw_sid) in existing_bindings {
+        if raw_sid == BINDING_NONE_SENTINEL {
+            continue;
+        }
+        let ids = parse_binding_source_ids(&raw_sid);
+        if !ids.iter().any(|id| id == source_id) {
+            continue;
+        }
+        let remaining: Vec<String> = ids.into_iter().filter(|id| id != source_id).collect();
+        if let Some(encoded) = encode_binding_source_ids(&remaining) {
+            tx.execute(
+                "UPDATE conversation_wiki_bindings SET source_id = ?1, last_injected_hash = NULL WHERE conversation_id = ?2",
+                params![encoded, cid],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute(
+                "DELETE FROM conversation_wiki_bindings WHERE conversation_id = ?1",
+                [&cid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
     tx.execute(
         "UPDATE wiki_settings SET default_private_source_id = NULL WHERE default_private_source_id = ?1",
         [source_id],
@@ -1257,37 +1325,48 @@ pub fn search_fts(
         .map(str::to_owned);
 
     let fts_expr = build_fts_query(query);
+    let source_ids: Vec<String> = source_id
+        .map(parse_binding_source_ids)
+        .unwrap_or_default();
+    let has_source_filter = !source_ids.is_empty();
     let mut hits = Vec::new();
 
     if let Some(expr) = fts_expr {
-        let sql = "
-            SELECT d.source_id, s.name, s.root_path, s.content_subdir,
-                   d.rel_path, d.top_domain, d.title, d.tags, d.is_deprecated,
-                   f.section_heading,
-                   bm25(wiki_sections_fts, 4.0, 1.0) AS rank
-            FROM wiki_sections_fts f
-            JOIN wiki_documents d ON d.source_id = f.source_id AND d.rel_path = f.rel_path
-            JOIN wiki_sources s ON s.id = d.source_id
-            WHERE wiki_sections_fts MATCH ?1
-              AND (?2 IS NULL OR d.source_id = ?2)
-              AND (?3 IS NULL OR d.top_domain = ?3)
-              AND (?4 = 1 OR s.tier = 'core_wiki' OR (?2 IS NOT NULL AND d.source_id = ?2))
-              AND (?5 = 1 OR d.is_deprecated = 0)
-            ORDER BY rank ASC
-            LIMIT ?6 OFFSET ?7
-        ";
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut sql = String::from(
+            "SELECT d.source_id, s.name, s.root_path, s.content_subdir,
+                    d.rel_path, d.top_domain, d.title, d.tags, d.is_deprecated,
+                    f.section_heading,
+                    bm25(wiki_sections_fts, 4.0, 1.0) AS rank
+             FROM wiki_sections_fts f
+             JOIN wiki_documents d ON d.source_id = f.source_id AND d.rel_path = f.rel_path
+             JOIN wiki_sources s ON s.id = d.source_id
+             WHERE wiki_sections_fts MATCH ?",
+        );
+        let mut bind_values: Vec<SqlValue> = vec![SqlValue::from(expr)];
+        if has_source_filter {
+            let placeholders = vec!["?"; source_ids.len()].join(", ");
+            sql.push_str(&format!(" AND d.source_id IN ({placeholders})"));
+            for sid in &source_ids {
+                bind_values.push(SqlValue::from(sid.clone()));
+            }
+        } else if !include_archives {
+            sql.push_str(" AND s.tier = 'core_wiki'");
+        }
+        if let Some(ref dom) = domain {
+            sql.push_str(" AND d.top_domain = ?");
+            bind_values.push(SqlValue::from(dom.clone()));
+        }
+        if !include_deprecated {
+            sql.push_str(" AND d.is_deprecated = 0");
+        }
+        sql.push_str(" ORDER BY rank ASC LIMIT ? OFFSET ?");
+        bind_values.push(SqlValue::from(limit * 2));
+        bind_values.push(SqlValue::from(offset));
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
-                params![
-                    expr,
-                    source_id,
-                    domain,
-                    if include_archives { 1 } else { 0 },
-                    if include_deprecated { 1 } else { 0 },
-                    limit * 2,
-                    offset
-                ],
+                params_from_iter(bind_values.iter()),
                 |row| {
                     let sid: String = row.get(0)?;
                     let sname: String = row.get(1)?;
@@ -1331,29 +1410,38 @@ pub fn search_fts(
         }
     } else {
         // Empty query: paginated browse sorted by mtime DESC
-        let sql = "
-            SELECT d.source_id, s.name, s.root_path, s.content_subdir,
-                   d.rel_path, d.top_domain, d.title, d.tags, d.is_deprecated
-            FROM wiki_documents d
-            JOIN wiki_sources s ON s.id = d.source_id
-            WHERE (?1 IS NULL OR d.source_id = ?1)
-              AND (?2 IS NULL OR d.top_domain = ?2)
-              AND (?3 = 1 OR s.tier = 'core_wiki' OR (?1 IS NOT NULL AND d.source_id = ?1))
-              AND (?4 = 1 OR d.is_deprecated = 0)
-            ORDER BY d.mtime_ms DESC, d.title COLLATE NOCASE
-            LIMIT ?5 OFFSET ?6
-        ";
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut sql = String::from(
+            "SELECT d.source_id, s.name, s.root_path, s.content_subdir,
+                    d.rel_path, d.top_domain, d.title, d.tags, d.is_deprecated
+             FROM wiki_documents d
+             JOIN wiki_sources s ON s.id = d.source_id
+             WHERE 1 = 1",
+        );
+        let mut bind_values: Vec<SqlValue> = Vec::new();
+        if has_source_filter {
+            let placeholders = vec!["?"; source_ids.len()].join(", ");
+            sql.push_str(&format!(" AND d.source_id IN ({placeholders})"));
+            for sid in &source_ids {
+                bind_values.push(SqlValue::from(sid.clone()));
+            }
+        } else if !include_archives {
+            sql.push_str(" AND s.tier = 'core_wiki'");
+        }
+        if let Some(ref dom) = domain {
+            sql.push_str(" AND d.top_domain = ?");
+            bind_values.push(SqlValue::from(dom.clone()));
+        }
+        if !include_deprecated {
+            sql.push_str(" AND d.is_deprecated = 0");
+        }
+        sql.push_str(" ORDER BY d.mtime_ms DESC, d.title COLLATE NOCASE LIMIT ? OFFSET ?");
+        bind_values.push(SqlValue::from(limit));
+        bind_values.push(SqlValue::from(offset));
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
-                params![
-                    source_id,
-                    domain,
-                    if include_archives { 1 } else { 0 },
-                    if include_deprecated { 1 } else { 0 },
-                    limit,
-                    offset
-                ],
+                params_from_iter(bind_values.iter()),
                 |row| {
                     let sid: String = row.get(0)?;
                     let sname: String = row.get(1)?;
@@ -1578,9 +1666,12 @@ pub fn get_binding(store: &Store, conversation_id: &str) -> Result<Option<WikiBi
              FROM conversation_wiki_bindings WHERE conversation_id = ?1",
             [conversation_id],
             |r| {
+                let raw_sid: String = r.get(1)?;
+                let source_ids = parse_binding_source_ids(&raw_sid);
                 Ok(WikiBinding {
                     conversation_id: r.get(0)?,
-                    source_id: r.get(1)?,
+                    source_id: raw_sid,
+                    source_ids,
                     domain_filter: r.get(2)?,
                     include_archives: r.get::<_, i64>(3)? != 0,
                     last_injected_hash: r.get(4)?,
@@ -1609,9 +1700,12 @@ pub fn get_binding(store: &Store, conversation_id: &str) -> Result<Option<WikiBi
          FROM conversation_wiki_bindings WHERE conversation_id = ?1",
         [&gid],
         |r| {
+            let raw_sid: String = r.get(1)?;
+            let source_ids = parse_binding_source_ids(&raw_sid);
             Ok(WikiBinding {
                 conversation_id: r.get(0)?,
-                source_id: r.get(1)?,
+                source_id: raw_sid,
+                source_ids,
                 domain_filter: r.get(2)?,
                 include_archives: r.get::<_, i64>(3)? != 0,
                 last_injected_hash: r.get(4)?,
@@ -1688,32 +1782,51 @@ fn build_l0_overview(
     budget_bytes: usize,
 ) -> Result<String, String> {
     let conn = store.connect()?;
-    let source_name: String = conn
-        .query_row(
-            "SELECT name FROM wiki_sources WHERE id = ?1",
-            [&binding.source_id],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| binding.source_id.clone());
-    let domains = source_domain_counts(&conn, &binding.source_id)?;
-    let total: usize = domains.iter().map(|d| d.count).sum();
-    let mut lines = vec![format!(
-        "当前绑定业务知识库：{source_name}（source_id=`{}`，有效文档 {total} 篇{}）",
-        binding.source_id,
-        binding
-            .domain_filter
-            .as_deref()
-            .map(|d| format!("，限定目录 `{d}`"))
-            .unwrap_or_default()
-    )];
-    lines.push("L0 一级领域概览（仅列目录与数量，按需检索，切勿猜测未读条款）：".into());
-    for d in domains {
-        if let Some(filter) = binding.domain_filter.as_deref() {
-            if !filter.is_empty() && d.domain != filter {
-                continue;
-            }
+    let source_ids: Vec<String> = if !binding.source_ids.is_empty() {
+        binding.source_ids.clone()
+    } else {
+        parse_binding_source_ids(&binding.source_id)
+    };
+    if source_ids.is_empty() {
+        return Ok(String::new());
+    }
+    let mut lines = Vec::new();
+    if source_ids.len() > 1 {
+        lines.push(format!(
+            "当前绑定 {} 个业务知识库（按需检索，切勿猜测未读条款）：",
+            source_ids.len()
+        ));
+    }
+    for sid in &source_ids {
+        let source_name: String = conn
+            .query_row(
+                "SELECT name FROM wiki_sources WHERE id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| sid.clone());
+        let domains = source_domain_counts(&conn, sid)?;
+        let total: usize = domains.iter().map(|d| d.count).sum();
+        lines.push(format!(
+            "当前绑定业务知识库：{source_name}（source_id=`{}`，有效文档 {total} 篇{}）",
+            sid,
+            binding
+                .domain_filter
+                .as_deref()
+                .map(|d| format!("，限定目录 `{d}`"))
+                .unwrap_or_default()
+        ));
+        if source_ids.len() == 1 {
+            lines.push("L0 一级领域概览（仅列目录与数量，按需检索，切勿猜测未读条款）：".into());
         }
-        lines.push(format!("- {} ({} 篇)", d.domain, d.count));
+        for d in domains {
+            if let Some(filter) = binding.domain_filter.as_deref() {
+                if !filter.is_empty() && d.domain != filter {
+                    continue;
+                }
+            }
+            lines.push(format!("- {} ({} 篇)", d.domain, d.count));
+        }
     }
     let joined = lines.join("\n");
     let (clipped, _) = truncate_utf8_bytes(&joined, budget_bytes);
@@ -1746,6 +1859,7 @@ pub fn build_runtime_context(
                     Some(WikiBinding {
                         conversation_id: conversation_id.to_owned(),
                         source_id: default_sid.clone(),
+                        source_ids: parse_binding_source_ids(default_sid),
                         domain_filter: None,
                         include_archives: false,
                         last_injected_hash: None,
@@ -1881,13 +1995,29 @@ fn local_wiki_endpoint_hint(binding: &WikiBinding) -> String {
         .as_deref()
         .map(|d| format!("&domain={}", url_encode(d)))
         .unwrap_or_default();
-    format!(
-        "本机只读检索端点（100% 只读，可直接用 curl 访问）：\n\
-         - L1 搜索：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/search?source_id={}{domain_q}&q=<关键词>'`\n\
-         - L2 精读：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/read?source_id={}&path=<rel_path或双链名>'`（可加 `&section=<章节名>`）",
-        url_encode(&binding.source_id),
-        url_encode(&binding.source_id),
-    )
+    let source_ids: Vec<String> = if !binding.source_ids.is_empty() {
+        binding.source_ids.clone()
+    } else {
+        parse_binding_source_ids(&binding.source_id)
+    };
+    let search_source_param = source_ids.join(",");
+    if source_ids.len() <= 1 {
+        let sid = source_ids.first().map(String::as_str).unwrap_or(&binding.source_id);
+        format!(
+            "本机只读检索端点（100% 只读，可直接用 curl 访问）：\n\
+             - L1 搜索：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/search?source_id={}{domain_q}&q=<关键词>'`\n\
+             - L2 精读：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/read?source_id={}&path=<rel_path或双链名>'`（可加 `&section=<章节名>`）",
+            url_encode(sid),
+            url_encode(sid),
+        )
+    } else {
+        format!(
+            "本机只读检索端点（100% 只读，可直接用 curl 访问）：\n\
+             - L1 搜索：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/search?source_id={}{domain_q}&q=<关键词>'`\n\
+             - L2 精读：`curl -s -H 'Authorization: Bearer {token}' '{base}/local-wiki/read?source_id=<目标source_id>&path=<rel_path或双链名>'`（可加 `&section=<章节名>`）",
+            url_encode(&search_source_param),
+        )
+    }
 }
 
 fn url_encode(input: &str) -> String {
@@ -2161,13 +2291,21 @@ pub fn wiki_binding_set(
     store: tauri::State<'_, Store>,
     conversation_id: String,
     source_id: Option<String>,
+    source_ids: Option<Vec<String>>,
     domain_filter: Option<String>,
     include_archives: Option<bool>,
 ) -> Result<Option<WikiBinding>, String> {
+    let resolved_source = if source_id.as_deref() == Some(BINDING_NONE_SENTINEL) {
+        Some(BINDING_NONE_SENTINEL.to_owned())
+    } else if let Some(ids) = source_ids {
+        encode_binding_source_ids(&ids)
+    } else {
+        source_id
+    };
     set_binding(
         &store,
         &conversation_id,
-        source_id.as_deref(),
+        resolved_source.as_deref(),
         domain_filter.as_deref(),
         include_archives.unwrap_or(false),
     )
@@ -2178,16 +2316,21 @@ pub async fn wiki_search(
     app: tauri::AppHandle,
     query: String,
     source_id: Option<String>,
+    source_ids: Option<Vec<String>>,
     domain_filter: Option<String>,
     include_archives: Option<bool>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<WikiSearchHit>, String> {
+    let resolved_source = match source_ids {
+        Some(ids) if !ids.is_empty() => encode_binding_source_ids(&ids),
+        _ => source_id,
+    };
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<Store>();
         search_fts(
             &store,
-            source_id.as_deref(),
+            resolved_source.as_deref(),
             &query,
             domain_filter.as_deref(),
             include_archives.unwrap_or(false),

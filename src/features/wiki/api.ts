@@ -45,9 +45,33 @@ export interface WikiHabitPage {
 export interface WikiBinding {
   conversation_id: string;
   source_id: string;
+  source_ids?: string[];
   domain_filter: string | null;
   include_archives: boolean;
   last_injected_hash: string | null;
+}
+
+export function parseWikiBindingSourceIds(binding: WikiBinding | null | undefined): string[] {
+  if (!binding) return [];
+  if (Array.isArray(binding.source_ids)) {
+    return binding.source_ids.filter(id => id && id !== WIKI_BINDING_NONE);
+  }
+  const raw = (binding.source_id ?? "").trim();
+  if (!raw || raw === WIKI_BINDING_NONE) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0 && x !== WIKI_BINDING_NONE);
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (raw.includes(",")) {
+    return raw.split(",").map(s => s.trim()).filter(s => s.length > 0 && s !== WIKI_BINDING_NONE);
+  }
+  return [raw];
 }
 
 export interface WikiSearchHit {
@@ -208,14 +232,16 @@ export async function getWikiBinding(conversationId: string): Promise<WikiBindin
 
 export async function setWikiBinding(params: {
   conversationId: string;
-  sourceId: string | null;
+  sourceId?: string | null;
+  sourceIds?: string[] | null;
   domainFilter?: string | null;
   includeArchives?: boolean;
 }): Promise<WikiBinding | null> {
   if (!desktop) return null;
   return invoke<WikiBinding | null>("wiki_binding_set", {
     conversationId: params.conversationId,
-    sourceId: params.sourceId,
+    sourceId: params.sourceId ?? null,
+    sourceIds: params.sourceIds ?? null,
     domainFilter: params.domainFilter ?? null,
     includeArchives: params.includeArchives ?? false,
   });
@@ -224,6 +250,7 @@ export async function setWikiBinding(params: {
 export async function searchWiki(params: {
   query: string;
   sourceId?: string | null;
+  sourceIds?: string[] | null;
   domainFilter?: string | null;
   includeArchives?: boolean;
   limit?: number;
@@ -233,6 +260,7 @@ export async function searchWiki(params: {
   return invoke<WikiSearchHit[]>("wiki_search", {
     query: params.query,
     sourceId: params.sourceId ?? null,
+    sourceIds: params.sourceIds ?? null,
     domainFilter: params.domainFilter ?? null,
     includeArchives: params.includeArchives ?? false,
     limit: params.limit ?? 20,
