@@ -14,14 +14,25 @@ import { remarkMentions, remarkSkills } from "./mention-markdown";
 const localImage = /^ai-gent-image:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const localAttachment = /^ai-gent-attachment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+const WINDOWS_DRIVE_RE = /^[a-z]:(?:[\\/]|%5c)/i;
+const LINE_NUMBERED_FILE_RE = /^[^/\\?#]+\.[^/\\?#]+:\d+(?::\d+)?$/;
+
 function parseLocalFileLink(href: string, labelText?: string): { path: string; line?: number } | null {
   const raw = href.trim();
   if (!raw || raw.startsWith("#")) return null;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:\/\//i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) return null;
+  if (
+    /^[a-z][a-z0-9+.-]*:/i.test(raw)
+    && !/^file:\/\//i.test(raw)
+    && !WINDOWS_DRIVE_RE.test(raw)
+    && !LINE_NUMBERED_FILE_RE.test(raw)
+  ) return null;
 
   let path = raw;
-  if (path.startsWith("file://")) {
-    path = path.slice("file://".length);
+  if (/^file:\/\//i.test(path)) {
+    path = path.replace(/^file:\/\/(?:localhost)?/i, "");
+    if (/^\/[a-z]:[\\/]/i.test(path)) {
+      path = path.slice(1);
+    }
   }
   let line: number | undefined;
   const hashMatch = path.match(/#L(\d+)(?:-L?\d+)?$/i);
@@ -44,6 +55,9 @@ function parseLocalFileLink(href: string, labelText?: string): { path: string; l
   } catch {
     // Keep raw path if URI decoding fails
   }
+  if (/^\/[a-z]:[\\/]/i.test(path)) {
+    path = path.slice(1);
+  }
   return path ? { path, line: Number.isFinite(line) ? line : undefined } : null;
 }
 
@@ -51,7 +65,7 @@ function parseLocalImagePath(src: string): string | null {
   const raw = src.trim();
   if (!raw || raw.startsWith("#") || raw.startsWith("//")) return null;
   if (localImage.test(raw) || localAttachment.test(raw)) return null;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:\/\//i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:\/\//i.test(raw) && !WINDOWS_DRIVE_RE.test(raw)) return null;
 
   let path = raw;
   if (/^file:\/\//i.test(path)) {
@@ -357,11 +371,15 @@ export default memo(function MessageBody({
       || localAttachment.test(url)
       || /^data:image\/(png|jpeg|webp|gif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url)
       || /^file:\/\//i.test(url)
-      || /^[a-z]:[\\/]/i.test(url)
+      || WINDOWS_DRIVE_RE.test(url)
     )) {
       return url;
     }
-    if (key === "href" && url.startsWith("file://")) {
+    if (key === "href" && (
+      /^file:\/\//i.test(url)
+      || WINDOWS_DRIVE_RE.test(url)
+      || LINE_NUMBERED_FILE_RE.test(url)
+    )) {
       return url;
     }
     return defaultUrlTransform(url);

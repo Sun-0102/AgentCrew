@@ -47,6 +47,20 @@ test("loads local workspace, absolute, file:// and Windows paths through local i
   }
 });
 
+test("renders Windows drive, file:///C:/ and line-numbered file links as LocalFileLink", () => {
+  for (const [href, expectedTitle] of [
+    ["D:\\work\\repo\\doc\\方案.md", "查看文件：D:\\work\\repo\\doc\\方案.md"],
+    ["C:/Users/demo/project/README.md:42", "查看文件：C:/Users/demo/project/README.md:42"],
+    ["file:///C:/Users/demo/doc/%E6%96%B9%E6%A1%88.md", "查看文件：C:/Users/demo/doc/方案.md"],
+    ["FILE://localhost/D:/repo/app.ts#L18", "查看文件：D:/repo/app.ts:18"],
+    ["README.md:12", "查看文件：README.md:12"],
+  ]) {
+    const html = render(`[打开方案](${href})`);
+    assert.match(html, /class="message-file-link"/, href);
+    assert.ok(html.includes(expectedTitle), `${href} -> ${html}`);
+  }
+});
+
 test("renders the review table with inline code and aligned cells", () => {
   const html = render("核对结论：实现符合要求\n\n| 要求 | 结果 | 依据 |\n| --- | :---: | --- |\n| 初始显示 0 | ✅ | 第 62 行 `<output>` 内容为 0 |\n| 加一 | ✅ | `update(count + 1)` |");
   assert.match(html, /class="message-table"[^>]*tabindex="0"/);

@@ -960,6 +960,7 @@ export default function ChatStage(p: Props) {
           setDiffTurnId(id);
         }}
         onSelectFile={setDiffFile}
+        onPreviewFile={filePath => openFilePreview(filePath)}
         onClearPreview={() => {
           setPreviewFile(null);
           if (!diffTurnId && turnDiffOptions.length > 0) {

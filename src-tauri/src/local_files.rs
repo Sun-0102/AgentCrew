@@ -14,11 +14,57 @@ pub enum FileAction {
     Open,
 }
 
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_owned())
+}
+
+pub(crate) fn clean_local_file_input(raw: &str) -> String {
+    let mut path = raw.trim().to_owned();
+    if path.len() >= 7 && path[..7].eq_ignore_ascii_case("file://") {
+        path = path[7..].to_owned();
+        if path.len() >= 10
+            && path[..9].eq_ignore_ascii_case("localhost")
+            && matches!(path.as_bytes()[9], b'/' | b'\\')
+        {
+            path = path[9..].to_owned();
+        }
+    }
+    path = percent_decode(&path);
+    let bytes = path.as_bytes();
+    if bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && matches!(bytes[3], b'/' | b'\\')
+    {
+        path = path[1..].to_owned();
+    }
+    path
+}
+
 fn resolve_path(file_path: &str, workspace_path: Option<&str>) -> Result<PathBuf, String> {
-    if file_path.trim().is_empty() || file_path.contains('\0') {
+    let cleaned = clean_local_file_input(file_path);
+    if cleaned.trim().is_empty() || cleaned.contains('\0') {
         return Err("文件路径无效".into());
     }
-    let candidate = PathBuf::from(file_path);
+    let candidate = PathBuf::from(&cleaned);
     let path = if candidate.is_absolute() {
         candidate
     } else {
@@ -35,6 +81,7 @@ fn resolve_path(file_path: &str, workspace_path: Option<&str>) -> Result<PathBuf
         .map_err(|error| format!("无法访问文件 {}：{error}", path.display()))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn open_command(path: &Path, action: FileAction) -> Command {
     #[cfg(target_os = "macos")]
     {
@@ -43,18 +90,6 @@ fn open_command(path: &Path, action: FileAction) -> Command {
             command.arg("-R");
         }
         command.arg(path);
-        command
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Pass the path as one argument, without a shell or command interpolation.
-        let mut command = Command::new("explorer.exe");
-        let display = crate::storage::normalize_path_str(&path.to_string_lossy());
-        if matches!(action, FileAction::Reveal) {
-            command.arg(format!("/select,{display}"));
-        } else {
-            command.arg(display);
-        }
         command
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -70,6 +105,53 @@ fn open_command(path: &Path, action: FileAction) -> Command {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn run_windows_file_action(path: &Path, action: FileAction) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::process::CommandExt;
+
+    let display = crate::storage::normalize_path_str(&path.to_string_lossy()).replace('/', "\\");
+    if matches!(action, FileAction::Reveal) {
+        let escaped = display.replace('"', "");
+        Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{escaped}\""))
+            .spawn()
+            .map_err(|error| format!("无法打开文件所在位置：{error}"))?;
+        return Ok(());
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize,
+            lp_operation: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show_cmd: i32,
+        ) -> isize;
+    }
+
+    let operation: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = OsStr::new(&display).encode_wide().chain(Some(0)).collect();
+    // SW_SHOWNORMAL = 1; ShellExecuteW returns > 32 on success.
+    let result = unsafe {
+        ShellExecuteW(
+            0,
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if result <= 32 {
+        return Err(format!("无法用默认应用打开文件（错误码 {result}）"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn local_file_action(
     file_path: String,
@@ -79,14 +161,21 @@ pub async fn local_file_action(
     tauri::async_runtime::spawn_blocking(move || {
         let path = resolve_path(&file_path, workspace_path.as_deref())?;
         if !matches!(action, FileAction::Resolve) {
-            let output = open_command(&path, action)
-                .output()
-                .map_err(|error| format!("无法打开文件位置或应用：{error}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "文件操作失败：{}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
+            #[cfg(target_os = "windows")]
+            {
+                run_windows_file_action(&path, action)?;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let output = open_command(&path, action)
+                    .output()
+                    .map_err(|error| format!("无法打开文件位置或应用：{error}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "文件操作失败：{}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
             }
         }
         Ok(path.to_string_lossy().into_owned())
@@ -175,6 +264,26 @@ pub async fn local_image_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleans_file_urls_and_windows_drive_paths() {
+        assert_eq!(
+            clean_local_file_input("file:///C:/Users/demo/%E6%96%B9%E6%A1%88%201.md"),
+            "C:/Users/demo/方案 1.md"
+        );
+        assert_eq!(
+            clean_local_file_input("FILE://localhost/D:/repo/doc.md"),
+            "D:/repo/doc.md"
+        );
+        assert_eq!(
+            clean_local_file_input("/C:/Users/demo/doc.md"),
+            "C:/Users/demo/doc.md"
+        );
+        assert_eq!(
+            clean_local_file_input("/Users/demo/doc.md"),
+            "/Users/demo/doc.md"
+        );
+    }
 
     #[test]
     fn resolves_relative_paths_with_spaces_and_app_bundles() {

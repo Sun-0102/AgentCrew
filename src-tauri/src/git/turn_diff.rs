@@ -331,10 +331,15 @@ pub struct WorkspaceFileContent {
 }
 
 fn find_file_in_workspace(root: &Path, target_name: &str) -> Option<PathBuf> {
-    if let Ok(output) = run_git(root.to_str()?, &["ls-files"]) {
+    let normalized = target_name.replace('\\', "/");
+    let needle = normalized.trim_start_matches("./");
+    if let Ok(output) = run_git(
+        root.to_str()?,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    ) {
         for line in output.lines() {
             let trimmed = line.trim();
-            if trimmed == target_name || trimmed.ends_with(&format!("/{target_name}")) {
+            if trimmed == needle || trimmed.ends_with(&format!("/{needle}")) {
                 let candidate = root.join(trimmed);
                 if candidate.is_file() {
                     return Some(candidate);
@@ -345,6 +350,24 @@ fn find_file_in_workspace(root: &Path, target_name: &str) -> Option<PathBuf> {
     None
 }
 
+fn strip_line_suffix(path: &str) -> &str {
+    // Strip trailing :line or :line:col while preserving Windows drive letters like C:\...
+    let mut end = path;
+    for _ in 0..2 {
+        if let Some((prefix, suffix)) = end.rsplit_once(':') {
+            if !suffix.is_empty()
+                && suffix.bytes().all(|b| b.is_ascii_digit())
+                && prefix.len() > 1
+            {
+                end = prefix;
+                continue;
+            }
+        }
+        break;
+    }
+    end
+}
+
 #[tauri::command]
 pub async fn workspace_read_file(
     workspace_path: Option<String>,
@@ -352,15 +375,12 @@ pub async fn workspace_read_file(
 ) -> Result<WorkspaceFileContent, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut raw = file_path.trim().to_owned();
-        if let Some(stripped) = raw.strip_prefix("file://") {
-            raw = stripped.to_owned();
-        }
-        // Strip trailing #L123 or :123 if present
+        // Strip trailing #L123 fragment if present
         if let Some(idx) = raw.find('#') {
             raw.truncate(idx);
         }
-        // Decode basic percent-encoded spaces
-        raw = raw.replace("%20", " ");
+        raw = strip_line_suffix(&raw).to_owned();
+        raw = crate::local_files::clean_local_file_input(&raw);
         if raw.is_empty() {
             return Err("文件路径为空".into());
         }
@@ -387,19 +407,20 @@ pub async fn workspace_read_file(
             return Err(format!("找不到文件：{raw}"));
         };
 
-        let canonical = fs::canonicalize(&resolved)
+        let canonical = crate::storage::canonicalize_path(&resolved)
             .map_err(|e| format!("无法访问文件 {raw}：{e}"))?;
         if !canonical.is_file() {
             return Err(format!("目标不是文件：{raw}"));
         }
 
         let bytes = fs::read(&canonical).map_err(|e| format!("读取文件失败：{e}"))?;
+        let display = ws_root
+            .as_ref()
+            .and_then(|r| crate::storage::canonicalize_path(r).ok())
+            .and_then(|r| canonical.strip_prefix(&r).ok().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
+
         if is_probably_binary(&bytes) {
-            let display = ws_root
-                .as_ref()
-                .and_then(|r| fs::canonicalize(r).ok())
-                .and_then(|r| canonical.strip_prefix(&r).ok().map(|p| p.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
             return Ok(WorkspaceFileContent {
                 path: canonical.to_string_lossy().into_owned(),
                 display_path: display,
@@ -416,11 +437,6 @@ pub async fn workspace_read_file(
             &bytes[..]
         };
         let contents = String::from_utf8_lossy(slice).into_owned();
-        let display = ws_root
-            .as_ref()
-            .and_then(|r| fs::canonicalize(r).ok())
-            .and_then(|r| canonical.strip_prefix(&r).ok().map(|p| p.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
 
         Ok(WorkspaceFileContent {
             path: canonical.to_string_lossy().into_owned(),

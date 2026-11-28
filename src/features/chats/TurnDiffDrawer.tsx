@@ -39,6 +39,7 @@ interface Props {
   refreshToken?: number;
   onSelectTurn: (turnId: string) => void;
   onSelectFile: (filePath: string | null) => void;
+  onPreviewFile?: (filePath: string) => void;
   onClearPreview?: () => void;
   onOpenFullGit?: (path?: string) => void;
   onClose: () => void;
@@ -414,6 +415,7 @@ export default function TurnDiffDrawer({
   refreshToken = 0,
   onSelectTurn,
   onSelectFile,
+  onPreviewFile,
   onClearPreview,
   onOpenFullGit,
   onClose,
@@ -751,6 +753,20 @@ export default function TurnDiffDrawer({
               </button>
             </div>
           )}
+          {!isPreviewMode &&
+            effectiveFile &&
+            onPreviewFile &&
+            effectiveFileObj?.status.trim().toUpperCase() !== "D" && (
+              <button
+                type="button"
+                className="turn-diff-tool-btn"
+                onClick={() => onPreviewFile(effectiveFile)}
+                title={detectPreviewFormat(effectiveFile) ? "按格式渲染预览当前文件" : "预览完整文件"}
+              >
+                <Icon name="file" size={13} />
+                预览
+              </button>
+            )}
           {(!isPreviewMode || effectivePreviewMode === "source") && (
             <button
               type="button"
