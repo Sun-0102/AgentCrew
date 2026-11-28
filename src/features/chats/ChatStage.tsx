@@ -12,6 +12,7 @@ import ProjectAgentPicker from "./ProjectAgentPicker";
 import ModelConfigPopover from "./ModelConfigPopover";
 import ContextMeter from "./ContextMeter";
 import { activeMention, insertMention, mentionSegments, messageRecipients } from "./mentions";
+import { formatReplyPreview } from "./replyPreview";
 import GroupMemberStatus from "./GroupMemberStatus";
 import GroupMembers from "./GroupMembers";
 import QueuedMessagesBar from "./QueuedMessagesBar";
@@ -522,9 +523,10 @@ export default function ChatStage(p: Props) {
       setMentionQuery(match.query);
       if (!opts?.fromSelect) setMentionIndex(0);
       if (opts?.isDelete) {
-        // Never pop open the @ menu when deleting backwards into an existing mention.
+        // Never pop open the @ menu while deleting backwards when it is closed,
+        // and clear any stale dismissal so typing again immediately re-opens it.
         if (!mentions) {
-          dismissedMentionRef.current = match.start;
+          dismissedMentionRef.current = null;
         } else if (dismissedMentionRef.current === match.start) {
           setMentions(false);
         }
@@ -775,7 +777,7 @@ export default function ChatStage(p: Props) {
               </button>
             </div>
           )}
-          {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{reply.text.slice(0, 140)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
+          {reply && <div className="reply-preview"><Icon name="reply" size={16} /><div><strong>回复 {reply.author}</strong><p>{formatReplyPreview(reply.text)}</p></div><button type="button" className="icon-button" aria-label="取消回复" onClick={() => setReply(null)}><Icon name="close" size={15} /></button></div>}
           {!!files.length && <div className="attachment-list">{files.map((file, index) => <div className="attachment-chip" key={`${file.name}-${index}`}>{file.isImage && file.previewUrl ? <img className="attachment-thumb" src={file.previewUrl} alt={file.name} /> : <Icon name="file" size={18} />}<span>{file.name}<small>{formatAttachmentSize(file.size)} · {file.isImage ? "图片" : "文件"}</small></span><button type="button" aria-label={`移除附件 ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="close" size={13} /></button></div>)}</div>}
           {skillsOpen && <div className="skill-suggestions" id="skill-suggestions" role="listbox" aria-label="技能列表">
             <div className="menu-caption">{agentName(agent)} · 技能 {skillsLoading ? "" : `(${skills.length})`}</div>
