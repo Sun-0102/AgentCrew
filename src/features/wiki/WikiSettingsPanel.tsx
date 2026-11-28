@@ -12,8 +12,6 @@ import {
   searchWiki,
   setWikiHabit,
   syncWikiProjects,
-  testWikiConnection,
-  type WikiConnectionTest,
   type WikiHabitPage,
   type WikiSearchHit,
   type WikiSettings,
@@ -24,22 +22,27 @@ interface Props {
   onError: (message: string) => void;
 }
 
+function statusLabel(state: string): { text: string; color: string } {
+  if (state === "ready") return { text: "已就绪", color: "#16a34a" };
+  if (state === "indexing") return { text: "索引中…", color: "#d97706" };
+  if (state === "error") return { text: "目录不可用", color: "#dc2626" };
+  return { text: "待索引", color: "var(--muted, #64748b)" };
+}
+
 export default function WikiSettingsPanel({ onError }: Props) {
   const [settings, setSettings] = useState<WikiSettings | null>(null);
   const [sources, setSources] = useState<WikiSource[]>([]);
   const [habits, setHabits] = useState<WikiHabitPage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [savingAdvanced, setSavingAdvanced] = useState(false);
   const [reindexingId, setReindexingId] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<WikiConnectionTest | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; tone: "ok" | "error" } | null>(null);
 
-  // Add local folder tier selection
+  // Advanced folder tier
   const [newFolderTier, setNewFolderTier] = useState<"core_wiki" | "archive">("core_wiki");
 
-  // Habit page picker search
+  // Habit picker: only show dropdown when user actively searches
   const [habitQuery, setHabitQuery] = useState("");
   const [habitCandidates, setHabitCandidates] = useState<WikiSearchHit[]>([]);
   const [searchingHabits, setSearchingHabits] = useState(false);
@@ -67,24 +70,29 @@ export default function WikiSettingsPanel({ onError }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!sources.length) {
+    const q = habitQuery.trim();
+    if (!sources.length || !q) {
       setHabitCandidates([]);
+      setSearchingHabits(false);
       return;
     }
     let cancelled = false;
     setSearchingHabits(true);
-    void searchWiki({ query: habitQuery, limit: 12 })
-      .then(hits => {
-        if (!cancelled) setHabitCandidates(hits);
-      })
-      .catch(() => {
-        if (!cancelled) setHabitCandidates([]);
-      })
-      .finally(() => {
-        if (!cancelled) setSearchingHabits(false);
-      });
+    const timer = window.setTimeout(() => {
+      void searchWiki({ query: q, limit: 8 })
+        .then(hits => {
+          if (!cancelled) setHabitCandidates(hits);
+        })
+        .catch(() => {
+          if (!cancelled) setHabitCandidates([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingHabits(false);
+        });
+    }, 150);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [habitQuery, sources.length]);
 
@@ -93,51 +101,54 @@ export default function WikiSettingsPanel({ onError }: Props) {
     [habits],
   );
   const habitBudget = settings?.habits_budget_bytes ?? 1800;
-  const habitPercent = Math.min(100, Math.round((totalHabitBytes / Math.max(1, habitBudget)) * 100));
 
-  async function handleSaveSettings(next?: WikiSettings) {
-    const target = next ?? settings;
-    if (!target) return;
-    setSaving(true);
-    setNotice(null);
-    try {
-      const saved = await saveWikiSettings(target);
-      setSettings(saved);
-      setNotice("知识库连接与预算配置已保存。");
-    } catch (cause) {
-      onError(`保存知识库配置失败：${String(cause)}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleTestConnection() {
+  async function handleToggleEnabled(enabled: boolean) {
     if (!settings) return;
-    setTesting(true);
-    setNotice(null);
+    const next = { ...settings, enabled };
+    setSettings(next);
     try {
-      const res = await testWikiConnection(settings.base_url, settings.api_token);
-      setTestResult(res);
+      const saved = await saveWikiSettings(next);
+      setSettings(saved);
     } catch (cause) {
-      onError(`测试连接失败：${String(cause)}`);
-    } finally {
-      setTesting(false);
+      onError(`更新开关失败：${String(cause)}`);
     }
   }
 
-  async function handleSyncProjects() {
+  async function handleConnectAndSync() {
     if (!settings) return;
     setSyncing(true);
     setNotice(null);
     try {
-      await saveWikiSettings(settings);
+      const saved = await saveWikiSettings(settings);
+      setSettings(saved);
       const updated = await syncWikiProjects();
       setSources(updated);
-      setNotice(`已同步 LLM Wiki 项目，当前共 ${updated.length} 个知识源。`);
+      setNotice({
+        text: updated.length
+          ? `连接成功，已同步 ${updated.length} 个知识库。`
+          : "已连接 LLM Wiki，但暂无项目，也可以直接添加本地文件夹。",
+        tone: "ok",
+      });
     } catch (cause) {
-      onError(`同步 LLM Wiki 项目失败：${String(cause)}`);
+      const msg = String(cause).replace(/^Error:\s*/, "");
+      setNotice({ text: msg, tone: "error" });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleSaveAdvanced() {
+    if (!settings) return;
+    setSavingAdvanced(true);
+    setNotice(null);
+    try {
+      const saved = await saveWikiSettings(settings);
+      setSettings(saved);
+      setNotice({ text: "高级设置已保存。", tone: "ok" });
+    } catch (cause) {
+      onError(`保存失败：${String(cause)}`);
+    } finally {
+      setSavingAdvanced(false);
     }
   }
 
@@ -146,19 +157,20 @@ export default function WikiSettingsPanel({ onError }: Props) {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "选择本地 Markdown / LLM Wiki 知识库目录",
+        title: "选择本地知识库文件夹",
       });
       if (!selected || typeof selected !== "string") return;
       setReindexingId("__adding__");
+      setNotice(null);
       const added = await addLocalWikiSource({
         rootPath: selected,
         tier: newFolderTier,
       });
       const updated = await listWikiSources();
       setSources(updated);
-      setNotice(`已接入本地目录「${added.name}」，索引有效文档 ${added.doc_count} 篇。`);
+      setNotice({ text: `已添加「${added.name}」（${added.doc_count} 篇有效文档）。`, tone: "ok" });
     } catch (cause) {
-      onError(`接入本地目录失败：${String(cause)}`);
+      onError(`添加本地文件夹失败：${String(cause)}`);
     } finally {
       setReindexingId(null);
     }
@@ -171,9 +183,9 @@ export default function WikiSettingsPanel({ onError }: Props) {
       const stats = await reindexWikiSource(sourceId, true);
       const updated = await listWikiSources();
       setSources(updated);
-      setNotice(`索引完成：扫描 ${stats.scanned} 个文件，更新 ${stats.indexed} 篇，有效文档 ${stats.active_docs} 篇。`);
+      setNotice({ text: `刷新完成，共 ${stats.active_docs} 篇有效文档。`, tone: "ok" });
     } catch (cause) {
-      onError(`重建索引失败：${String(cause)}`);
+      onError(`刷新索引失败：${String(cause)}`);
     } finally {
       setReindexingId(null);
     }
@@ -184,9 +196,9 @@ export default function WikiSettingsPanel({ onError }: Props) {
       await removeWikiSource(source.id);
       setSources(prev => prev.filter(item => item.id !== source.id));
       setHabits(prev => prev.filter(item => item.source_id !== source.id));
-      setNotice(`已移除知识源「${source.name}」（未删除本机原文件）。`);
+      setNotice({ text: `已移除「${source.name}」（不会删除原文件）。`, tone: "ok" });
     } catch (cause) {
-      onError(`移除知识源失败：${String(cause)}`);
+      onError(`移除失败：${String(cause)}`);
     }
   }
 
@@ -194,231 +206,167 @@ export default function WikiSettingsPanel({ onError }: Props) {
     try {
       const next = await setWikiHabit({ sourceId, relPath, title, enabled });
       setHabits(next);
+      if (enabled) setHabitQuery("");
     } catch (cause) {
-      onError(`更新个人习惯页失败：${String(cause)}`);
+      onError(`更新偏好笔记失败：${String(cause)}`);
     }
   }
 
   if (loading || !settings) {
-    return <p className="field-help">正在加载知识库配置…</p>;
+    return <p className="field-help">正在加载知识库…</p>;
   }
 
   const habitKeySet = new Set(habits.filter(h => h.enabled).map(h => `${h.source_id}:${h.rel_path}`));
 
   return (
-    <div className="settings-section-stack" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div className="settings-card" style={{ padding: 14, borderRadius: 10, border: "1px solid var(--border)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* 1. 我的知识库 */}
+      <div style={{ padding: 16, borderRadius: 10, border: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
           <div>
-            <strong>LLM Wiki 本地连接（0 额外 API 费用）</strong>
+            <strong style={{ fontSize: 15 }}>我的知识库</strong>
             <p className="field-help" style={{ margin: "2px 0 0" }}>
-              仅访问本机只读文件/图谱端点，不调用 /chat；服务未运行时自动离线只读本地目录。
+              接入本地文件夹或同步 LLM Wiki，群聊绑定后 AI 会按需查阅，不消耗额外 API 费用。
             </p>
           </div>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13, flexShrink: 0 }}>
             <input
               type="checkbox"
               checked={settings.enabled}
-              onChange={e => {
-                const next = { ...settings, enabled: e.target.checked };
-                setSettings(next);
-                void handleSaveSettings(next);
-              }}
+              onChange={e => void handleToggleEnabled(e.target.checked)}
             />
-            <span>启用知识库</span>
+            <span>启用</span>
           </label>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <div>
-            <label className="field-label" htmlFor="wiki-base-url">本机服务地址</label>
-            <input
-              id="wiki-base-url"
-              className="text-input"
-              value={settings.base_url}
-              onChange={e => setSettings({ ...settings, base_url: e.target.value })}
-              placeholder="http://127.0.0.1:19828"
-            />
-          </div>
-          <div>
-            <label className="field-label" htmlFor="wiki-api-token">API Token（可选）</label>
-            <input
-              id="wiki-api-token"
-              type="password"
-              className="text-input"
-              value={settings.api_token}
-              onChange={e => setSettings({ ...settings, api_token: e.target.value })}
-              placeholder="Bearer Token（本机免鉴权可留空）"
-            />
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 10 }}>
-          <div>
-            <label className="field-label" htmlFor="wiki-habits-budget">个人习惯预算 (字节)</label>
-            <input
-              id="wiki-habits-budget"
-              type="number"
-              min={200}
-              max={12000}
-              className="text-input"
-              value={settings.habits_budget_bytes}
-              onChange={e => setSettings({ ...settings, habits_budget_bytes: Number(e.target.value) || 1800 })}
-            />
-          </div>
-          <div>
-            <label className="field-label" htmlFor="wiki-l0-budget">L0 概览卡预算 (字节)</label>
-            <input
-              id="wiki-l0-budget"
-              type="number"
-              min={200}
-              max={4000}
-              className="text-input"
-              value={settings.l0_map_budget_bytes}
-              onChange={e => setSettings({ ...settings, l0_map_budget_bytes: Number(e.target.value) || 800 })}
-            />
-          </div>
-          <div>
-            <label className="field-label" htmlFor="wiki-read-budget">L2 精读预算 (字节)</label>
-            <input
-              id="wiki-read-budget"
-              type="number"
-              min={1000}
-              max={24000}
-              className="text-input"
-              value={settings.read_budget_bytes}
-              onChange={e => setSettings({ ...settings, read_budget_bytes: Number(e.target.value) || 6000 })}
-            />
-          </div>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <button type="button" className="primary" disabled={saving} onClick={() => void handleSaveSettings()}>
-            {saving ? "保存中…" : "保存配置"}
+        {/* 一步连接同步条 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <input
+            type="password"
+            className="text-input"
+            style={{ flex: 1, minWidth: 200 }}
+            value={settings.api_token}
+            onChange={e => setSettings({ ...settings, api_token: e.target.value })}
+            placeholder="LLM Wiki API Token（如未开启鉴权可留空）"
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={syncing}
+            onClick={() => void handleConnectAndSync()}
+          >
+            {syncing ? "同步中…" : "连接并同步"}
           </button>
-          <button type="button" className="outline-button" disabled={testing} onClick={() => void handleTestConnection()}>
-            {testing ? "检测中…" : "测试连接"}
-          </button>
-          <button type="button" className="outline-button" disabled={syncing} onClick={() => void handleSyncProjects()}>
-            {syncing ? "同步中…" : "同步 LLM Wiki 项目"}
+          <button
+            type="button"
+            className="outline-button"
+            disabled={reindexingId === "__adding__"}
+            onClick={() => void handleAddLocalFolder()}
+          >
+            <Icon name="plus" size={14} />
+            <span>{reindexingId === "__adding__" ? "添加中…" : "添加本地文件夹"}</span>
           </button>
         </div>
 
-        {testResult && (
-          <p className="field-help" style={{ marginTop: 8, color: testResult.ok ? "var(--accent)" : "var(--danger)" }}>
-            {testResult.message}
-          </p>
-        )}
         {notice && (
-          <p className="field-help" style={{ marginTop: 8, color: "var(--accent)" }}>
-            {notice}
+          <p
+            className="field-help"
+            style={{
+              margin: "0 0 10px",
+              color: notice.tone === "error" ? "var(--danger, #dc2626)" : "var(--accent)",
+            }}
+          >
+            {notice.text}
           </p>
         )}
-      </div>
-
-      <div className="settings-card" style={{ padding: 14, borderRadius: 10, border: "1px solid var(--border)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-          <div>
-            <strong>已接入知识源（本地 FTS5 毫秒索引）</strong>
-            <p className="field-help" style={{ margin: "2px 0 0" }}>
-              自动排除 raw/ 与 status: deprecated / #已废弃 旧规；支持万级文件增量更新。
-            </p>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <select
-              className="text-input"
-              style={{ width: "auto", padding: "4px 8px", fontSize: 12 }}
-              value={newFolderTier}
-              onChange={e => setNewFolderTier(e.target.value as "core_wiki" | "archive")}
-            >
-              <option value="core_wiki">核心规则层 (core_wiki)</option>
-              <option value="archive">海量档案层 (archive)</option>
-            </select>
-            <button
-              type="button"
-              className="outline-button"
-              disabled={reindexingId === "__adding__"}
-              onClick={() => void handleAddLocalFolder()}
-            >
-              <Icon name="plus" size={14} />
-              <span>{reindexingId === "__adding__" ? "索引中…" : "添加本地目录"}</span>
-            </button>
-          </div>
-        </div>
 
         {!sources.length ? (
-          <p className="field-help">尚未接入任何知识库。可点击「同步 LLM Wiki 项目」或「添加本地目录」（如 mock-business-wiki）。</p>
+          <div
+            style={{
+              padding: "16px 12px",
+              borderRadius: 8,
+              border: "1px dashed var(--border)",
+              textAlign: "center",
+              fontSize: 13,
+              opacity: 0.75,
+            }}
+          >
+            还没有知识库。点击上方「连接并同步」或「添加本地文件夹」开始使用。
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {sources.map(src => (
-              <div
-                key={src.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 10,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface-2, transparent)",
-                }}
-              >
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <strong>{src.name}</strong>
-                    <span className="label-chip">{src.source_kind === "llm_wiki" ? "LLM Wiki" : "本地目录"}</span>
-                    <span className="label-chip">{src.tier === "archive" ? "档案层" : "核心层"}</span>
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>
-                      有效文档 {src.doc_count} 篇 · 状态：{src.index_state}
-                    </span>
+            {sources.map(src => {
+              const st = statusLabel(src.index_state);
+              return (
+                <div
+                  key={src.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <strong>{src.name}</strong>
+                      <span style={{ fontSize: 12, color: st.color, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.color, display: "inline-block" }} />
+                        {st.text} · {src.doc_count} 篇
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        opacity: 0.65,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        marginTop: 2,
+                      }}
+                    >
+                      {src.root_path}
+                    </div>
                   </div>
-                  <div style={{ fontSize: 12, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>
-                    {src.root_path}{src.content_subdir ? `/${src.content_subdir}` : ""}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="outline-button"
+                      disabled={reindexingId === src.id}
+                      onClick={() => void handleReindex(src.id)}
+                    >
+                      {reindexingId === src.id ? "刷新中…" : "刷新"}
+                    </button>
+                    <button
+                      type="button"
+                      className="outline-button danger-button"
+                      onClick={() => void handleRemoveSource(src)}
+                    >
+                      移除
+                    </button>
                   </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={reindexingId === src.id}
-                    onClick={() => void handleReindex(src.id)}
-                  >
-                    {reindexingId === src.id ? "索引中…" : "重建索引"}
-                  </button>
-                  <button
-                    type="button"
-                    className="outline-button danger-button"
-                    onClick={() => void handleRemoveSource(src)}
-                  >
-                    移除
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
-      <div className="settings-card" style={{ padding: 14, borderRadius: 10, border: "1px solid var(--border)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-          <strong>全局常驻「个人通用习惯」</strong>
-          <span style={{ fontSize: 12, color: totalHabitBytes > habitBudget ? "var(--danger)" : "inherit" }}>
-            已占 {totalHabitBytes} / {habitBudget} 字节 ({habitPercent}%)
-          </span>
+      {/* 2. 个人偏好笔记（可选） */}
+      <div style={{ padding: 16, borderRadius: 10, border: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <strong style={{ fontSize: 14 }}>个人偏好笔记（可选）</strong>
+          {habits.length > 0 && (
+            <span style={{ fontSize: 12, opacity: 0.7 }}>
+              已选 {habits.length} 篇{totalHabitBytes > habitBudget ? "（超出推荐长度，将自动精简）" : ""}
+            </span>
+          )}
         </div>
-        <div style={{ height: 6, borderRadius: 999, background: "var(--border)", overflow: "hidden", marginBottom: 8 }}>
-          <div
-            style={{
-              height: "100%",
-              width: `${habitPercent}%`,
-              background: totalHabitBytes > habitBudget ? "var(--danger)" : "var(--accent)",
-              transition: "width 150ms ease",
-            }}
-          />
-        </div>
-        <p className="field-help" style={{ marginBottom: 10 }}>
-          仅勾选跨业务通用的汇报结构、小数精度或禁用词规范（如 owner-working-habits.md），切勿混入具体业务政策。
+        <p className="field-help" style={{ margin: "0 0 10px" }}>
+          选 1～2 篇写有你汇报风格或格式要求的笔记，AI 每次对话都会记住；业务资料无需在此勾选。
         </p>
 
         {habits.length > 0 && (
@@ -427,14 +375,14 @@ export default function WikiSettingsPanel({ onError }: Props) {
               <span
                 key={`${h.source_id}:${h.rel_path}`}
                 className="label-chip"
-                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px" }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", fontSize: 12 }}
               >
-                <span>{h.title} ({h.size_bytes}B)</span>
+                <span>{h.title}</span>
                 <button
                   type="button"
-                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, color: "inherit" }}
+                  style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, color: "inherit", fontSize: 14, lineHeight: 1 }}
                   onClick={() => void toggleHabit(h.source_id, h.rel_path, h.title, false)}
-                  title="取消常驻"
+                  title="移除"
                 >
                   ×
                 </button>
@@ -447,49 +395,130 @@ export default function WikiSettingsPanel({ onError }: Props) {
           className="text-input"
           value={habitQuery}
           onChange={e => setHabitQuery(e.target.value)}
-          placeholder="搜索已索引文档以勾选为常驻个人习惯…"
+          placeholder={sources.length ? "输入关键词搜索笔记添加（如：习惯、风格）…" : "请先在上方添加知识库"}
           disabled={!sources.length}
         />
-        {sources.length > 0 && (
+
+        {habitQuery.trim().length > 0 && (
           <div style={{ marginTop: 8, maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
             {searchingHabits ? (
               <span className="field-help">搜索中…</span>
+            ) : !habitCandidates.length ? (
+              <span className="field-help">未找到匹配的笔记。</span>
             ) : (
               habitCandidates.map(hit => {
                 const key = `${hit.source_id}:${hit.rel_path}`;
                 const checked = habitKeySet.has(key);
                 return (
-                  <label
+                  <button
                     key={key}
+                    type="button"
+                    onClick={() => void toggleHabit(hit.source_id, hit.rel_path, hit.title, !checked)}
                     style={{
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
                       gap: 8,
-                      padding: "6px 8px",
+                      padding: "7px 10px",
                       borderRadius: 6,
                       cursor: "pointer",
-                      border: "1px solid var(--border)",
+                      textAlign: "left",
+                      border: checked ? "1px solid var(--accent)" : "1px solid var(--border)",
+                      background: "transparent",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={e => void toggleHabit(hit.source_id, hit.rel_path, hit.title, e.target.checked)}
-                      />
-                      <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <strong>{hit.title}</strong> <span style={{ opacity: 0.65 }}>· {hit.rel_path}</span>
-                      </span>
-                    </div>
-                    <span className="label-chip">{hit.source_name}</span>
-                  </label>
+                    <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <strong>{hit.title}</strong>
+                      <span style={{ opacity: 0.6 }}> · {hit.rel_path}</span>
+                    </span>
+                    <span style={{ fontSize: 12, opacity: 0.75, flexShrink: 0 }}>
+                      {checked ? "已添加 ✓" : "+ 添加"}
+                    </span>
+                  </button>
                 );
               })
             )}
           </div>
         )}
       </div>
+
+      {/* 3. 高级设置（默认折叠） */}
+      <details style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid var(--border)" }}>
+        <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 500, userSelect: "none" }}>
+          高级设置（服务地址、上下文长度上限、目录分层）
+        </summary>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div>
+              <label className="field-label" htmlFor="wiki-base-url">LLM Wiki 本机地址</label>
+              <input
+                id="wiki-base-url"
+                className="text-input"
+                value={settings.base_url}
+                onChange={e => setSettings({ ...settings, base_url: e.target.value })}
+                placeholder="http://127.0.0.1:19828"
+              />
+            </div>
+            <div>
+              <label className="field-label" htmlFor="wiki-folder-tier">新添本地目录层级</label>
+              <select
+                id="wiki-folder-tier"
+                className="text-input"
+                value={newFolderTier}
+                onChange={e => setNewFolderTier(e.target.value as "core_wiki" | "archive")}
+              >
+                <option value="core_wiki">核心业务规则（默认）</option>
+                <option value="archive">海量历史档案（仅显式开启时检索）</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <div>
+              <label className="field-label" htmlFor="wiki-habits-budget">偏好笔记上限 (字节)</label>
+              <input
+                id="wiki-habits-budget"
+                type="number"
+                min={200}
+                max={12000}
+                className="text-input"
+                value={settings.habits_budget_bytes}
+                onChange={e => setSettings({ ...settings, habits_budget_bytes: Number(e.target.value) || 1800 })}
+              />
+            </div>
+            <div>
+              <label className="field-label" htmlFor="wiki-l0-budget">目录概览上限 (字节)</label>
+              <input
+                id="wiki-l0-budget"
+                type="number"
+                min={200}
+                max={4000}
+                className="text-input"
+                value={settings.l0_map_budget_bytes}
+                onChange={e => setSettings({ ...settings, l0_map_budget_bytes: Number(e.target.value) || 800 })}
+              />
+            </div>
+            <div>
+              <label className="field-label" htmlFor="wiki-read-budget">单篇精读上限 (字节)</label>
+              <input
+                id="wiki-read-budget"
+                type="number"
+                min={1000}
+                max={24000}
+                className="text-input"
+                value={settings.read_budget_bytes}
+                onChange={e => setSettings({ ...settings, read_budget_bytes: Number(e.target.value) || 6000 })}
+              />
+            </div>
+          </div>
+
+          <div>
+            <button type="button" className="outline-button" disabled={savingAdvanced} onClick={() => void handleSaveAdvanced()}>
+              {savingAdvanced ? "保存中…" : "保存高级设置"}
+            </button>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

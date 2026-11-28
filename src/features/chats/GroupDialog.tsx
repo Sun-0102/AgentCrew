@@ -81,17 +81,17 @@ export default function GroupDialog({ existing, initialDelete = false, projects,
       <p className="field-help">不写 @ 时群内成员都能收到消息；收到具体任务后协商分工。@ 谁就只交给谁。</p>
       <label className="field-label" htmlFor="group-project">关联项目 <span>可选</span></label><select id="group-project" className="text-input" value={projectId} onChange={e => setProjectId(e.target.value)}><option value="">不关联项目，使用群专用目录</option>{existing?.project_id && !projects.some(p => p.id === existing.project_id) && <option value={existing.project_id}>原关联项目（请检查项目列表）</option>}{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
       {!projects.length && <p className="field-help">先在“项目空间”添加本地项目，再回来选择。</p>}
-      <label className="field-label" htmlFor="group-wiki">关联业务知识库 <span>可选</span></label>
+      <label className="field-label" htmlFor="group-wiki">关联知识库 <span>可选</span></label>
       <select
         id="group-wiki"
         className="text-input"
         value={wikiSourceId}
         onChange={e => { setWikiSourceId(e.target.value); setWikiDomain(""); }}
       >
-        <option value="">不挂载业务知识库（零业务上下文污染）</option>
+        <option value="">不关联知识库</option>
         {wikiSources.map(s => (
           <option key={s.id} value={s.id}>
-            {s.name}（{s.doc_count} 篇 · {s.tier === "archive" ? "档案层" : "核心层"}）
+            {s.name}（{s.doc_count} 篇）
           </option>
         ))}
       </select>
@@ -103,7 +103,7 @@ export default function GroupDialog({ existing, initialDelete = false, projects,
             value={wikiDomain}
             onChange={e => setWikiDomain(e.target.value)}
           >
-            <option value="">全部一级目录（物理隔离其他知识源）</option>
+            <option value="">使用全部目录</option>
             {selectedWikiSource.domains.map(d => (
               <option key={d.domain} value={d.domain}>
                 仅限 {d.domain}/ ({d.count} 篇)
@@ -116,11 +116,11 @@ export default function GroupDialog({ existing, initialDelete = false, projects,
               checked={wikiIncludeArchives}
               onChange={e => setWikiIncludeArchives(e.target.checked)}
             />
-            <span>允许检索档案层</span>
+            <span>包含历史档案</span>
           </label>
         </div>
       )}
-      {!wikiSources.length && <p className="field-help">可在「工作台设置 ➔ 知识库」中接入 LLM Wiki 或本地 Markdown 目录。</p>}
+      {!wikiSources.length && <p className="field-help">可在「工作台设置 ➔ 知识库」中添加本地文件夹或同步 LLM Wiki。</p>}
       {existing && projectId !== (existing.project_id ?? "") && <p className="field-help">保存后保留本群全部聊天记录，后续任务改在新目录执行。两位 Agent 会使用新的执行会话；旧文件留在原目录，需要旧任务内容时可引用群消息。运行中或暂停的协作请先结束或取消。</p>}
       {error && <div className="inline-error" role="alert">{error}</div>}
       <div className="dialog-footer">{existing ? <button type="button" className="outline-button danger-button" disabled={busy} onClick={() => { setConfirmDelete(true); setError(null); }}>删除群</button> : <span>你也会自动加入群聊</span>}<button className="primary" disabled={busy || !name.trim() || !members.length} type="submit">{saving ? "正在保存…" : existing ? "保存" : "创建群聊"}<Icon name="right" size={16} /></button></div>

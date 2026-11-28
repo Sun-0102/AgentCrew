@@ -406,6 +406,7 @@ fn local_http_request(
     );
     if !api_token.trim().is_empty() {
         req.push_str(&format!("Authorization: Bearer {}\r\n", api_token.trim()));
+        req.push_str(&format!("X-LLM-Wiki-Token: {}\r\n", api_token.trim()));
     }
     if !payload.is_empty() || method == "POST" {
         req.push_str("Content-Type: application/json\r\n");
@@ -482,6 +483,7 @@ fn parse_remote_projects(value: &Value) -> Vec<RemoteWikiProject> {
         let id = item
             .get("id")
             .or_else(|| item.get("project_id"))
+            .or_else(|| item.get("projectId"))
             .or_else(|| item.get("slug"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -489,8 +491,10 @@ fn parse_remote_projects(value: &Value) -> Vec<RemoteWikiProject> {
             .to_owned();
         let root_path = item
             .get("root_path")
+            .or_else(|| item.get("rootPath"))
             .or_else(|| item.get("path"))
             .or_else(|| item.get("workspace_path"))
+            .or_else(|| item.get("workspacePath"))
             .or_else(|| item.get("dir"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -553,27 +557,48 @@ pub fn test_connection(base_url: &str, api_token: &str) -> WikiConnectionTest {
             let version = serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|v| v.get("version").and_then(|x| x.as_str()).map(str::to_owned));
-            let projects = match local_http_request(
+            let projects_resp = local_http_request(
                 "GET",
                 &base,
                 "/api/v1/projects",
                 api_token,
                 None,
                 3000,
-            ) {
+            );
+            match projects_resp {
+                Ok((401 | 403, _)) => WikiConnectionTest {
+                    ok: false,
+                    base_url: base,
+                    message: "本机 LLM Wiki 已开启鉴权，请先填写 API Token 后再同步。".into(),
+                    version,
+                    projects: Vec::new(),
+                },
                 Ok((p_status, p_body)) if (200..300).contains(&p_status) => {
-                    serde_json::from_str::<Value>(&p_body)
+                    let projects = serde_json::from_str::<Value>(&p_body)
                         .map(|v| parse_remote_projects(&v))
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    WikiConnectionTest {
+                        ok: true,
+                        base_url: base,
+                        message: format!("已连接本机 LLM Wiki，发现 {} 个项目。", projects.len()),
+                        version,
+                        projects,
+                    }
                 }
-                _ => Vec::new(),
-            };
-            WikiConnectionTest {
-                ok: true,
-                base_url: base,
-                message: format!("已连接本机 LLM Wiki，发现 {} 个项目。", projects.len()),
-                version,
-                projects,
+                Ok((p_status, _)) => WikiConnectionTest {
+                    ok: false,
+                    base_url: base,
+                    message: format!("读取项目列表失败（HTTP {p_status}）。"),
+                    version,
+                    projects: Vec::new(),
+                },
+                Err(err) => WikiConnectionTest {
+                    ok: false,
+                    base_url: base,
+                    message: format!("读取项目列表失败：{err}"),
+                    version,
+                    projects: Vec::new(),
+                },
             }
         }
     }
